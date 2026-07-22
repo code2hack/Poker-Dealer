@@ -15,7 +15,7 @@ Resolve every remaining product, architecture, security, and hardware-dependent 
 
 ## Decisions so far
 
-_None yet._
+- [Choose the official Rokid SDK route for RG-glasses and Fold6](issues/01-choose-official-rokid-sdk-route.md) — Select the current Glass3 Enterprise phone/glasses SDK pair and vendor sample; legacy CXR-M is not an extra dependency.
 
 ## Not yet specified
 
@@ -32,4 +32,3 @@ _None yet._
 - Adding non-tmux conversation connectors or a cloud backend.
 - Reverse-engineering proprietary Bluetooth protocols or undocumented Rokid APIs.
 - Replacing full text with generated summaries.
-
