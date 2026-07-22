@@ -1,7 +1,7 @@
 # Choose the official Rokid SDK route for RG-glasses and Fold6
 
 Type: research
-Status: open
+Status: claimed
 
 ## Question
 
@@ -10,4 +10,3 @@ From current first-party Rokid documentation and distributions, where and under 
 The answer must name the official download or access path, identify the artifacts/sample projects to request, distinguish public facts from access-gated facts, and recommend the supported mobile/glasses adapter pair without inventing API names.
 
 ## Comments
-
