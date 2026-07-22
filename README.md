@@ -1,0 +1,62 @@
+# Poker–Dealer
+
+Poker–Dealer is a private wearable client for selected tmux panes. `SPEC.md` is the normative implementation contract.
+
+The repository is currently at **M0 complete / M1 started**:
+
+- `apps/dealer` is a native Compose mock companion app.
+- `apps/poker` is a mock-flavored Compose HUD app with no proprietary SDK dependency.
+- `shared/protocol` owns protocol envelopes, frame-safe UTF-8 chunking, and the `PokerTransport` interface.
+- `shared/domain` owns cards, conversations, policies, revision ordering, and lossless card splitting.
+- `shared/testing` supplies the loopback transport and a 20,000+ character fixture card.
+- `bridge` is the Rust bridge workspace. Its non-mutating `doctor` command is the first M1 slice; network serving and pairing intentionally remain disabled until their security implementation exists.
+
+No Rokid artifacts, credentials, or invented vendor APIs are present.
+
+## Build and test
+
+Requirements:
+
+- JDK 21 (the project emits Java 17-compatible shared bytecode)
+- Android SDK platform 35
+- stable Rust 1.85 or newer with `rustfmt` and `clippy`
+- tmux 3.2 or newer for bridge diagnostics
+
+Run every local gate:
+
+```sh
+./tooling/check.sh
+```
+
+The equivalent portable commands are:
+
+```sh
+./gradlew test lint
+cargo fmt --check --manifest-path bridge/Cargo.toml
+cargo clippy --manifest-path bridge/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path bridge/Cargo.toml
+```
+
+On ARM64 Termux, install the native `aapt2` package. `tooling/check.sh` automatically supplies its path to Gradle because Google's Maven AAPT2 binary targets desktop Linux x86-64.
+
+Build the two developer APKs with:
+
+```sh
+./gradlew :apps:dealer:assembleDebug :apps:poker:assembleMockDebug
+```
+
+The Poker app opens directly into the long-card reader. Its logical lines are virtualized by Compose's lazy list and the complete fixture remains in the shared card model.
+
+## Bridge diagnostics
+
+The initial read-only M1 diagnostic invokes tmux directly with an argument vector:
+
+```sh
+cargo run --manifest-path bridge/Cargo.toml -- doctor
+```
+
+It validates the tmux version and prints a JSON report. It never modifies a pane. `serve`, `pair`, and `list-servers` fail closed until their M1 implementations are complete.
+
+## Proprietary SDKs
+
+The default build is deliberately independent of Rokid SDK artifacts. A future `rokid` target will obtain local artifact paths and credentials through ignored `rokid.properties` or Gradle properties after the M5 capability spike.
