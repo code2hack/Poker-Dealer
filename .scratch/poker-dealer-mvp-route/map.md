@@ -19,12 +19,8 @@ Resolve every remaining product, architecture, security, and hardware-dependent 
 
 ## Not yet specified
 
-- Exact CXR data-channel APIs, packaging constraints, callback threading, ordering, acknowledgement, reliable frame size, and reconnect behavior. These become precise after the supported SDK route and artifacts are known.
-- Exact Poker module structure and minimum SDK for the API 32 glasses. This depends on the official CXR-S sample rather than the existing API 33 mock target.
-- Exact microphone transport, native ASR availability, PCM format, and fallback recognizer. These depend on the official glasses/mobile SDK capabilities.
-- Exact function-button, touch-panel, gesture, and ring callback semantics. These depend on both the chosen MVP devices and executable SDK samples.
-- Local installation, signing, authorization, suspend/resume, and release workflow for Poker. These depend on the vendor sample and capability spikes.
 - End-to-end acceptance sequencing and remaining milestone order after the transport, audio, input, HUD, and two-host topology decisions are resolved.
+- Any product-level specification amendment that becomes unavoidable if the documented Glass3 Enterprise pair cannot satisfy the required private transport, audio, lifecycle, or input semantics on this firmware.
 
 ## Out of scope
 
