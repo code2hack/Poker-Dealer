@@ -1,7 +1,7 @@
 # Obtain and stage the official Rokid SDK artifacts
 
 Type: task
-Status: open
+Status: claimed
 Blocked by: 01
 
 ## Question
