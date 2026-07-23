@@ -78,14 +78,27 @@ the staged sample or binaries based only on this metadata; obtain explicit
 vendor terms before shipping them, and review every transitive dependency's
 license separately. Local protected use is the only assumption made here.
 
-## Build preflight
+## Build verification
 
-Both vendor Gradle 8.6 projects reached Android task dependency calculation
-using the Termux-native AAPT2 override. They did not compile because this host
-has Android platform 35 but lacks the required Android platform 34 and Build
-Tools 34.0.0, and the corresponding SDK licenses have not been accepted. The
-glasses checkout also carries a stale macOS `sdk.dir` in `local.properties`.
+The Android SDK license was accepted and Android command-line tools 22.0,
+Platform API 34, and Build Tools 34.0.0 were installed under
+`<home>/android-sdk`. SDK `aapt`, `aapt2`, `aidl`, `zipalign`, and `adb` were
+adapted to native Termux AArch64 executables; their original x86-64 executables
+remain beside them with `.x86_64` suffixes.
 
-This is a host-toolchain prerequisite, not evidence that either Rokid artifact
-is unavailable. No APK was built, installed, or deployed, and no device state
-was changed.
+Both official Gradle 8.6 projects then completed debug builds:
+
+| Side | Result | Protected output | Bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| RG-glasses | 38 tasks, 3m52s | `<repo>/.local/rokid/glass3sdkdemo/glassdemo/app/build/outputs/apk/debug/app-debug.apk` | 47,867,026 | `cca6b4273eefa6edd40a5922d023c264bbac388b283b98338d3efea51d393529` |
+| Fold6 / phone | 38 tasks, 6m35s | `<repo>/.local/rokid/glass3sdkdemo/glass3sdkphonedemo/app/build/outputs/apk/debug/app-debug.apk` | 307,698,039 | `313e331dcbbf4ef3b0bce96d3d434034ceaf67c1ec56b1c4b690850605efffe5` |
+
+Local verification confirmed package IDs `com.rokid.glesse` and
+`com.rokid.phone`. Both APKs pass `apksigner verify` with APK Signature Scheme
+v2 and the same local Android debug certificate. The binaries remain
+permission-restricted and git-ignored.
+
+No APK has been installed. A USB session briefly identified the RG-glasses
+after the builds but disconnected before package inspection; the previously
+recorded hotspot endpoint accepts TCP connections but currently remains
+`offline` to ADB. No device state was changed.
