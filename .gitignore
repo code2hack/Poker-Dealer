@@ -4,6 +4,7 @@
 *.iml
 local.properties
 rokid.properties
+.local/rokid/
 *.jks
 *.keystore
 bridge/target/

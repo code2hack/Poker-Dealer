@@ -16,6 +16,7 @@ Resolve every remaining product, architecture, security, and hardware-dependent 
 ## Decisions so far
 
 - [Choose the official Rokid SDK route for RG-glasses and Fold6](issues/01-choose-official-rokid-sdk-route.md) — Select the current Glass3 Enterprise phone/glasses SDK pair and vendor sample; legacy CXR-M is not an extra dependency.
+- [Obtain and stage the official Rokid SDK artifacts](issues/02-obtain-and-stage-rokid-sdk-artifacts.md) — Public artifacts and the linked sample are staged locally; core routing has no supplied API key, while online speech and possible device-side developer authorization remain vendor/hardware concerns.
 
 ## Not yet specified
 
