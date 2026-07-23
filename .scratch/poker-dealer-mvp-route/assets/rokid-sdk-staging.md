@@ -98,7 +98,12 @@ Local verification confirmed package IDs `com.rokid.glesse` and
 v2 and the same local Android debug certificate. The binaries remain
 permission-restricted and git-ignored.
 
-No APK has been installed. A USB session briefly identified the RG-glasses
-after the builds but disconnected before package inspection; the previously
-recorded hotspot endpoint accepts TCP connections but currently remains
-`offline` to ADB. No device state was changed.
+The glasses APK was installed successfully over authenticated hotspot ADB.
+Package-manager verification reports `com.rokid.glesse` version `1.0`
+(`versionCode` 1, minimum API 29, target API 34), with
+`com.rokid.glass.HomeActivity` resolvable as its entry activity.
+
+The Fold6 phone APK was handed to Android's interactive package installer from
+Termux. Installation still requires user confirmation in the Fold6 UI and
+cannot be considered verified until that confirmation or a package-manager
+check is available.
