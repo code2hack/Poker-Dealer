@@ -15,13 +15,18 @@ Resolve every remaining product, architecture, security, and hardware-dependent 
 
 ## Decisions so far
 
-- [Choose the official Rokid SDK route for RG-glasses and Fold6](issues/01-choose-official-rokid-sdk-route.md) — Select the current Glass3 Enterprise phone/glasses SDK pair and vendor sample; legacy CXR-M is not an extra dependency.
-- [Obtain and stage the official Rokid SDK artifacts](issues/02-obtain-and-stage-rokid-sdk-artifacts.md) — Public artifacts and the linked sample are staged locally; core routing has no supplied API key, while online speech and possible device-side developer authorization remain vendor/hardware concerns.
+- [Choose the official Rokid SDK route for RG-glasses and Fold6](issues/01-choose-official-rokid-sdk-route.md) — Real-hardware evidence supersedes the Enterprise recommendation: keep the current firmware and use guide-matched CXR-S ↔ CXR-M. CXR-M is required; CXR-L is not.
+- [Obtain and stage the official Rokid SDK artifacts](issues/02-obtain-and-stage-rokid-sdk-artifacts.md) — The Enterprise artifacts remain staged as historical evidence, but the route is rejected on this firmware because its required security system service is absent.
+
+## Active next step
+
+- [Stage and authorize the legacy CXR compatibility probe](issues/11-stage-and-authorize-legacy-cxr-probe.md) — Public artifacts and the sanitized phone sample are staged, and both credential-free compile probes build. Runtime is waiting on the user's Rokid client secret and SN-bound `.lc` file.
+- [Prove the Dealer↔Poker data channel and characterize its limits](issues/03-prove-data-channel-and-limits.md) — Run the authorized CXR-M ↔ CXR-S `hello`/`ack` exchange, then measure lifecycle and transport semantics.
 
 ## Not yet specified
 
 - End-to-end acceptance sequencing and remaining milestone order after the transport, audio, input, HUD, and two-host topology decisions are resolved.
-- Any product-level specification amendment that becomes unavoidable if the documented Glass3 Enterprise pair cannot satisfy the required private transport, audio, lifecycle, or input semantics on this firmware.
+- Any product-level specification amendment that becomes unavoidable if the documented legacy CXR pair cannot satisfy the required private transport, audio, lifecycle, or input semantics on this firmware.
 
 ## Out of scope
 

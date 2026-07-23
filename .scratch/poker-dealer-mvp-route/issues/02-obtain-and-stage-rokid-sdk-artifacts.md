@@ -3,6 +3,7 @@
 Type: task
 Status: resolved
 Blocked by: 01
+Route status: superseded on 2026-07-23
 
 ## Question
 
@@ -21,3 +22,8 @@ serial-based binding was found. Device-side developer authorization is
 undocumented and must be tested by the downstream hardware probe. Maven POMs
 label the selected AARs Apache-2.0, but the sample and AARs contain no bundled
 license grant or notice, so redistribution remains vendor-dependent.
+
+The staging result remains valid historical evidence, but this is no longer
+the active device route. The real glasses lack the Enterprise security system
+service required by that SDK. Active legacy staging continues in
+[issue 11](11-stage-and-authorize-legacy-cxr-probe.md).

@@ -13,4 +13,23 @@ The answer must name the official download or access path, identify the artifact
 
 ## Answer
 
-[Rokid SDK route for the Fold6 and RG-glasses](../research/rokid-sdk-route.md) — Use the current public Glass3 Enterprise pair (`phone.sdk:2.2.0-E` on Fold6 and `glass3.open.sdk:2.2.0-E` on RG-glasses) and its two-ended `glass3sdkdemo`; do not add legacy CXR-M or CXR-L. CXR-M is required only if deliberately falling back to legacy CXR-S. Exact firmware `1.22.009` compatibility, CXR-L samples, and redistribution terms remain vendor-confirmation/probe items.
+[Official legacy CXR-S ↔ CXR-M route](../research/cxr-legacy-route.md) —
+Use the guide-matched legacy pair for the first real-hardware probe:
+`client-m:1.1.0` on the Fold6 and the checksum-pinned CXR-S unique-snapshot
+AAR `1.0-20250519.061355-45` on the glasses. **CXR-M is required** for this
+route; CXR-L is not part of the direct Android phone↔glasses channel. Keep the
+firmware-resident `com.rokid.cxrservice` and do not install or replace a system
+APK.
+
+This supersedes the original
+[public-document recommendation](../research/rokid-sdk-route.md) to use the
+Glass3 Enterprise pair. Two deterministic runs of the official glasses demo
+showed `bindSecurityService = false`; bytecode proved that SDK requires
+`com.rokid.security.system.server.SecurityCoreService`, which is absent on this
+firmware, while the legacy CXR system service is installed and running. The
+user selected the no-firmware-change legacy option on 2026-07-23.
+
+Runtime compatibility is still probe-gated because Rokid publishes no matrix
+for firmware `1.22.009`, CXR runtime `1.135`, and the SDK versions. The Fold6
+connection also requires the user's verified Rokid developer credential and
+per-device `.lc` authorization file.
