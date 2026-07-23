@@ -103,7 +103,9 @@ Package-manager verification reports `com.rokid.glesse` version `1.0`
 (`versionCode` 1, minimum API 29, target API 34), with
 `com.rokid.glass.HomeActivity` resolvable as its entry activity.
 
-The Fold6 phone APK was handed to Android's interactive package installer from
-Termux. Installation still requires user confirmation in the Fold6 UI and
-cannot be considered verified until that confirmation or a package-manager
-check is available.
+The Fold6 phone APK was installed interactively from the Owner profile's
+`Download/` directory. A user-0 package-manager check confirms
+`com.rokid.phone` version `1.0`. The normal `termux-open` handoff had been
+suppressed because Termux runs as Android user 0 while a different Android user
+was in the foreground; opening the verified shared-storage copy from the
+Owner-profile file manager avoided that cross-user UI boundary.
