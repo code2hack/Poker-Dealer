@@ -19,6 +19,9 @@ rootProject.name = "Poker-Dealer"
 include(
     ":apps:dealer",
     ":apps:poker",
+    ":prototypes:android-hotspot:core",
+    ":prototypes:android-hotspot:dealer",
+    ":prototypes:android-hotspot:poker",
     ":shared:protocol",
     ":shared:domain",
     ":shared:testing",
