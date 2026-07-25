@@ -1,7 +1,7 @@
 # Stage and authorize the legacy CXR compatibility probe
 
 Type: task
-Status: open
+Status: superseded
 Blocked by: 01
 
 ## Question
@@ -33,8 +33,12 @@ may enter Git, logs, or committed build configuration.
 - A protected, ignored handoff location is prepared at
   `.local/rokid/cxr-auth/`; credential contents must never be printed.
 - The installed `com.rokid.cxrservice` is running and must remain untouched.
-- Remaining external input: a verified Rokid developer-account client secret
-  and a `.lc` authorization file downloaded after binding this glasses serial
-  at `https://ar.rokid.com`.
+- No external authorization input remains. Do not obtain, stage, or bind new
+  CXR credentials for Poker–Dealer.
 
 ## Answer
+
+No authorization will be obtained and no CXR probe will be installed. The
+staged artifacts remain protected historical evidence only. `SPEC.md`
+revision 2 selects the Android-only hotspot transport backed by prototype
+commit `9d36ed1`.

@@ -2,13 +2,18 @@
 
 Research date: 2026-07-23
 
+> **Superseded on 2026-07-25.** This document preserves historical CXR
+> research and staged-probe notes only; it is not an implementation route.
+> `SPEC.md` revision 2 selects public Android TLS/TCP over the Fold6 hotspot,
+> backed by `prototype/android-hotspot-transport` commit `9d36ed1`.
+
 Scope: first-party Rokid documentation, Rokid's public Maven/Nexus repository,
 and the vendor-distributed sample archive. No device identifier, credential, or
 authorization-file content is recorded here.
 
-## Finding
+## Superseded historical finding
 
-For the selected legacy route, **CXR-M is required on the Fold6** and CXR-S is
+For the then-evaluated legacy route, **CXR-M is required on the Fold6** and CXR-S is
 the bridge library used by the Poker app on the glasses. The only
 documentation-and-sample pair that Rokid currently publishes as a coherent
 recipe is:
@@ -223,5 +228,6 @@ compile-only phone probe can authenticate.
 - Release and redistribution terms for the proprietary AARs and sample; public
   readability alone is not a redistribution grant.
 
-Until Rokid answers the version-matrix questions, the reproducible first probe
-is the documented `client-m:1.1.0` plus exact CXR-S unique snapshot above.
+This probe is no longer planned. If a future explicit specification amendment
+reopens the route, the reproducible historical pair is the documented
+`client-m:1.1.0` plus exact CXR-S unique snapshot above.

@@ -11,7 +11,9 @@ The repository is currently at **M0 complete / M1 started**:
 - `shared/testing` supplies the loopback transport and a 20,000+ character fixture card.
 - `bridge` is the Rust bridge workspace. Its non-mutating `doctor` command is the first M1 slice; network serving and pairing intentionally remain disabled until their security implementation exists.
 
-No Rokid artifacts, credentials, or invented vendor APIs are present.
+No CXR/Rokid transport artifacts, credentials, or invented vendor APIs are
+present. The production Dealer↔Poker path is ordinary authenticated Android
+TLS/TCP over the Fold6 hotspot, with Dealer initiating a connection to Poker.
 
 ## Build and test
 
@@ -57,6 +59,10 @@ cargo run --manifest-path bridge/Cargo.toml -- doctor
 
 It validates the tmux version and prints a JSON report. It never modifies a pane. `serve`, `pair`, and `list-servers` fail closed until their M1 implementations are complete.
 
-## Proprietary SDKs
+## Device transport
 
-The default build is deliberately independent of Rokid SDK artifacts. A future `rokid` target will obtain local artifact paths and credentials through ignored `rokid.properties` or Gradle properties after the M5 capability spike.
+Dealer and Poker MUST build without CXR-M, CXR-L, CXR-S, or a proprietary
+companion data channel. The validated topology, security boundary, reliability
+requirements, and hardware acceptance matrix are normative in `SPEC.md`
+revision 2. Raw prototype evidence is preserved on
+`prototype/android-hotspot-transport` at commit `9d36ed1`.

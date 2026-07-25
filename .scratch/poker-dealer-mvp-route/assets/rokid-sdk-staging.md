@@ -2,6 +2,11 @@
 
 Verified: 2026-07-23
 
+> **Superseded on 2026-07-25.** This document preserves a historical,
+> protected vendor-SDK inventory only; it is not an implementation route and
+> no pending runtime probe should be run. `SPEC.md` revision 2 selects public
+> Android TLS/TCP over the Fold6 hotspot.
+
 ## Protected local staging
 
 - Vendor sample: `<repo>/.local/rokid/glass3sdkdemo`
@@ -49,9 +54,10 @@ Rokid and third-party transitive graph.
 ## Identity, credentials, and device association
 
 - Repository and artifact download: no authentication is configured or needed.
-- Core app-to-app route: the phone registers `GlassSample`; the glasses bind the
-  preinstalled `com.rokid.security.system.server` service and register the same
-  client ID. This matched client ID is routing configuration, not a secret.
+- Historical app-to-app route: the phone sample registers `GlassSample`; the
+  glasses sample attempts to bind the preinstalled
+  `com.rokid.security.system.server` service and register the same client ID.
+  This matched client ID is routing configuration, not a secret.
 - Online services: the phone sample passes `UserAuthInfo("", "")`. Its source
   explicitly says online STT/TTS needs an access key and secret key obtained
   from Rokid business support. Translation is disabled in the sample.
@@ -64,10 +70,10 @@ Rokid and third-party transitive graph.
 - No login, developer-portal token, manifest API key, certificate pin,
   device-serial whitelist, or account-binding flow appears in the sample.
 - The glasses source can report that a system service or “developer-version
-  authorization” is missing. The public sample does not document provisioning
-  or establish whether the current RG-glasses firmware is already authorized.
-  Runtime initialization with blank `UserAuthInfo` therefore remains a
-  hardware-probe question.
+  authorization” is missing. The public sample does not document provisioning.
+  Later hardware runs found the required security system service absent on
+  these glasses, and the route was superseded; runtime initialization is no
+  longer a pending Poker–Dealer probe.
 
 ## Licensing and redistribution constraint
 

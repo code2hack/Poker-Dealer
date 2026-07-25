@@ -2,6 +2,7 @@
 
 Type: research
 Status: resolved
+Route status: superseded on 2026-07-25 by the Android hotspot decision
 
 ## Question
 
@@ -13,13 +14,18 @@ The answer must name the official download or access path, identify the artifact
 
 ## Answer
 
+Historical answer only. The normative route is now the Android-only
+Fold6/Dealer client → RG-glasses/Poker listener topology in `SPEC.md` revision
+2, backed by prototype commit `9d36ed1`. No CXR artifact is a production
+dependency.
+
 [Official legacy CXR-S ↔ CXR-M route](../research/cxr-legacy-route.md) —
-Use the guide-matched legacy pair for the first real-hardware probe:
+At that time, the guide-matched legacy pair selected for a planned
+real-hardware probe was
 `client-m:1.1.0` on the Fold6 and the checksum-pinned CXR-S unique-snapshot
 AAR `1.0-20250519.061355-45` on the glasses. **CXR-M is required** for this
-route; CXR-L is not part of the direct Android phone↔glasses channel. Keep the
-firmware-resident `com.rokid.cxrservice` and do not install or replace a system
-APK.
+historical route; CXR-L was not part of its direct Android phone↔glasses
+channel. The firmware-resident `com.rokid.cxrservice` was left unchanged.
 
 This supersedes the original
 [public-document recommendation](../research/rokid-sdk-route.md) to use the
@@ -29,7 +35,8 @@ showed `bindSecurityService = false`; bytecode proved that SDK requires
 firmware, while the legacy CXR system service is installed and running. The
 user selected the no-firmware-change legacy option on 2026-07-23.
 
-Runtime compatibility is still probe-gated because Rokid publishes no matrix
+Runtime compatibility was never proven because Rokid publishes no matrix
 for firmware `1.22.009`, CXR runtime `1.135`, and the SDK versions. The Fold6
-connection also requires the user's verified Rokid developer credential and
-per-device `.lc` authorization file.
+connection would also have required a verified Rokid developer credential and
+per-device `.lc` authorization file; no such authorization is now required or
+requested for Poker–Dealer.

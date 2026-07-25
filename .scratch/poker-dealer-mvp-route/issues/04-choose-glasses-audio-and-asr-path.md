@@ -2,12 +2,19 @@
 
 Type: prototype
 Status: open
-Blocked by: 02
+Blocked by: 10
 
 ## Question
 
-On the exact RG-glasses firmware and supported SDK route, can Poker receive microphone PCM, a vendor ASR transcript, or both; what audio/control transport is supported; and which provider priority should the MVP implement on the Fold6?
+On the exact RG-glasses firmware, can Poker capture microphone PCM through
+public Android `AudioRecord`, invoke an installed recognizer through Android
+`SpeechRecognizer`, or both; and which public-Android provider priority should
+the MVP implement?
 
-The answer must identify the visible microphone/recognizer source, failure and fallback behavior, lifecycle constraints, and the path that can meet the no-audio-retention requirement.
+The answer must identify the visible microphone/recognizer source, failure and
+fallback behavior, lifecycle constraints, and the path that can meet the
+no-audio-retention requirement. An unavailable public API capability is a
+reported limitation and does not authorize adding CXR or another proprietary
+SDK.
 
 ## Comments

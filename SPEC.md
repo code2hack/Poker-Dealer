@@ -1,10 +1,10 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 1  
-**Date:** 2026-07-21  
+**Status:** Normative implementation contract, revision 2
+**Date:** 2026-07-25
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** local Codex worker  
-**Product names:** **Poker** = Rokid HUD app; **Dealer** = Android companion app
+**Product names:** **Poker** = RG-glasses Android HUD app; **Dealer** = Android companion app
 
 This file is the single source of truth for the first production-capable version of Poker–Dealer. When code and this specification disagree, this specification wins until it is deliberately amended in the same commit as the behavior change.
 
@@ -19,7 +19,8 @@ Poker–Dealer is a private, bidirectional wearable client for selected **tmux p
 - A tmux pane that the user attaches in Dealer becomes one **conversation**.
 - Dealer connects to tmux hosts, discovers panes, receives terminal output, converts recent output into ordered message cards, persists recent history, and synchronizes those cards to Poker.
 - Poker displays one conversation at a time as a scrollable pile of recent cards.
-- Poker accepts text input through Morse code and ASR transcription using Rokid controls and supported Bluetooth HID rings.
+- Poker accepts text input through Morse code and ASR transcription using
+  Android-exposed glasses controls and supported Bluetooth HID rings.
 - Dealer routes confirmed input back to the exact tmux pane from which the conversation originated.
 - Full text is preserved. Long text is scrollable, not summarized or silently truncated.
 - Agent replies may optionally expose an explicit conclusion view, but the complete answer remains available unless the user configures conclusion-only display.
@@ -29,15 +30,30 @@ The intended topology is:
 ```text
 Termux tmux ─┐
              ├─ Poker–Dealer Bridge ── secure WebSocket ── Dealer on Android
-DGX Spark ───┘                                             │
-                                                           │ Rokid SDK transport
+DGX Spark ───┘                                      Fold6 hotspot owner
+                                                           │
+                                                           │ authenticated TLS/TCP
+                                                           │ Dealer initiates
                                                            ▼
-                                                        Poker HUD
+                                              Poker listener on RG-glasses
                                                            │
                                             button / touch / ring / microphone
                                                            │
                                                            └──────────► Dealer ─► exact tmux pane
 ```
+
+The Fold6 MUST provide the hotspot, the RG-glasses MUST join it, Poker MUST
+listen, and Dealer MUST initiate every Dealer↔Poker connection. The established
+stream is bidirectional; TCP client/server roles do not change application
+authority. Dealer remains authoritative for synchronized product state, while
+Poker remains the HUD and input endpoint.
+
+This direction is mandatory because the validated Fold6 hotspot accepts
+Fold6-initiated connections to a tethered client but blocks connections
+initiated by that client toward the hotspot host. Poker MUST NOT depend on
+opening a socket to the Fold6 gateway. ADB MAY install, launch, control
+lifecycle, and collect diagnostics, but MUST NOT carry runtime application
+traffic. No ADB forward or reverse tunnel may be part of the product path.
 
 ### 1.1 MVP definition
 
@@ -50,7 +66,9 @@ The MVP is complete only when all of the following work on real hardware:
 5. Poker can switch conversations, navigate the recent card pile, and read a 20,000-character card without semantic truncation.
 6. A live card can grow while the user reads it without forcing the viewport to the bottom.
 7. Poker can compose a reply using Morse code, review it, and send it to the selected pane.
-8. Poker can record speech from an available Rokid microphone path, show partial/final transcription, require review, and send the confirmed text to the selected pane.
+8. Poker can record speech from an available public-Android glasses microphone
+   path, show partial/final transcription, require review, and send the
+   confirmed text to the selected pane.
 9. Disconnecting and reconnecting Dealer, Poker, or a bridge causes deterministic resynchronization without duplicate cards or replies.
 10. No component exposes arbitrary shell execution over the network.
 
@@ -60,7 +78,7 @@ The MVP is complete only when all of the following work on real hardware:
 
 ### 2.1 In scope
 
-- Rokid HUD application named **Poker**.
+- RG-glasses Android HUD application named **Poker**.
 - Android companion application named **Dealer**.
 - A host-side daemon/CLI named **`poker-dealer-bridge`** for Termux and Linux.
 - Local Termux tmux servers.
@@ -71,10 +89,13 @@ The MVP is complete only when all of the following work on real hardware:
 - Optional explicit conclusion presentation for agent replies.
 - Morse input.
 - ASR transcription.
-- Rokid built-in function button and touch panel.
-- Bluetooth rings that expose standard Android/Rokid key, media-button, switch, or HID events.
+- RG-glasses built-in function button and touch panel as exposed through
+  Android input APIs.
+- Bluetooth rings that expose standard Android key, media-button, switch, or
+  HID events.
 - Secure pane discovery, output streaming, and constrained text/key input.
-- Mock transports so all non-vendor behavior can be developed and tested without Rokid hardware or proprietary SDK artifacts.
+- Ordinary Android hotspot networking for the real Dealer↔Poker transport.
+- Loopback/mock transports so protocol and domain behavior can be developed without hardware.
 
 ### 2.2 Explicitly out of scope for v1
 
@@ -89,6 +110,8 @@ The MVP is complete only when all of the following work on real hardware:
 - Generative summarization of terminal output.
 - Maintaining complete tmux scrollback forever.
 - Multi-user collaboration.
+- CXR-M, CXR-L, CXR-S, the Rokid companion data channel, or any proprietary
+  SDK dependency for Dealer↔Poker transport.
 - Publishing proprietary Rokid SDK binaries in the repository.
 
 ---
@@ -99,7 +122,7 @@ The MVP is complete only when all of the following work on real hardware:
 
 - Android companion display name: `Dealer`
 - Android package: `com.code2hack.dealer`
-- Rokid HUD display name: `Poker`
+- RG-glasses HUD display name: `Poker`
 - Poker package: `com.code2hack.poker`
 - Host bridge binary: `poker-dealer-bridge`
 - Protocol name: `poker-dealer`
@@ -115,7 +138,12 @@ The MVP is complete only when all of the following work on real hardware:
 - **Deck:** The set of attached conversations visible in Poker.
 - **Open card:** A card that may receive further content or replacement revisions.
 - **Committed card:** A card whose current turn is complete. It may still receive a correction revision.
-- **Transport:** The Dealer↔Poker communications implementation, independent of product logic.
+- **Poker transport:** The authenticated, bidirectional Dealer↔Poker
+  application link, independent of product logic.
+- **Network initiator:** Dealer on the Fold6. This is a socket role, not
+  protocol authority terminology.
+- **Network listener:** Poker on the RG-glasses. This is a socket role, not
+  server-side product authority.
 
 ### 3.3 Pane identity
 
@@ -140,7 +168,7 @@ data class PaneLocator(
 
 ---
 
-## 4. Platform and SDK constraints
+## 4. Platform and Android constraints
 
 ### 4.1 Dealer
 
@@ -152,42 +180,62 @@ Required architectural choices:
 - Kotlin coroutines and `Flow`/`StateFlow` for asynchronous state.
 - Room for recent history and attachment persistence.
 - DataStore for non-secret preferences.
-- Android Keystore-backed encryption for bridge pairing secrets and certificate pins.
+- Android Keystore-backed encryption for bridge and Poker pairing secrets and
+  certificate pins.
 - OkHttp or Ktor client for bridge WebSockets. Pick one and use it consistently.
-- A foreground service while live bridge and Rokid connections are enabled.
-- `minSdk = 33` unless a verified Rokid SDK requirement forces a higher value.
+- A foreground service while live bridge and Poker network connections are enabled.
+- `minSdk = 33`.
 - `compileSdk` and `targetSdk` MUST be pinned to the latest stable SDK installed when the project is bootstrapped; they MUST NOT use preview SDKs without a separate build flavor.
 
-Dealer MUST keep all Rokid-specific classes behind a transport interface. The core application MUST compile and run using a loopback/mock transport without Rokid SDK artifacts.
+The real `HotspotPokerTransport` MUST use an ordinary, unbound Android/Java TCP
+socket. It MUST NOT require a `ConnectivityManager` `TRANSPORT_WIFI` network
+binding: the Fold6 hotspot interface is not exposed as such a network, and the
+kernel routing table correctly selects the tether interface for a tethered
+glasses address. Dealer MUST persist a user-approved endpoint and reconnect
+without hard-coding the address observed during the prototype.
 
 ### 4.2 Poker
 
-Poker MUST follow the official Rokid YodaOS-Sprite/CXR-S sample project structure for the exact glasses firmware and SDK obtained by the user. Do not assume ordinary Android APIs are all available until verified on hardware.
+Poker MUST be an ordinary native Android application using public Android APIs.
+It MUST run on the observed RG-glasses Android 12/API 32 environment, use
+`minSdk = 28`, and keep `compileSdk` and `targetSdk` pinned to stable SDKs.
 
-Poker SHOULD use Kotlin where supported by the official sample. Shared protocol/domain code MUST remain pure Kotlin/JVM without Android UI dependencies. If the vendor build cannot consume the shared Kotlin module directly, define the protocol once as JSON Schema and generate or mirror minimal DTOs; do not fork protocol semantics.
+Poker SHOULD use Kotlin. Shared protocol/domain code MUST remain pure Kotlin/JVM
+without Android UI dependencies. Poker MUST host the authenticated transport
+listener in a user-enabled foreground service and expose listener, pairing, and
+connection state in its UI. Platform-specific HUD, input, audio, power, and
+network behavior MUST remain behind Android-facing interfaces.
 
-### 4.3 Rokid SDK selection
+### 4.3 Android hotspot transport decision
 
-The primary planned integration is:
+The production topology is fixed:
 
-- **Dealer:** Rokid **CXR-M** mobile SDK.
-- **Poker:** Rokid **CXR-S** glasses SDK.
-- **Link:** the custom data channel described by the official YodaOS-Sprite documentation.
+```text
+Fold6 / Dealer / hotspot owner / TCP client
+                  │
+                  │ authenticated TLS/TCP, bidirectional after connect
+                  ▼
+RG-glasses / Poker / hotspot client / TCP listener
+```
 
-Current public Rokid materials also list **CXR-L** for Android/iOS apps connected through the Rokid companion application. CXR-L is a contingency adapter, not core architecture.
+Normative endpoint rules:
 
-The worker MUST begin with a capability spike before binding product code to any vendor method names. The spike MUST determine and record in code/configuration:
-
-1. Exact glasses model, firmware, OS build, CXR-S version, and mobile SDK version.
-2. Whether the available mobile route is CXR-M, CXR-L, or both.
-3. Pairing and authorization lifecycle.
-4. Bidirectional custom data-channel callbacks.
-5. Maximum reliable frame size and whether ordering is guaranteed.
-6. Disconnect/reconnect callback behavior.
-7. Whether Poker can access microphone PCM, a vendor ASR transcript, or both.
-8. Which function-button, touch-panel, and gesture callbacks reach Poker.
-9. Whether standard Android `KeyEvent` events from a paired ring reach Poker.
-10. Background/suspend behavior on both devices.
+1. Poker listens on configurable TCP port `39817` by default.
+2. The endpoint MUST be configurable and persisted in both apps. The observed
+   prototype address `10.84.179.154` MUST NOT be hard-coded as a production
+   assumption.
+3. Poker MUST display its selected hotspot IPv4 address, port, and pairing
+   identity.
+4. Dealer MUST support manual endpoint entry and reconnect to the last approved
+   endpoint. Optional discovery MUST be Dealer-initiated or out-of-band, such
+   as a QR/pairing code; it MUST NOT require Poker to reach the Fold6 gateway.
+5. Device identity and pairing MUST remain stable across DHCP address changes.
+6. Poker MUST bind the production listener to the selected hotspot/Wi-Fi
+   address, authenticate before accepting application state, and rebind when
+   that address changes.
+7. The Fold6 operating system and user own hotspot enablement. Dealer MUST
+   report hotspot-disabled and endpoint-unreachable states; it MUST NOT pretend
+   to enable privileged hotspot functionality silently.
 
 The implementation MUST expose:
 
@@ -205,17 +253,48 @@ interface PokerTransport {
 Concrete implementations:
 
 - `LoopbackPokerTransport` — mandatory, used by tests and developer mode.
-- `RokidCxrMTransport` — primary real Dealer adapter.
-- `RokidCxrLTransport` — optional only if required by available SDK access.
+- `HotspotPokerTransport` — mandatory real Dealer adapter and reconnecting
+  network initiator.
 
-Poker MUST implement the matching glasses-side transport using CXR-S. No domain/UI class may import CXR-M, CXR-L, or CXR-S types.
+Poker MUST implement the matching authenticated listener using the same shared
+protocol. No domain or UI class may open sockets directly. CXR-M, CXR-L, and
+CXR-S MUST NOT be introduced as transport fallbacks without a later explicit
+`SPEC.md` amendment.
 
-### 4.4 Proprietary SDK handling
+Decision evidence is preserved on branch
+`prototype/android-hotspot-transport`, commit `9d36ed1`, in
+`prototypes/android-hotspot/RESULTS.md`. On 2026-07-25, the real Fold6 and
+RG-glasses demonstrated:
 
-- Vendor AAR/JAR/SO files, credentials, application IDs, private Maven tokens, and signing keys MUST NOT be committed.
-- Add a local, ignored `rokid.properties` or Gradle property mechanism for artifact paths and credentials.
-- CI MUST build a `mock` flavor without proprietary dependencies.
-- A real `rokid` flavor MAY be excluded from public CI but MUST have a documented local build task encoded in Gradle task names and error messages.
+- hello/ack and continuous bidirectional traffic after ADB was disconnected;
+- 5,000 application probes in each direction with zero observed application
+  gaps, duplicates, out-of-order frames, or invalid frames;
+- a deliberate socket-drop reconnect and hello/ack in approximately 392 ms;
+- glasses process restart recovery in approximately 3.9 seconds, with two
+  in-flight `lost_or_gapped` events proving reconnect alone is insufficient;
+- more than 60 seconds of glasses sleep/wake without a wake lock and without a
+  new transport error;
+- 303 seconds with the Fold6 screen locked, both prototype wake locks off, and
+  exactly 303 additional probes acknowledged without a reconnect.
+
+This evidence selects the topology. It does not claim raw radio/IP packet loss,
+which TCP retransmission hides; it covers one hardware/firmware pair; and its
+five-minute active-traffic screen-off run is not a long-idle production
+guarantee. Production acceptance still requires authentication, persistent
+replay/idempotency, process-death recovery with zero logical loss, payload
+boundary tests, and a substantially longer unattended power-policy soak.
+
+### 4.4 Android-only build boundary
+
+- Dealer and Poker release/default builds MUST compile without CXR/vendor
+  AAR, JAR, or SO artifacts, vendor credentials, private Maven tokens, or
+  companion-app authorization.
+- CI MUST build and test both ordinary Android applications and the loopback
+  transport.
+- Existing firmware services, including an installed CXR service, MUST remain
+  untouched and MUST NOT be called by Poker–Dealer.
+- Android network, input, audio, HUD, and power quirks MUST stay behind explicit
+  platform interfaces so protocol and domain code remain portable.
 
 ---
 
@@ -232,7 +311,7 @@ The worker MUST bootstrap a monorepo using this logical layout. Minor Gradle dir
 │   └── libs.versions.toml
 ├── apps/
 │   ├── dealer/                   # Android companion application
-│   └── poker/                    # Rokid HUD application
+│   └── poker/                    # Android HUD application for RG-glasses
 ├── shared/
 │   ├── protocol/                 # pure Kotlin DTOs, codecs, sequencing, chunking
 │   ├── domain/                   # pure Kotlin cards/conversations/input state
@@ -312,7 +391,8 @@ The bridge MUST compile with stable Rust and pass `rustfmt`, `clippy -D warnings
 │   └── foreground connection service                          │
 └───────────────────────────────┬──────────────────────────────┘
                                 │
-                                │ Poker Protocol v1 over Rokid transport
+                                │ Poker Protocol v1 over authenticated TLS/TCP
+                                │ Dealer initiates over the Fold6 hotspot
                                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Poker                                                        │
@@ -322,11 +402,20 @@ The bridge MUST compile with stable Rust and pass `rustfmt`, `clippy -D warnings
 │   ├── input normalization                                    │
 │   ├── Morse state machine                                    │
 │   ├── ASR capture/review UI                                  │
-│   └── reconnect/sync client                                  │
+│   └── listener session and sync endpoint                     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Dealer is authoritative for conversations, cards, reply status, and sync cursors. The bridge is authoritative for current tmux topology. Poker is authoritative only for its local viewport, input-composition state, and temporary unsent draft.
+Dealer is authoritative for conversations, cards, reply status, and sync
+cursors. The bridge is authoritative for current tmux topology. Poker is
+authoritative only for its local viewport, input-composition state, and
+explicitly persisted Poker-originated mutations until Dealer durably
+acknowledges them.
+
+Dealer's TCP-client role and Poker's TCP-listener role do not reverse these
+authority boundaries. After transport authentication, Dealer sends the
+protocol-side `server.hello`, and Poker requests synchronization as the HUD
+client.
 
 ---
 
@@ -844,10 +933,10 @@ Persistence
 Bridge transport
 Poker transport
 Android platform services
-Vendor SDK adapters
+Android hotspot transport
 ```
 
-No Compose screen may issue bridge or Rokid SDK calls directly.
+No Compose screen may issue bridge or socket calls directly.
 
 ### 9.2 Core services
 
@@ -891,6 +980,9 @@ Card text MUST not be included in routine analytics or crash breadcrumbs. Debug 
 Show:
 
 - Poker connected/disconnected/authorizing;
+- configured Poker endpoint and listener reachability;
+- pinned Poker identity and last authentication result;
+- reconnect count and last reconnect duration;
 - each bridge connected/disconnected/error;
 - attached pane count;
 - unread card count;
@@ -949,7 +1041,7 @@ Dealer MUST provide a phone preview of the same cards and statuses visible in Po
 
 Show raw events from:
 
-- Rokid button/touch callbacks relayed by Poker;
+- Android key, media-button, touch, and gesture events relayed by Poker;
 - phone-connected Bluetooth ring;
 - Poker-connected ring events relayed by Poker;
 - Android `KeyEvent`, device ID, descriptor, vendor/product IDs where available;
@@ -961,12 +1053,17 @@ Allow learning and assigning mappings.
 
 Dealer maintains live sockets and the glasses link in a foreground service while enabled.
 
-- Use the Android foreground-service type(s) justified by the actual implementation, including `connectedDevice` for the glasses link.
+- Use only Android foreground-service type(s) justified by the ordinary network
+  implementation and current platform rules. `connectedDevice` MUST NOT be
+  assumed merely because the peer is the glasses.
 - Add `microphone` only when Dealer itself opens the phone microphone, and start that capture from a visible user action in compliance with while-in-use restrictions.
 - Do not use WorkManager for live WebSocket or glasses connections.
 - Persistent notification must state connection counts and provide a stop action.
 - Stopping the service disconnects transports but does not delete attachments/history.
 - Autostart after reboot MUST follow current Android restrictions; never silently bypass platform controls.
+- The service owns the outbound Poker client/reconnect loop. It MUST surface a
+  disabled hotspot or unreachable endpoint rather than silently changing
+  system hotspot state.
 
 ### 9.6 Card assembly
 
@@ -994,7 +1091,7 @@ A conclusion may come only from:
 
 ```text
 <<<POKER_CONCLUSION>>>
-Use CXR-M/CXR-S behind a transport abstraction.
+Use authenticated Android hotspot transport behind PokerTransport.
 <<<END_POKER_CONCLUSION>>>
 ```
 
@@ -1018,6 +1115,7 @@ Top-level states:
 
 ```text
 BOOTING
+LISTENING
 AUTHORIZING
 DISCONNECTED
 SYNCING
@@ -1031,6 +1129,13 @@ ERROR
 ```
 
 A transient disconnect while reading MUST preserve the visible card and scroll offset. Input send is disabled until Dealer is connected, but an unsent local draft may remain queued for explicit confirmation after reconnect.
+
+Poker MUST maintain at most one active authenticated Dealer session. It MUST
+reject or close unauthenticated and additional clients, return to `LISTENING`
+after a disconnect, and resume listening only through lifecycle paths allowed
+by the current Android platform and user settings. A permanent partial wake
+lock is forbidden by default. A scoped, user-visible wake lock MAY be added
+only after a measured hardware failure demonstrates that it is required.
 
 ### 10.2 Deck
 
@@ -1083,7 +1188,8 @@ Navigation has two levels:
 - **Within card:** vertical scroll/page.
 - **Between cards:** previous/next card.
 
-The default bindings in Section 12 MUST be remappable because exact Rokid event semantics vary by firmware.
+The default bindings in Section 12 MUST be remappable because exact Android
+input events exposed by the glasses vary by firmware.
 
 ### 10.5 Cache
 
@@ -1100,7 +1206,10 @@ Poker is never the source of truth for delivered card history. On cache loss it 
 ### 10.6 Privacy
 
 - Poker MUST not retain microphone audio after ASR finalization/cancellation.
-- Poker SHOULD keep card cache ephemeral unless vendor lifecycle requires a small persistent cache.
+- Poker SHOULD keep reconstructible card bodies ephemeral where practical.
+  Durable inbox/outbox/dedupe records and any cache state needed to support an
+  advertised synchronization cursor MUST be encrypted, bounded, and retained
+  only as required by Section 16.
 - A privacy mode may hide body text until explicit open.
 - Disconnection/error screens MUST not expose terminal content in logs.
 
@@ -1111,12 +1220,22 @@ Poker is never the source of truth for delivered card history. On cache loss it 
 ### 11.1 Encoding and frame size
 
 - UTF-8 JSON for control and card text.
+- TLS/TCP is a byte stream. Every JSON envelope MUST be prefixed by an unsigned
+  32-bit network-byte-order payload length. Decoders MUST handle prefixes and
+  payloads split across reads and multiple frames coalesced into one read.
+- TLS provides transport confidentiality and integrity. The prototype's CRC
+  and loopback test controls are not production protocol features.
 - Application-level frame size is negotiated in `hello`.
-- Until measured, assume a conservative **4096-byte maximum frame**.
+- Until production boundary tests pass, use a conservative **4096-byte maximum
+  JSON payload**.
 - `card.append` text chunks MUST default to at most 2048 UTF-8 bytes so envelope overhead remains below the conservative limit.
 - Never split inside a UTF-8 code point.
-- If the vendor SDK supplies a smaller limit, negotiate and use it.
+- Both sides MUST reject an announced or received size above their configured
+  hard limit before allocating the payload.
 - Compression is out of scope for v1.
+- Every new socket performs TLS and peer authentication first, then
+  `server.hello`/`client.hello`, then synchronization. No product frame may be
+  applied before those stages complete.
 
 ### 11.2 Envelope
 
@@ -1126,24 +1245,91 @@ Poker is never the source of truth for delivered card history. On cache loss it 
   "version": 1,
   "type": "card.append",
   "message_id": "01J...",
+  "sender_process_id": "dealer-process-01J...",
   "session_id": "01J...",
+  "connection_id": "01J...",
   "sent_at_ms": 1784600000000,
   "sequence": 184,
+  "requires_ack": true,
   "reply_to": null,
   "conversation_id": "conv-17",
   "payload": {}
 }
 ```
 
-- `sequence` is monotonic for the active Dealer↔Poker session.
-- `message_id` enables dedupe.
-- Gaps trigger `sync.request` rather than speculative application.
-- Acknowledgement means Poker accepted the protocol frame, not that a tmux reply was delivered.
+- `sender_process_id` is random and changes on every process start.
+- Dealer generates `connection_id` after peer authentication, includes it in
+  `server.hello`, and Poker echoes it in `client.hello`. It is shared by both
+  peers for exactly one authenticated TLS connection and changes on every
+  socket reconnect.
+- Dealer selects `session_id` while answering the initial `sync.request`. It
+  MAY resume the prior value after a socket reconnect only when both process
+  IDs and durable cursors remain compatible; otherwise Dealer issues a new
+  session and forces resynchronization.
+- `server.hello`, `client.hello`, and the initial `sync.request` set
+  `session_id` and `sequence` to `null` and set `requires_ack = false`. They
+  MUST carry the current `connection_id`. Dealer's first synchronization
+  response establishes the selected session. Later frames follow the
+  durability-class rules below; only session-reliable frames consume a
+  sequence.
+- `server.hello` carries Dealer's supported protocol versions and hard frame
+  limit. `client.hello` echoes `connection_id`, selects one offered version,
+  supplies Poker's hard frame limit, and is rejected if its envelope process
+  ID or echoed connection ID is invalid. The negotiated frame limit is the
+  lower hard limit. Dealer is called the protocol server here even though it
+  initiated the underlying TCP socket.
+- Hello completes when Dealer validates `client.hello`. Session negotiation
+  completes when Poker validates the selected session on Dealer's first
+  synchronization response. Synchronization projections MAY be transactionally
+  staged before `sync.complete`, but neither peer may send or apply a durable
+  mutation until `sync.complete`, and Poker MUST NOT expose a partial snapshot.
+- `sequence` is monotonic independently per sender role within `session_id`
+  for session-reliable frames only. Dealer and Poker therefore have separate
+  sequence spaces and receive cursors. Connection-local frames do not consume
+  or advance either cursor.
+- `message_id` is globally stable for a logical message and survives
+  connection, session, and process changes so dedupe/replay remains possible.
+- A replay in a resumed session keeps its original sequence. A replay after
+  Dealer creates a new session receives the next sequence in that new
+  sender-direction while retaining its original `message_id`; a deduplicated
+  replay still advances the receive cursor.
+- Gaps in session-reliable frames are evaluated within
+  `(session_id, sender role)` and trigger `sync.request` rather than
+  speculative application.
+- Acknowledgement means the receiver accepted the protocol frame at the
+  durability class defined in Section 16, not that a tmux reply was delivered.
+- Every mutating frame and every frame placed in a durable outbox MUST set
+  `requires_ack = true`. Its peer sends `ack` with `reply_to` equal to the
+  original `message_id` only after the class-required acceptance defined below
+  and in Section 16. `ack`, `ping`, and connection-local diagnostics do not
+  themselves require acknowledgement.
+- If a receiver gets a duplicate `requires_ack = true` frame that it has
+  already accepted, it MUST skip the application effect and emit `ack` again.
+  This is how a sender recovers when the original acknowledgement was lost.
+
+#### 11.2.1 Frame durability classes
+
+Every required message type belongs to exactly one class:
+
+| Class | Message types | Session sequence | `requires_ack` | Retention and recovery |
+|---|---|---:|---:|---|
+| Bootstrap control | `server.hello`, `client.hello`, initial `sync.request` | none; `session_id = null` | `false` | Current connection only; restart the handshake after disconnect |
+| Session control/query/telemetry | later `sync.request`, `sync.complete`, `ack`, `error`, `ping`, `history.request`, `conversation.visible`, `card.visible`, `input.raw`, `input.command`, `asr.start`, `asr.audio.begin`, `asr.audio.chunk`, `asr.audio.end`, `asr.cancel`, `asr.partial`, `asr.error` | none; selected `session_id` | `false` | TCP-ordered on the current connection; re-query, refresh, or cancel after disconnect |
+| Durable mutation | `reply.submit`, `reply.cancel`, `asr.final` | required | `true` | Persist sender outbox and receiver inbox/application effect; replay stable `message_id` until acknowledged |
+| Reconstructible projection | `sync.snapshot`, `conversation.upsert`, `conversation.remove`, `conversation.state`, `card.begin`, `card.append`, `card.replace`, `card.commit`, `card.delete`, `history.page`, `reply.status`, `input.mapping` | required | `true` | Retain/coalesce until acknowledged; Dealer may repair with a transactional snapshot |
+
+`input.command` in v1 is connection-local UI/control intent and MUST NOT
+directly perform irreversible tmux input. All confirmed text injection uses
+the durable `reply.submit` path. Live ASR audio also carries its own
+per-audio-stream chunk sequence from Section 14.3; a stream gap cancels that
+stream rather than creating a session-sequence hole.
 
 ### 11.3 Required Dealer→Poker messages
 
 ```text
 server.hello
+ack
+sync.request
 sync.snapshot
 sync.complete
 conversation.upsert
@@ -1179,11 +1365,16 @@ input.raw
 input.command
 asr.start
 asr.audio.begin
-asr.audio.chunk or vendor audio-channel equivalent
+asr.audio.chunk
 asr.audio.end
 asr.cancel
 ping
 ```
+
+`ack` is valid in both directions. For Poker-originated `reply.submit` and
+`reply.cancel`, Dealer first sends the durable transport `ack`; subsequent
+`reply.status` messages describe application/bridge delivery and do not replace
+that transport acknowledgement.
 
 ### 11.5 Card synchronization
 
@@ -1290,21 +1481,58 @@ On connection/reconnection Poker sends:
   "type": "sync.request",
   "payload": {
     "last_session_id": "old-session",
-    "last_sequence": 183,
+    "last_connection_id": "old-connection",
+    "last_dealer_process_id": "dealer-process-01J...",
+    "last_dealer_sequence": 183,
+    "last_poker_sequence_issued": 92,
+    "last_cache_epoch": "poker-cache-01J...",
     "conversation_cursors": {
       "conv-17": 180,
       "conv-24": 51
-    }
+    },
+    "pending_messages": [
+      {
+        "message_id": "reply-92",
+        "session_id": "old-session",
+        "sequence": 92
+      }
+    ]
   }
 }
 ```
 
 Dealer either:
 
-- sends missing events if retained and session-compatible; or
+- resumes the logical session and sends missing Dealer-direction events if
+  both process IDs match the prior session, Poker's reported Dealer-direction
+  cursor is recoverable, and every Poker sequence above Dealer's durable
+  receive cursor is either already accepted or present in Poker's reported
+  durable outbox; or
 - sends a bounded full snapshot of conversations and cached cards.
 
 Snapshot application MUST be transactional from Poker’s point of view: do not show half-replaced deck state.
+Transport reconnection alone is not recovery. Both peers MUST reconcile
+durable message IDs and synchronization cursors before accepting new mutating
+operations.
+
+`sync.request` is valid in both directions. The initial request above is always
+Poker→Dealer. After synchronization, either receiver that detects a
+sender-direction sequence gap MUST stop applying later frames and send
+`sync.request` with the affected `session_id`, sender role, and last
+contiguously applied sequence.
+
+- Within a resumed session, the sender replays retained envelopes with their
+  original `message_id` and sequence.
+- If Dealer cannot replay reconstructible Dealer→Poker projection state, it
+  replaces the session as needed and sends a bounded snapshot.
+- For a Poker→Dealer gap, Poker replays durable unacknowledged mutations from
+  its outbox. Dealer MUST NOT advance or acknowledge across the gap. If
+  Poker's required outbox is missing or corrupt, both peers surface an
+  integrity error; affected operations become `UNKNOWN` and a snapshot MUST
+  NOT falsely claim they were delivered.
+- A gap in explicitly non-durable streaming data such as live ASR audio
+  cancels that stream and requires an explicit restart; it never silently
+  becomes a completed mutation.
 
 ---
 
@@ -1325,7 +1553,7 @@ sealed interface PhysicalInputEvent {
     data class Swipe(...): PhysicalInputEvent
     data class TouchDown(...): PhysicalInputEvent
     data class TouchUp(...): PhysicalInputEvent
-    data class VendorGesture(...): PhysicalInputEvent
+    data class PlatformGesture(...): PhysicalInputEvent
 }
 ```
 
@@ -1474,12 +1702,17 @@ ended
 
 At runtime use the first verified provider in this order:
 
-1. Rokid SDK native ASR transcript, if exposed and acceptable.
-2. Rokid microphone PCM streamed to Dealer and passed to a recognizer that supports an injected audio source.
+1. Poker-local Android `SpeechRecognizer` on the glasses, if available and
+   acceptable.
+2. Glasses microphone PCM captured with public Android `AudioRecord`, streamed
+   to Dealer, and passed to a recognizer that supports an injected audio source.
 3. Dealer-local offline ASR implementation, if packaged/configured.
 4. Phone microphone + Android on-device/system `SpeechRecognizer` as an explicit fallback.
 
 The UI MUST show the active microphone and recognizer source. It MUST NOT silently use the phone microphone when the user expects the glasses microphone.
+If the glasses microphone or recognizer is unavailable through public Android
+APIs, diagnostics MUST report the capability as unavailable. That result does
+not authorize adding CXR.
 
 ### 14.3 Audio format
 
@@ -1487,12 +1720,14 @@ Preferred interchange format when PCM is available:
 
 - mono;
 - signed PCM 16-bit little-endian;
-- 16 kHz unless the SDK only provides another rate;
+- 16 kHz unless the Android audio device only provides another rate;
 - timestamped chunks;
 - sequence number per audio stream;
 - maximum capture duration default 60 seconds.
 
-If the Rokid SDK has a dedicated audio stream, use it rather than base64-encoding PCM into small JSON frames. The control protocol still carries stream start/end metadata.
+Audio chunks use an explicitly bounded binary stream or bounded protocol
+frames over the authenticated hotspot connection. The control protocol still
+carries stream start/end metadata, sequence, format, and cancellation.
 
 ### 14.4 Android recognizer injection
 
@@ -1547,7 +1782,7 @@ V1 supports rings that appear as standard input devices to either Poker or Deale
 - keyboard/HID;
 - media buttons;
 - accessibility switch-like key events;
-- vendor SDK events only when the user supplies official documentation and library.
+- standard Android input events exposed by the glasses or phone.
 
 No BLE protocol reverse engineering is required.
 
@@ -1577,7 +1812,7 @@ Mappings MUST be exportable as redacted JSON without secrets or conversation con
 
 ### 16.1 Connection state
 
-Each link has an explicit state machine:
+Dealer uses:
 
 ```text
 DISABLED
@@ -1589,24 +1824,76 @@ BACKING_OFF
 ERROR
 ```
 
-Use bounded exponential backoff with jitter. User-initiated reconnect bypasses the current delay. Authentication failures do not loop aggressively.
+Poker uses:
+
+```text
+DISABLED
+STARTING
+LISTENING
+AUTHENTICATING
+SYNCING
+CONNECTED
+ERROR
+```
+
+Dealer owns bounded exponential reconnect with jitter. User-initiated reconnect
+bypasses the current delay. Authentication failures do not loop aggressively.
+Backoff resets only after a stable authenticated session, not after a bare TCP
+connect. Each process has a new process ID, each authenticated socket has a new
+connection ID, and Dealer explicitly decides whether the logical sync session
+can resume or must be replaced.
+
+Peers exchange configurable heartbeats and declare the connection stale after
+a negotiated missed-heartbeat threshold. Cadence and threshold MUST be
+hardware-tested for responsiveness and idle power; the prototype's one-second
+probe cadence is evidence, not a production constant.
 
 ### 16.2 Idempotency
 
 - Every mutating operation has a stable request ID.
-- Dealer persists pending reply IDs before transmission.
+- A sender MUST persist a mutating operation and stable ID before transmission.
+- A receiver MUST durably record dedupe/application state before acknowledging
+  durable acceptance.
+- For reconstructible Dealer→Poker projection frames, Poker MAY acknowledge
+  after atomically applying the frame to its bounded cache and receive cursor.
+  That cursor is valid only while the corresponding cache generation remains
+  recoverable. After cache loss, Poker MUST discard the cursor and request a
+  full snapshot instead of claiming that acknowledged projection state still
+  exists.
+- Poker MUST partition its inbox bookkeeping by durability class. Durable
+  mutation IDs survive cache eviction. Projection message IDs, card revisions,
+  receive cursor, and `cache_epoch` are committed and discarded as one unit,
+  so stale projection dedupe records can never suppress a frame after the
+  corresponding card cache has been lost.
+- Unacknowledged mutations replay after reconnect with the same request ID.
+- Dealer persists pending reply IDs and its bounded Poker outbox before
+  transmission.
+- Poker MUST persist every confirmed mutation in encrypted local state before
+  transmission and retain it until Dealer acknowledges durable acceptance. If
+  persistence fails, Poker MUST block the send and show a local error.
+- `UNKNOWN` is reserved for an integrity failure in previously persisted state
+  or for uncertain downstream tmux execution reported by Dealer. It is not an
+  alternative to persistence and never permits inventing a replacement
+  request ID.
 - Bridge deduplicates recent input request IDs.
 - Poker deduplicates protocol message IDs and card revisions.
 - Reconnect retries reuse the same request ID.
 - A reply with uncertain execution state is surfaced as `UNKNOWN`, not automatically repeated.
 
+Dealer's durable database and `sync.snapshot` repair non-mutating card state.
+TCP acknowledgements and reconnect alone do not prove logical delivery across
+process death.
+
 ### 16.3 Ordering
 
 - Bridge events have connection sequence numbers.
-- Dealer↔Poker events have session sequence numbers.
+- Dealer↔Poker events have independent Dealer-direction and Poker-direction
+  sequence numbers scoped to the logical session.
 - Card sequence is independent and per conversation.
 - Gaps trigger snapshot/resync.
 - Never apply later card append chunks before missing earlier chunks; request replace/snapshot instead.
+- TCP byte ordering does not waive application sequence, dedupe, or
+  resynchronization rules across a new process or authenticated session.
 
 ### 16.4 Backpressure
 
@@ -1632,6 +1919,9 @@ Use bounded exponential backoff with jitter. User-initiated reconnect bypasses t
 Protect against:
 
 - an unauthenticated local/network client listing panes;
+- a rogue hotspot client connecting to Poker;
+- hotspot eavesdropping or active manipulation;
+- Dealer connecting to the wrong glasses after a DHCP/address change;
 - replaying a prior reply;
 - sending a reply to the wrong pane;
 - shell injection through reply text;
@@ -1643,6 +1933,17 @@ Protect against:
 
 ### 17.2 Mandatory controls
 
+- The hotspot is not a trust boundary.
+- Dealer↔Poker uses TLS 1.3 or a platform-equivalent authenticated encrypted
+  channel. Poker owns a long-lived Android Keystore-backed identity; Dealer
+  pins its certificate or SPKI fingerprint.
+- Explicit local pairing, preferably QR-assisted, provisions a revocable
+  256-bit secret. Each connection performs a fresh nonce/session
+  challenge-response so captured handshakes cannot be replayed.
+- No product frame is accepted before transport identity and Dealer
+  authentication succeed. Authentication failures are rate-limited, and there
+  is no unauthenticated production fallback.
+- Poker binds only to the selected hotspot/Wi-Fi address and configured port.
 - TLS pinning and HMAC pairing for remote bridges.
 - Loopback binding by default.
 - Tailscale-interface binding for Spark.
@@ -1694,20 +1995,32 @@ Production logs include IDs, counts, durations, and error codes, not card text, 
 
 ### 18.2 Metrics shown in diagnostics
 
-- current protocol/SDK versions;
+- current protocol and TLS versions;
+- configured endpoint plus local/peer socket addresses, redacted in exports;
+- pinned peer identity and authentication state;
+- process and authenticated-connection session IDs;
 - last connected times;
+- hello, authentication, and synchronization durations;
 - message/frame counts;
 - sequence gaps;
-- reconnect count;
+- reconnect count, outage duration, and current backoff;
 - dedupe count;
+- durable outbox depth and oldest item age;
+- acknowledgement expiries;
+- heartbeat RTT percentiles and maximum receive gap;
+- hotspot reachability, screen-interactive, and power-policy state;
 - current queue depths;
 - dropped/coalesced intermediate revisions;
 - card output latency;
 - reply delivery latency;
-- negotiated Rokid frame limit;
+- negotiated application frame limit;
 - active ASR provider and audio source;
 - raw input-device events;
 - tmux version and control-mode state.
+
+Diagnostics MUST describe application acknowledgements and sequence gaps. They
+MUST NOT label those counters as raw Wi-Fi/radio packet loss because TCP
+retransmission hides lower-layer loss.
 
 ### 18.3 Doctor command
 
@@ -1820,28 +2133,46 @@ Required real-device tests:
 
 - Dealer phone model/Android build;
 - Rokid glasses model/firmware;
-- CXR mobile and glasses SDK versions;
+- Dealer and Poker application/protocol versions;
+- hotspot subnet, configured endpoint/port, and observed peer addresses;
+- battery-optimization, foreground-service, wake-lock, and screen state;
 - Termux tmux version;
 - Spark tmux version;
 - ring model/firmware when used.
 
 Hardware scenarios:
 
-1. 1 KiB, 4 KiB, 16 KiB, and 100 KiB card transfer.
-2. Negotiated frame-size boundary and one byte above.
-3. 30-minute continuous agent output.
-4. Glasses sleep/wake.
-5. Dealer background/foreground.
-6. Phone network switch.
-7. Tailscale disconnect/reconnect.
-8. Button press, long press, double press.
-9. All touch gestures.
-10. Ring down/up timing.
-11. Glasses microphone audio path.
-12. ASR partial/final/cancel.
-13. Two panes producing output simultaneously.
-14. Reply while another conversation receives output.
-15. No duplicate reply after forced reconnect.
+1. Hello/ack with ADB disconnected and both ADB forward/reverse lists empty.
+2. Directional reachability proves Fold6→Poker works and Poker→hotspot-gateway
+   is not assumed.
+3. At least 5,000 acknowledged application messages in each direction.
+4. Forced socket close followed by authenticated reconnect and resync.
+5. Dealer and Poker process restarts with zero logical loss after replay/resync.
+6. Glasses sleep/wake with default wake-lock policy.
+7. Fold6 screen off for at least 30 minutes under active traffic, followed by
+   a longer unattended/idle power-policy soak.
+8. Hotspot off/on recovery.
+9. DHCP/IP change followed by manual or approved rediscovery and identity
+   revalidation.
+10. TLS pin mismatch, unpaired client, and replayed handshake are rejected.
+11. 1 KiB, 4 KiB, 16 KiB, and 100 KiB card transfer.
+12. Negotiated frame-size boundary and one byte above.
+13. Backpressure during 30-minute continuous agent output.
+14. Dealer background/foreground.
+15. Phone network switch.
+16. Tailscale disconnect/reconnect.
+17. Button press, long press, double press.
+18. All touch gestures exposed through Android.
+19. Ring down/up timing.
+20. Glasses microphone audio path through public Android APIs.
+21. ASR partial/final/cancel.
+22. Two panes producing output simultaneously.
+23. Reply while another conversation receives output.
+24. No duplicate reply after forced reconnect or process death.
+
+TCP test results measure application acknowledgement expiry, sequence gaps,
+reconnect, and resynchronization. They MUST NOT be reported as raw radio packet
+loss.
 
 ### 19.7 Performance targets
 
@@ -1850,6 +2181,8 @@ Measured on a healthy local/Tailscale connection:
 - tmux output event to Dealer card update: p95 ≤ 500 ms, excluding extractor idle commit;
 - Dealer card update to first visible Poker update: p95 ≤ 700 ms;
 - confirmed Poker reply to bridge delivery result: p95 ≤ 750 ms;
+- reachable-peer reconnect through authenticated hello: p95 ≤ 5 seconds;
+- zero logical mutation loss after required replay/resynchronization;
 - Poker input gesture feedback: ≤ 100 ms;
 - no dropped final text under a sustained 50 KiB/minute aggregate output rate;
 - memory remains bounded by configured caches/queues.
@@ -1872,7 +2205,7 @@ Deliver:
 - loopback transport;
 - one fake conversation with a long scrollable card;
 - CI for mock Android modules and Rust;
-- no proprietary SDK dependency in default CI.
+- no CXR or proprietary transport dependency in any build.
 
 Exit criteria:
 
@@ -1952,24 +2285,29 @@ Exit criteria:
 - no forced scrolling during live update;
 - no semantic truncation.
 
-### M5 — Rokid capability spike and real transport
+### M5 — Android hotspot transport and lifecycle hardening
 
 Deliver:
 
-- minimal official sample builds;
-- CXR-M/CXR-S transport adapter, or documented CXR-L contingency if that is the available path;
-- measured frame size;
-- bidirectional hello/ack;
-- lifecycle handling;
-- raw input diagnostics;
-- microphone capability report encoded in runtime diagnostics.
+- production Poker listener and Dealer reconnecting client using public Android
+  sockets;
+- endpoint configuration, manual/out-of-band discovery, pairing, TLS, and
+  authentication;
+- persistent outbox, dedupe, acknowledgement, replay, and snapshot resync;
+- measured frame boundary, latency, and backpressure;
+- foreground/background, sleep/wake, screen-off, hotspot, DHCP, and process
+  lifecycle handling;
+- raw Android input diagnostics;
+- public-Android microphone/ASR capability report encoded in runtime
+  diagnostics.
 
 Exit criteria:
 
-- real Dealer sends a card to real Poker;
-- Poker sends an input event to Dealer;
-- disconnect/reconnect resyncs;
-- SDK-specific code remains isolated.
+- real Dealer sends a card to real Poker with ADB disconnected;
+- Poker sends an input event to Dealer with ADB disconnected;
+- socket drop and both process restarts resync without logical mutation loss;
+- unpaired and incorrectly pinned peers are rejected;
+- no CXR or proprietary transport dependency exists.
 
 ### M6 — End-to-end cards and replies
 
@@ -2006,7 +2344,7 @@ Exit criteria:
 
 Deliver:
 
-- Rokid audio path;
+- public Android glasses audio path;
 - provider abstraction;
 - partial/final transcript;
 - review/send/cancel;
@@ -2096,10 +2434,12 @@ Deliver:
 
 1. Unpaired client connects to bridge.
 2. Pane listing and input are rejected.
-3. A paired client sends text containing `` `$(touch /tmp/pwned)` ``.
-4. The literal characters appear in the target pane input; no host-side shell interpretation occurs in the bridge.
-5. A disallowed key token is rejected.
-6. Logs contain request IDs and error codes, not the reply text or secrets.
+3. Unpaired or incorrectly pinned Dealer connects to Poker and is rejected
+   before any product frame is accepted.
+4. A paired client sends text containing `` `$(touch /tmp/pwned)` ``.
+5. The literal characters appear in the target pane input; no host-side shell interpretation occurs in the bridge.
+6. A disallowed key token is rejected.
+7. Logs contain request IDs and error codes, not the reply text or secrets.
 
 ---
 
@@ -2109,8 +2449,9 @@ The local Codex worker MUST follow these rules:
 
 1. Start by reading this file completely.
 2. Treat this file as the implementation contract, not as optional guidance.
-3. Do not block all development on proprietary Rokid SDK access. Build mock transport and all core behavior first.
-4. Do not invent Rokid method names. Copy only from the exact official SDK/sample available locally and isolate them in adapters.
+3. Build mock transport and all core behavior before the real hotspot adapter.
+4. Do not add CXR-M, CXR-L, CXR-S, proprietary Rokid transport artifacts, or
+   a companion-app data path.
 5. Do not add third-party conversation connectors.
 6. Do not replace full text with summaries.
 7. Do not use `pipe-pane` as the primary capture path or overwrite an existing pane pipe.
@@ -2118,14 +2459,19 @@ The local Codex worker MUST follow these rules:
 9. Do not interpolate user text into shell commands.
 10. Write tests before declaring a milestone complete.
 11. Commit after each milestone with a focused message.
-12. Keep CI independent of private SDK artifacts.
-13. When hardware behavior differs from this spec, preserve protocol/domain semantics and change only the adapter or input mapping where possible.
+12. Keep CI and release builds Android-only and independent of private SDK artifacts.
+13. When hardware behavior differs from this spec, preserve protocol/domain
+    semantics and change only the public-Android platform adapter, endpoint
+    configuration, or input mapping where possible. The required connection
+    direction does not become optional.
 14. Any unavoidable product-level deviation requires an explicit `SPEC.md` amendment in the same commit.
 15. Leave the repository in a buildable/testable state after every milestone.
 
 ### 22.1 Initial worker task
 
-The first worker run should complete M0 and begin M1. It should not attempt the real Rokid integration before the mock vertical slice and shared protocol tests pass.
+The first worker run should complete M0 and begin M1. It should not attempt the
+production hotspot transport before the mock vertical slice and shared protocol
+tests pass.
 
 ### 22.2 Required build gates
 
@@ -2138,7 +2484,9 @@ cargo clippy --manifest-path bridge/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path bridge/Cargo.toml
 ```
 
-If the Poker vendor module cannot build without local SDK artifacts, the default task must build a mock Poker target and clearly report how to invoke the real target locally.
+The aggregate gate MUST build and lint both ordinary Android applications
+without vendor artifacts. Hardware-only execution tests may remain separate,
+but there is no vendor transport flavor exemption.
 
 ---
 
@@ -2146,18 +2494,23 @@ If the Poker vendor module cannot build without local SDK artifacts, the default
 
 These are not reasons to stop core implementation. Resolve them in M5 through capability tests:
 
-1. Exact CXR-M versus CXR-L mobile adapter available to the user.
-2. Exact custom data-channel method names and callback threading.
-3. Maximum reliable Rokid application frame size.
-4. Whether ordering/acknowledgement is guaranteed by the vendor link.
-5. Glasses microphone PCM access versus native ASR transcript.
-6. Function-button down/up versus only click callbacks.
-7. Touch-panel gesture vocabulary and direction.
+1. Endpoint pairing/discovery UX and recovery from DHCP address changes.
+2. Maximum production application-frame size and best card chunk size.
+3. Long-idle hotspot availability and Fold6 power-policy behavior.
+4. Justified foreground-service types and time limits on both Android builds.
+5. Glasses microphone PCM and local `SpeechRecognizer` availability through
+   public Android APIs.
+6. Function-button down/up versus only click events through Android.
+7. Touch-panel gesture vocabulary and direction through Android.
 8. Whether a Bluetooth ring can pair directly to Poker and expose down/up timing.
-9. Poker process suspend/background limitations.
+9. Poker process suspend/background limitations and whether any scoped wake
+   lock is necessary.
 10. Exact HUD resolution, safe text area, and preferred font sizes.
 
-The implementation MUST surface these as capabilities, not scatter firmware assumptions through business logic.
+The implementation MUST surface these as capabilities, not scatter firmware
+assumptions through business logic. None of them permits changing the required
+Fold6-initiated hotspot topology or adding CXR without a specification
+amendment.
 
 ---
 
@@ -2165,11 +2518,19 @@ The implementation MUST surface these as capabilities, not scatter firmware assu
 
 Primary references for implementation verification:
 
-- Rokid Open Platform SDK page: `https://open.rokid.com/sdk?lang=en`
-- Rokid YodaOS-Sprite/CXR-S overview: `https://open.rokid.com/sprite?lang=en`
+- Validated hardware evidence:
+  `prototype/android-hotspot-transport` commit `9d36ed1`,
+  `prototypes/android-hotspot/RESULTS.md`
 - tmux manual, including control mode, `%output`, `capture-pane`, and `pipe-pane`: `https://man.openbsd.org/tmux.1`
+- Android connectivity: `https://developer.android.com/develop/connectivity/network-ops/connecting`
+- Java `ServerSocket`: `https://developer.android.com/reference/java/net/ServerSocket`
+- Android SSL guidance: `https://developer.android.com/privacy-and-security/security-ssl`
+- Android Keystore: `https://developer.android.com/privacy-and-security/keystore`
 - Android foreground-service types: `https://developer.android.com/develop/background-work/services/fgs/service-types`
 - Android `SpeechRecognizer`: `https://developer.android.com/reference/android/speech/SpeechRecognizer`
+- Android `AudioRecord`: `https://developer.android.com/reference/android/media/AudioRecord`
 - Android `RecognizerIntent.EXTRA_AUDIO_SOURCE`: `https://developer.android.com/reference/android/speech/RecognizerIntent#EXTRA_AUDIO_SOURCE`
 
-Use current official SDK samples and primary documentation as the source of truth when a reference changes. Preserve the architecture boundaries in this specification even when vendor API details change.
+Use current public Android APIs, official platform documentation, and measured
+hardware behavior as sources of truth. Preserve the architecture and domain
+boundaries in this specification when platform details change.

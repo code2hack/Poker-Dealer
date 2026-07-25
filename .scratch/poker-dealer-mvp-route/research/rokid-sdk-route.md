@@ -2,7 +2,12 @@
 
 Research date: 2026-07-22. Sources are limited to Rokid-hosted documentation and distribution endpoints, plus a Rokid representative's public CXR-L announcement.
 
-## Decision
+> **Superseded on 2026-07-25.** This document preserves historical vendor-SDK
+> research only; it is not an implementation route. `SPEC.md` revision 2
+> selects public Android TLS/TCP over the Fold6 hotspot, backed by
+> `prototype/android-hotspot-transport` commit `9d36ed1`.
+
+## Superseded historical decision
 
 Use Rokid's current **Glass3 Enterprise two-ended SDK**, not a mixture of the legacy CXR SDK families:
 
@@ -64,6 +69,8 @@ A Rokid representative describes CXR-L as extending the Rokid AI App and exposin
 - The public legacy portal does not expose a downloadable CXR-S sample archive beyond the `CXRServiceDemo` project name, nor does the current public Rokid documentation expose authoritative CXR-L Android/iOS sample names. Request those, a firmware/version matrix, and release/redistribution terms through Rokid's developer-support/Discord registration path if the fallback SDK families must be evaluated.
 - Public Maven readability is not a redistribution license. No public license grant was found adjacent to these proprietary artifacts; resolve terms before vendoring AARs, redistributing them, or committing them to the repository.
 
-## Immediate follow-up
+## Superseded follow-up
 
-Stage only the vendor-linked `glass3sdkdemo` source and Maven coordinates in a local ignored area, then run the phone/glasses message exchange on Fold6 + RG-glasses. That spike should determine whether the current pair initializes without online API credentials and whether firmware `1.22.009`/CXR service `1.135` supports the documented private message path.
+Do not run this vendor-SDK follow-up. The Android-only hotspot prototype
+replaced it, and the production route must not add these artifacts without an
+explicit future `SPEC.md` amendment.
