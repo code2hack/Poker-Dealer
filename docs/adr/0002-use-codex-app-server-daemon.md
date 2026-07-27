@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Amended by:** ADR 0003, which adds Fold6 Termux as a supported host
+- **Amended by:** ADR 0004, which embeds a userspace Tailscale node in Dealer
 - **Supersedes:** the tmux-pane bridge backend and any planned custom host conversation bridge
 
 ## Context
@@ -25,7 +26,7 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 2. Every supported host runs a long-lived `codex app-server` managed by an app-server daemon.
 3. The daemon's Unix control socket is the local app-server endpoint.
 4. Dealer reaches the socket through SSH and `codex app-server proxy`.
-5. DGX Spark and u4090 use Tailscale SSH.
+5. DGX Spark and u4090 support prioritized SSH routes: trusted LAN, Dealer's embedded userspace tailnet, and optional external-Tailscale fallback. ADR 0004 defines this routing decision.
 6. Fold6 Termux uses loopback SSH because Dealer cannot directly access Termux-private files or Unix sockets across Android application sandboxes.
 7. Dealer implements WebSocket framing and the app-server JSON-RPC lifecycle over the SSH proxy stream.
 8. The host-local Codex TUI should use the same daemon-backed app-server.
@@ -38,6 +39,7 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 15. Production Dealer uses the stable app-server API surface by default and a tolerant wire adapter. Direct use of the experimental daemon lifecycle is accepted.
 16. Linux ARM64, Linux x86-64, and Android/Termux ARM64 are supported. Native Windows is not required.
 17. Distribution-specific lifecycle and update behavior is isolated behind a small adapter.
+18. SSH and app-server layers consume a route-neutral TCP/duplex-stream abstraction so connectivity changes do not rewrite Codex protocol code.
 
 ## Consequences
 
@@ -50,12 +52,14 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 - Removes the custom Rust bridge and its security/protocol burden.
 - Makes Poker input semantic: start, steer, interrupt, approve, deny, and switch thread.
 - Keeps full terminal power available through Termux without duplicating a terminal in Dealer.
+- Allows workstation reachability without requiring Dealer to own Android's VPN-service slot.
 
 ### Negative
 
 - Poker–Dealer no longer supports arbitrary tmux sessions or non-Codex agents.
 - The product directly depends on experimental daemon lifecycle behavior.
-- Dealer must implement SSH, WebSocket-over-proxy, app-server JSON-RPC, tolerant parsing, and reconnect reconciliation.
+- Dealer must implement SSH, WebSocket-over-proxy, app-server JSON-RPC, tolerant parsing, reconnect reconciliation, and route selection.
+- Embedded tailnet support adds a Go/native Android build boundary.
 - The community Termux distribution may lag or diverge from upstream Codex.
 - Android may suspend or stop the Termux host, so it cannot promise workstation-level availability.
 - Threads remain host-bound; cross-host handoff requires a separate future design.
@@ -64,6 +68,7 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 ### Mitigations
 
 - Isolate daemon command parsing and update behavior by distribution.
+- Isolate LAN, embedded-tailnet, external-tailnet, and loopback routing behind one dialer abstraction.
 - Use the stable app-server surface by default.
 - Ignore unknown optional fields and notifications; preserve raw payloads for diagnostics.
 - Safely reject unknown server-initiated requests.
