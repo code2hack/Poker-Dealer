@@ -59,9 +59,14 @@ private fun DealerMockApp() {
             Text("Dealer", style = MaterialTheme.typography.headlineSmall, color = Color.White)
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Poker: $state", color = Color(0xFF8EE7B2))
-                Text("Host: ${MockDeck.host.displayName}", color = Color(0xFFBBC8D6))
-                Text("Daemon: ${MockDeck.host.daemonState}", color = Color(0xFFBBC8D6))
+                Text("Hosts: ${MockDeck.hosts.size}", color = Color(0xFFBBC8D6))
+                Text("Active: ${MockDeck.host.displayName}", color = Color(0xFFBBC8D6))
             }
+            Text(
+                "${MockDeck.host.distribution} · ${MockDeck.host.connectionRoute} · ${MockDeck.host.daemonState}",
+                color = Color(0xFFBBC8D6),
+                style = MaterialTheme.typography.labelMedium,
+            )
             Text(
                 "${MockDeck.conversation.alias} · ${MockDeck.conversation.locator.threadId}",
                 color = Color.White,
