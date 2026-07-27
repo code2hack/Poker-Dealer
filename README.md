@@ -65,6 +65,8 @@ Multiple clients may observe one thread. Poker–Dealer follows a **one active h
 
 The repository has been reset from the abandoned tmux-pane backend design. The Rust tmux bridge and its scratch planning tree are removed. The Android mock and shared model now use Codex host/thread terminology.
 
+The old SSH-supervised WebRTC/tmux architecture proposal was closed as superseded and MUST NOT be treated as pending work.
+
 The next implementation slice is defined in `SPEC.md`: connect Dealer to one daemon through SSH + `codex app-server proxy`, initialize the app-server connection, list threads, resume one thread, and stream one turn end to end in Dealer before adding Poker synchronization.
 
 ## Build and test
