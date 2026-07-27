@@ -4,8 +4,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class ProtocolTest {
@@ -20,7 +20,7 @@ class ProtocolTest {
             conversationId = "conv-17",
             payload = buildJsonObject {
                 put("card_id", "card-184")
-                put("text", "Use tmux control mode.")
+                put("text", "Stream the Codex agent-message delta.")
             },
         )
 
