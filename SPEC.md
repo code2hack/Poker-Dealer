@@ -1,6 +1,6 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 3  
+**Status:** Normative implementation contract, revision 4  
 **Date:** 2026-07-27  
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
@@ -14,36 +14,37 @@ The words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** are no
 
 ## 1. Product contract
 
-Poker–Dealer is a private mobile and wearable client for **Codex threads** that execute on the user's Linux workstations.
+Poker–Dealer is a private mobile and wearable client for **Codex threads** that execute on one of the user's configured hosts.
 
-The supported workstations are:
+The supported hosts are:
 
-1. **DGX Spark** — Ubuntu/Linux, ARM64.
-2. **u4090** — Ubuntu/Linux, x86-64 with RTX 4090.
+1. **DGX Spark** — Ubuntu/Linux, ARM64, upstream Codex distribution.
+2. **u4090** — Ubuntu/Linux, x86-64 with RTX 4090, upstream Codex distribution.
+3. **Fold6 Termux** — Android/Termux, ARM64, compatible community Termux Codex distribution.
 
-Each workstation MUST run a long-lived `codex app-server` managed directly by the experimental `codex app-server daemon` and exposed through its Unix control socket.
+Each host MUST run a long-lived `codex app-server` managed by an app-server daemon and exposed through a host-private Unix control socket.
 
-The user may interact with one host-qualified Codex thread through three surfaces:
+The user may interact with one host-qualified Codex thread through:
 
-- the official Codex TUI on the workstation;
+- the host-local Codex TUI;
 - Dealer on the Fold6;
 - Poker on Rokid glasses through Dealer.
 
-The thread continues to execute on its original workstation when the user changes surfaces.
+The thread continues to execute on its original host when the user changes surfaces.
 
 ### 1.1 Intended topology
 
 ```text
 DGX Spark / Ubuntu / ARM64
 ┌──────────────────────────────────────────────────────────────┐
-│ Official Codex TUI ─┐                                       │
-│                     ├─ codex app-server daemon              │
-│                     │      └─ Unix control socket           │
-│                     └─ repositories, tools, models, threads  │
+│ Host-local Codex TUI ─┐                                     │
+│                        ├─ daemon-managed codex app-server    │
+│                        │      └─ Unix control socket         │
+│                        └─ repositories, tools, models, threads│
 └──────────────────────────────▲───────────────────────────────┘
                                │ Tailscale + SSH
                                │ codex app-server proxy
-                               │ WebSocket frames over SSH stream
+                               │ WebSocket frames over SSH
                                │
                          Dealer / Fold6
                                │
@@ -52,22 +53,33 @@ DGX Spark / Ubuntu / ARM64
                          Poker / Rokid
                                ▲
                                │
-u4090 / Ubuntu / x86-64        │
+u4090 / Ubuntu / x86-64       │
 ┌──────────────────────────────┴───────────────────────────────┐
-│ Official Codex TUI ─┐                                       │
-│                     ├─ codex app-server daemon              │
-│                     │      └─ Unix control socket           │
-│                     └─ repositories, tools, models, threads  │
+│ Host-local Codex TUI ─┐                                     │
+│                        ├─ daemon-managed codex app-server    │
+│                        │      └─ Unix control socket         │
+│                        └─ repositories, tools, models, threads│
+└──────────────────────────────────────────────────────────────┘
+
+Fold6 Termux / Android / ARM64
+┌──────────────────────────────────────────────────────────────┐
+│ Termux Codex TUI ─────┐                                     │
+│                        ├─ daemon-managed codex app-server    │
+│ Dealer ─ loopback SSH  │      └─ Termux-private Unix socket  │
+│          + proxy ──────┘                                     │
+│                          repositories, tools, threads         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Poker MUST NOT connect directly to either workstation. Dealer is the only workstation client used by Poker.
+Poker MUST NOT connect directly to any Codex host. Dealer is the only host client used by Poker.
+
+Dealer MUST NOT directly open Termux-private files or Unix sockets across Android application sandboxes. The Termux route is loopback SSH followed by `codex app-server proxy`.
 
 ### 1.2 Product purpose
 
 Poker–Dealer MUST support:
 
-- discovering Codex threads on both hosts;
+- discovering Codex threads on all configured hosts;
 - reading existing thread history;
 - resuming a stored or currently loaded thread;
 - observing a running turn;
@@ -76,8 +88,8 @@ Poker–Dealer MUST support:
 - steering an active turn when the server accepts direct input;
 - interrupting an active turn;
 - reviewing and resolving supported approval or user-input requests;
-- switching smoothly between local TUI, Dealer, and Poker;
-- deterministic reconnection after phone-network, SSH, proxy, daemon, or app-server interruption;
+- switching smoothly among host-local TUI, Dealer, and Poker;
+- deterministic reconnection after phone-network, SSH, proxy, daemon, app-server, Android-process, or host interruption;
 - a recent Dealer-owned projection for phone and glasses presentation;
 - preserving complete text unless the user explicitly selects a conclusion-only presentation policy.
 
@@ -88,18 +100,18 @@ The first product version MUST NOT attempt to provide:
 - a tmux-pane backend;
 - terminal screen scraping or ANSI parsing;
 - a terminal emulator inside Dealer or Poker;
-- arbitrary shell continuity;
-- editor, REPL, or general process continuity;
-- live thread migration between DGX Spark and u4090;
+- arbitrary shell, editor, REPL, or general process continuity;
+- live thread migration among DGX Spark, u4090, and Fold6 Termux;
 - native Windows support;
 - a custom host conversation bridge;
-- WebRTC as the workstation control transport;
-- direct Poker-to-workstation networking;
+- WebRTC as the host control transport;
+- direct Poker-to-host networking;
+- direct Dealer-to-Termux private-socket access;
 - proprietary Rokid CXR transport;
 - cloud account synchronization beyond Codex's own services and host-local thread stores;
 - support for arbitrary non-Codex agents.
 
-Termux + Mosh + tmux remains the separate full-terminal and recovery path.
+Termux remains the separate full-terminal/editor/recovery surface even though Fold6 Termux is also a first-class Codex host.
 
 ---
 
@@ -107,11 +119,31 @@ Termux + Mosh + tmux remains the separate full-terminal and recovery path.
 
 ### 2.1 Host
 
-A **host** is one supported workstation running one Codex installation, one `CODEX_HOME`, one daemon-managed app-server, and one host-local thread store.
+A **host** is one supported execution environment running one Codex installation, one `CODEX_HOME`, one daemon-managed app-server, and one host-local thread store.
 
-A host MUST have a Dealer-assigned stable `hostId` that does not depend on hostname, IP address, Tailscale address, CPU architecture, or SSH endpoint.
+A host MUST have a Dealer-assigned stable `hostId` that does not depend on hostname, IP address, Tailscale address, CPU architecture, package name, or SSH endpoint.
 
-### 2.2 Thread
+### 2.2 Host kind, distribution, route, and availability
+
+Dealer MUST model host characteristics separately:
+
+- **Host kind:** Linux workstation or Android/Termux.
+- **Architecture:** Linux ARM64, Linux x86-64, or Android ARM64.
+- **Codex distribution:** upstream Linux or community Termux.
+- **Connection route:** Tailscale SSH or loopback SSH.
+- **Availability class:** persistent or opportunistic.
+
+Initial required host records are equivalent to:
+
+| hostId | Host | Kind | Architecture | Distribution | Route | Availability |
+| --- | --- | --- | --- | --- | --- | --- |
+| `spark` | DGX Spark | Linux workstation | Linux ARM64 | upstream | Tailscale SSH | persistent |
+| `u4090` | u4090 | Linux workstation | Linux x86-64 | upstream | Tailscale SSH | persistent |
+| `fold6-termux` | Fold6 Termux | Android/Termux | Android ARM64 | community Termux | loopback SSH | opportunistic |
+
+The exact IDs remain user-configurable Dealer identities; the table gives recommended initial values.
+
+### 2.3 Thread
 
 A **thread** is the durable Codex conversation and work context identified by app-server's `threadId` on one host.
 
@@ -126,30 +158,29 @@ data class CodexThreadLocator(
 
 `threadId` MUST NOT be treated as globally unique across hosts.
 
-### 2.3 Turn
+### 2.4 Turn
 
 A **turn** is one user request and the associated Codex execution/response lifecycle.
 
-### 2.4 Item
+### 2.5 Item
 
-An **item** is a structured user input or Codex output within a turn, including but not limited to:
+An **item** is structured user input or Codex output within a turn, including:
 
 - user message;
 - agent message;
 - plan;
 - reasoning summary;
-- command execution;
-- command output;
+- command execution and output;
 - file change;
 - approval request;
 - user-input request;
 - system or error status.
 
-### 2.5 Client connection
+### 2.6 Client connection
 
 A **client connection** is one initialized app-server JSON-RPC connection. It is disposable and MUST NOT be used as durable product identity.
 
-### 2.6 Dealer projection and cards
+### 2.7 Dealer projection and cards
 
 Dealer MUST maintain a UI-oriented projection of host, thread, turn, and item state.
 
@@ -177,8 +208,10 @@ Codex app-server is authoritative for:
 
 Dealer is authoritative for:
 
-- configured hosts and SSH endpoints;
-- host display names and local aliases;
+- configured hosts and stable host IDs;
+- SSH endpoints and connection routes;
+- host kind, distribution, architecture, and availability classification;
+- distribution-specific daemon lifecycle and update behavior;
 - connection lifecycle and retry state;
 - mapping app-server data into mobile/wearable presentation;
 - recent local cache and unread state;
@@ -201,16 +234,16 @@ Poker MUST NOT become the authoritative store for thread history or delivery sta
 
 ---
 
-## 4. Cross-surface continuity
+## 4. Cross-surface and cross-host continuity
 
 ### 4.1 Required continuity
 
-The following workflow MUST be supported:
+For any supported host, the following workflow MUST be supported:
 
-1. The user starts or resumes a thread in the official Codex TUI on DGX Spark or u4090.
+1. The user starts or resumes a thread in the host-local Codex TUI.
 2. The TUI uses the host's daemon-backed app-server.
-3. The user leaves the workstation.
-4. Dealer connects to the same host app-server through SSH and proxy.
+3. The user changes location or device surface.
+4. Dealer connects to the same host app-server through that host's SSH route and proxy.
 5. Dealer locates and resumes or rejoins the same host-qualified thread.
 6. Dealer reconstructs existing history and current status.
 7. The user continues through Dealer.
@@ -220,7 +253,7 @@ The following workflow MUST be supported:
 
 A thread remains bound to the host that owns its thread store, working directory, filesystem, tools, environment, and running processes.
 
-Poker–Dealer MUST NOT present a thread as having moved from DGX Spark to u4090.
+Poker–Dealer MUST NOT present a thread as having moved among DGX Spark, u4090, and Fold6 Termux.
 
 A future cross-host handoff MAY create or fork a new thread on another host after repository synchronization and an explicit handoff, but the resulting locator is a different `(hostId, threadId)`.
 
@@ -228,7 +261,7 @@ A future cross-host handoff MAY create or fork a new thread on another host afte
 
 Several initialized clients MAY observe the same thread.
 
-Dealer MUST tolerate the local TUI and Dealer being subscribed at the same time.
+Dealer MUST tolerate the host-local TUI and Dealer being subscribed at the same time.
 
 ### 4.4 One active human-control surface
 
@@ -246,58 +279,106 @@ Dealer MUST still handle server rejection and races correctly; the control indic
 
 ---
 
-## 5. Workstation app-server lifecycle
+## 5. App-server lifecycle and host distributions
 
 ### 5.1 Direct daemon dependency
 
-Direct dependency on the experimental `codex app-server daemon` is an accepted product decision.
+Direct dependency on the experimental app-server daemon is an accepted product decision.
 
-Dealer MUST integrate with the installed version's machine-readable daemon lifecycle commands over SSH.
+Dealer MUST integrate with the installed distribution's machine-readable daemon lifecycle commands through SSH.
 
-The lifecycle adapter SHOULD support at least:
+The lifecycle adapter SHOULD support:
 
 - querying daemon and running app-server version/status;
 - starting the daemon-managed app-server;
 - restarting it;
 - stopping it when explicitly requested;
-- bootstrapping or restoring the managed installation when the user requests onboarding or repair.
+- bootstrapping or restoring the installation when supported and requested.
 
-Successful daemon commands MUST be parsed as JSON. Dealer MUST NOT scrape human-oriented prose when machine-readable output is available.
+Machine-readable output MUST be parsed when available. Dealer MUST NOT scrape human-oriented prose when a structured response exists.
 
 ### 5.2 Long-lived server requirement
 
 The daemon-managed app-server MUST outlive individual Dealer SSH or proxy connections.
 
-Dealer disconnection MUST NOT stop the app-server or cancel unrelated threads.
+Dealer disconnection MUST NOT stop app-server or cancel unrelated threads.
 
-### 5.3 Unix-only support
+### 5.3 Upstream Linux hosts
 
-Only Unix/Linux hosts are required.
+DGX Spark and u4090 use the upstream Linux Codex distribution.
+
+Dealer MAY use upstream daemon bootstrap and update flows when they are supported by the installed version.
 
 The implementation MUST support:
 
 - Linux ARM64 for DGX Spark;
 - Linux x86-64 for u4090.
 
-Native Windows lifecycle support is out of scope.
+### 5.4 Fold6 Termux host
 
-### 5.4 Local TUI consistency
+Fold6 Termux uses a compatible community Termux Codex distribution. Poker–Dealer MUST NOT describe that distribution as an official OpenAI Android release.
 
-The official Codex TUI SHOULD connect to the same local daemon-backed app-server used by Dealer.
+Termux support is capability-based. Before marking the host `SUPPORTED`, Dealer or the compatibility suite MUST verify:
 
-The workstation setup MUST provide a documented launcher or startup check that ensures the daemon socket is ready before local TUI work, preventing accidental split-brain use of a separate embedded app-server process.
+- daemon lifecycle commands;
+- successful Unix-socket binding;
+- `codex app-server proxy` connectivity;
+- WebSocket and app-server initialization;
+- required stable thread/turn methods;
+- server-request handling;
+- reconnect after proxy and daemon interruption.
+
+Dealer MUST NOT assume that the upstream standalone installer, updater, or daemon bootstrap behavior applies unchanged to Termux.
+
+Termux installation and updates MUST be handled by a distribution-specific adapter or documented user action.
+
+### 5.5 Availability classes
+
+DGX Spark and u4090 are persistent hosts.
+
+Fold6 Termux is an opportunistic mobile host. Android may suspend or stop Termux, `sshd`, the daemon, or app-server.
+
+Dealer MUST expose recoverable states equivalent to:
+
+- host application unavailable;
+- SSH unavailable;
+- daemon stopped;
+- daemon starting/restarting;
+- proxy unavailable;
+- app-server initializing;
+- connected;
+- Android suspended;
+- backoff;
+- error.
+
+### 5.6 Host-local TUI consistency
+
+The host-local Codex TUI SHOULD connect to the same daemon-backed app-server used by Dealer.
+
+Each host setup MUST provide a documented launcher or startup check that ensures the daemon socket is ready before local TUI work, preventing accidental split-brain use of a separate embedded app-server process.
 
 ---
 
 ## 6. Dealer-to-host transport
 
-### 6.1 Network path
+### 6.1 Route selection
 
-Dealer MUST connect to each host through Tailscale and SSH.
+Dealer MUST choose the route from host configuration:
+
+- DGX Spark and u4090: Tailscale + SSH;
+- Fold6 Termux: loopback SSH to a Termux `sshd` listener.
 
 SSH host identity MUST be pinned or verified using a user-approved trust-on-first-use flow. Host-key changes MUST require explicit review.
 
-### 6.2 Control and app-server channels
+Termux loopback access SHOULD use a dedicated Dealer SSH key rather than a reusable password.
+
+### 6.2 Android sandbox boundary
+
+Dealer and Termux are separate Android applications. Dealer MUST NOT rely on direct access to Termux-private files, process descriptors, or Unix sockets.
+
+Loopback SSH plus `codex app-server proxy` is the required boundary for phone-local host access.
+
+### 6.3 Control and app-server channels
 
 Dealer SHOULD maintain two logical SSH uses per host:
 
@@ -306,7 +387,7 @@ Dealer SHOULD maintain two logical SSH uses per host:
 
 Dealer MAY implement both over one multiplexed SSH connection when the library supports independent channels safely.
 
-### 6.3 Proxy framing
+### 6.4 Proxy framing
 
 `codex app-server proxy` connects to the host's Unix socket and proxies the raw stream.
 
@@ -322,7 +403,7 @@ Dealer MUST implement:
 
 The proxy stream MUST NOT be treated as newline-delimited JSON.
 
-### 6.4 App-server initialization
+### 6.5 App-server initialization
 
 Immediately after the WebSocket connection is established, Dealer MUST:
 
@@ -341,13 +422,13 @@ Repeated initialization on the same connection MUST NOT occur.
 
 Dealer SHOULD remain usable across many newer Codex releases without requiring an Android update for every host update.
 
-Literal compatibility with every historical, nightly, experimental, or future breaking version is not required.
+Literal compatibility with every historical, nightly, experimental, community, or future breaking version is not required.
 
 ### 7.2 Stable surface by default
 
 Production Dealer MUST use the stable app-server API surface by default.
 
-Dealer MUST NOT opt into `experimentalApi` globally merely because the daemon itself is experimental.
+Dealer MUST NOT opt into `experimentalApi` globally merely because daemon lifecycle is experimental.
 
 Individual experimental features MAY be added later behind explicit capability detection and feature flags.
 
@@ -365,19 +446,20 @@ Dealer's wire layer MUST:
 - safely reject unknown server-initiated requests so app-server cannot wait indefinitely;
 - avoid sending optional fields that Dealer does not need.
 
-### 7.4 Version handling
+### 7.4 Version and distribution handling
 
 Dealer MUST record independently for each host:
 
+- Codex distribution;
 - local Codex CLI version;
 - running app-server version when reported;
 - platform family and operating system from initialization;
-- compatibility state;
+- capability/compatibility state;
 - last successful connection and smoke test.
 
-DGX Spark and u4090 MAY run different Codex versions.
+Hosts MAY run different Codex versions and distributions.
 
-Dealer MUST NOT require exact version equality between hosts.
+Dealer MUST NOT require exact version equality among hosts.
 
 ### 7.5 Compatibility states
 
@@ -406,18 +488,22 @@ The first production client SHOULD rely on the smallest useful stable subset, in
 - thread/turn/item status and message notifications;
 - supported server-initiated approval and user-input requests.
 
-Method availability MUST be verified against the installed server rather than assumed solely from a hard-coded version number.
+Method availability MUST be verified against the installed server rather than assumed solely from a version number.
 
 ---
 
-## 8. Thread discovery and attachment
+## 8. Host and thread discovery
 
 ### 8.1 Host dashboard
 
-Dealer MUST show both hosts independently with:
+Dealer MUST show every configured host independently with:
 
 - display name;
+- host kind;
 - architecture;
+- distribution;
+- connection route;
+- availability class;
 - SSH state;
 - daemon state;
 - app-server connection state;
@@ -441,7 +527,7 @@ Dealer MUST support paginated thread listing and SHOULD display:
 
 ### 8.3 Resume and read
 
-Dealer SHOULD use read-only thread APIs for browsing when possible and MUST resume/rejoin a thread before sending turns or subscribing to its full live activity when required by app-server semantics.
+Dealer SHOULD use read-only thread APIs for browsing when possible and MUST resume/rejoin a thread before sending turns or subscribing to full live activity when required by app-server semantics.
 
 When resuming a running thread, Dealer MUST treat the response as rejoining the existing live thread, not creating a new conversation.
 
@@ -494,7 +580,7 @@ Auto-follow MAY occur only when the user is already at the logical end or explic
 
 Dealer MUST treat transcript deltas, authoritative item completion, turn completion, and unresolved server requests as lossless.
 
-High-volume cosmetic progress or command-output deltas MAY be coalesced or degraded under backpressure only when the authoritative completed item can reconstruct the final state.
+High-volume cosmetic progress or command-output deltas MAY be coalesced or degraded under backpressure only when the authoritative completed item can reconstruct final state.
 
 ---
 
@@ -533,7 +619,7 @@ Morse and ASR both produce text drafts.
 - Drafts MUST be reviewable before submission by default.
 - ASR partial and final results MUST be visually distinguished.
 - Audio MUST NOT be retained after transcription unless the user explicitly opts in.
-- The selected thread and action type MUST be shown before confirmation.
+- The selected host, thread, and action type MUST be shown before confirmation.
 
 ### 10.4 Idempotency
 
@@ -592,6 +678,8 @@ Dealer MUST treat all of the following as normal recoverable events:
 - daemon restart;
 - app-server update;
 - workstation sleep/reboot;
+- Termux application stop or Android suspension;
+- loopback `sshd` stop;
 - Poker disconnect/restart.
 
 ### 12.2 Host reconnect procedure
@@ -599,26 +687,39 @@ Dealer MUST treat all of the following as normal recoverable events:
 After app-server transport failure, Dealer SHOULD:
 
 1. mark the connection unavailable without deleting cached state;
-2. reconnect SSH with exponential backoff and jitter;
-3. query daemon status/version;
-4. ensure app-server is running;
-5. reopen the proxy;
-6. repeat WebSocket and app-server initialization;
-7. list loaded/stored threads as needed;
-8. read or resume attached threads;
-9. compare authoritative turn/item state with the local projection;
-10. settle pending outbound actions without blind replay;
-11. resynchronize Poker from Dealer's rebuilt projection.
+2. select the configured host route;
+3. reconnect SSH with exponential backoff and jitter;
+4. query distribution-specific daemon status/version;
+5. ensure app-server is running when possible;
+6. reopen the proxy;
+7. repeat WebSocket and app-server initialization;
+8. list loaded/stored threads as needed;
+9. read or resume attached threads;
+10. compare authoritative turn/item state with the local projection;
+11. settle pending outbound actions without blind replay;
+12. resynchronize Poker from Dealer's rebuilt projection.
 
-### 12.3 Daemon updates
+### 12.3 Termux recovery
 
-The daemon updater MAY replace and restart app-server independently of Dealer.
+When the Termux route is unavailable, Dealer MUST distinguish likely recovery actions where possible:
+
+- open/start Termux;
+- start or restore `sshd`;
+- start the app-server daemon;
+- repair or update the community Codex distribution;
+- retry after Android suspension or battery-policy intervention.
+
+Dealer MUST NOT report Fold6 Termux as permanently disconnected merely because Android stopped it.
+
+### 12.4 Daemon updates
+
+A distribution updater MAY replace and restart app-server independently of Dealer.
 
 Dealer MUST not assume one permanent app-server connection.
 
 An app-server restart during an active turn MUST produce an explicit recovered, interrupted, failed, or unknown outcome based on authoritative state. Dealer MUST not fabricate successful completion.
 
-### 12.4 Poker resynchronization
+### 12.5 Poker resynchronization
 
 Dealer remains authoritative for the wearable projection.
 
@@ -641,6 +742,8 @@ Dealer MUST be a native Android application written in Kotlin using:
 
 Dealer is a Codex client, not a terminal emulator.
 
+Dealer and Termux are independent Android apps. No shared-UID or private-filesystem coupling is required or allowed by the architecture.
+
 ### 13.2 Poker
 
 Poker MUST be an ordinary native Android application using public Android APIs and compatible with the observed Android 12/API 32 glasses environment.
@@ -648,13 +751,15 @@ Poker MUST be an ordinary native Android application using public Android APIs a
 Poker MUST use:
 
 - `minSdk = 28`;
+- Kotlin and Jetpack Compose unless measured hardware constraints require a deliberately documented exception;
+- shared pure-Kotlin domain/protocol modules;
 - a foreground service for the Dealer listener when enabled;
 - public Android input and audio APIs;
 - platform-facing interfaces around HUD, input, audio, power, and networking.
 
 ### 13.3 Dealer↔Poker transport
 
-The previously validated topology remains fixed:
+The validated topology remains fixed:
 
 ```text
 Fold6 / Dealer / hotspot owner / TCP client
@@ -678,7 +783,11 @@ Shared pure-Kotlin domain code SHOULD use concepts equivalent to:
 data class CodexHost(
     val id: String,
     val displayName: String,
+    val kind: CodexHostKind,
     val architecture: HostArchitecture,
+    val distribution: CodexDistribution,
+    val connectionRoute: HostConnectionRoute,
+    val availabilityClass: HostAvailabilityClass,
     val connectionState: HostConnectionState,
     val codexVersion: String?,
     val appServerVersion: String?,
@@ -710,9 +819,10 @@ The app-server adapter MUST NOT leak raw JSON parsing into Compose UI classes.
 Dealer MUST persist:
 
 - host IDs and display names;
+- host kind, architecture, distribution, route, and availability class;
 - SSH endpoint configuration;
 - user-approved host-key pins;
-- daemon/app-server compatibility observations;
+- daemon/app-server capability and compatibility observations;
 - attached thread locators;
 - local aliases and presentation policy;
 - recent thread projection and unread state;
@@ -721,7 +831,9 @@ Dealer MUST persist:
 
 Dealer MUST NOT persist plaintext private keys, passwords, bearer tokens, or ChatGPT credentials in Room or DataStore.
 
-Codex authentication remains owned by Codex on each workstation unless a future explicitly designed flow says otherwise.
+Codex authentication remains owned by Codex on each host unless a future explicitly designed flow says otherwise.
+
+The Termux loopback SSH private key MUST be protected like workstation SSH credentials.
 
 ---
 
@@ -735,11 +847,11 @@ Complete when:
 - README, CONTEXT, SPEC, AGENTS, ADRs, models, mocks, tests, and CI consistently use Codex host/thread terminology;
 - no default-branch planning document instructs a worker to implement the old backend.
 
-### M1 — One-host Dealer vertical slice
+### M1 — DGX Spark Dealer vertical slice
 
 Implement on DGX Spark first:
 
-1. configured SSH host;
+1. configured Tailscale SSH host;
 2. daemon status/start integration;
 3. proxy WebSocket connection;
 4. initialize/initialized;
@@ -752,15 +864,28 @@ Implement on DGX Spark first:
 
 Do not include Poker, Morse, ASR, terminal features, or broad experimental APIs in M1.
 
-### M2 — Multi-host and control-surface continuity
+### M2 — u4090 and control-surface continuity
 
 Complete when:
 
 - DGX Spark ARM64 and u4090 x86-64 both work;
 - threads are always host-qualified;
-- local TUI and Dealer can observe the same daemon-backed thread;
+- host-local TUI and Dealer can observe the same daemon-backed thread;
 - Dealer exposes intended control and safe take-control behavior;
 - host versions may differ without breaking core use.
+
+### M2T — Fold6 Termux host
+
+Complete when:
+
+- Dealer stores Fold6 Termux as a `TERMUX_ANDROID` / `ANDROID_ARM64` / `TERMUX_COMMUNITY` host;
+- loopback SSH authentication works without plaintext passwords;
+- distribution-specific daemon status/start behavior works;
+- proxy WebSocket and app-server initialization work;
+- thread list/read/resume and one turn work;
+- local Termux TUI and Dealer can observe the same thread;
+- Android suspension/process death recovery is user-visible and deterministic;
+- capability checks document the tested community Codex build and limitations.
 
 ### M3 — Structured actions and approvals
 
@@ -776,7 +901,7 @@ Complete when Dealer supports:
 Complete when Poker can:
 
 - pair with Dealer;
-- list attached host-qualified threads;
+- list attached host-qualified threads from all supported hosts;
 - switch conversations;
 - read retained history and live agent output;
 - reconnect deterministically;
@@ -796,18 +921,20 @@ Complete when Poker supports:
 
 Complete when:
 
-- lifecycle/power tests pass on both hosts, Fold6, and Rokid;
-- daemon/app-server update interruption is handled;
+- lifecycle/power tests pass on DGX Spark, u4090, Fold6 Termux, Dealer, and Rokid;
+- daemon/app-server update interruption is handled per distribution;
 - compatibility and recovery diagnostics are user-visible;
-- security review covers SSH, secrets, Poker pairing, and approval safety;
+- security review covers SSH, Android sandbox boundaries, secrets, Poker pairing, and approval safety;
 - end-to-end real-hardware acceptance is recorded.
 
 ---
 
 ## 17. Immediate next job
 
-A fresh Codex worker MUST begin with the M1 one-host Dealer vertical slice on DGX Spark.
+A fresh Codex worker MUST begin with the M1 DGX Spark Dealer vertical slice.
 
-The worker MUST NOT start by restoring a bridge, integrating tmux, adding Poker networking, or building a terminal.
+The worker MUST NOT start by restoring a bridge, integrating tmux, adding Poker networking, building a terminal, or implementing Termux-specific lifecycle behavior first.
 
-The first deliverable is a tested Dealer-side adapter that can connect through SSH + proxy to the long-lived daemon, initialize app-server, list and resume one thread, stream one turn, and recover from reconnect without duplicate input.
+The first deliverable is a tested Dealer-side adapter that can connect through Tailscale SSH + proxy to the long-lived Spark daemon, initialize app-server, list and resume one thread, stream one turn, and recover from reconnect without duplicate input.
+
+The adapter architecture MUST already separate host kind, distribution, route, and availability so u4090 and Fold6 Termux can be added without rewriting the app-server protocol layer.
