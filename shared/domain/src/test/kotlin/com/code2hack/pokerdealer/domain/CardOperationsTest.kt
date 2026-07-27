@@ -39,6 +39,6 @@ class CardOperationsTest {
         fullText = text,
         createdAtMs = 1,
         updatedAtMs = revision,
-        source = CardSource.TMUX_OUTPUT,
+        source = CardSource.CODEX_AGENT_MESSAGE,
     )
 }

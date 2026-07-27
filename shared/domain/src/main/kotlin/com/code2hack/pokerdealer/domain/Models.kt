@@ -6,37 +6,78 @@ const val MAX_CARD_UTF8_BYTES = 512 * 1_024
 const val DEFAULT_MAX_REPLY_UTF8_BYTES = 64 * 1_024
 
 @Serializable
-data class PaneLocator(
+data class CodexHost(
+    val id: String,
+    val displayName: String,
+    val architecture: HostArchitecture,
+    val connectionState: HostConnectionState,
+    val daemonState: DaemonState = DaemonState.UNKNOWN,
+    val codexVersion: String? = null,
+    val appServerVersion: String? = null,
+)
+
+@Serializable
+enum class HostArchitecture {
+    LINUX_ARM64,
+    LINUX_X86_64,
+}
+
+@Serializable
+enum class HostConnectionState {
+    DISCONNECTED,
+    CONNECTING_SSH,
+    CHECKING_DAEMON,
+    CONNECTING_PROXY,
+    INITIALIZING,
+    CONNECTED,
+    BACKING_OFF,
+    ERROR,
+}
+
+@Serializable
+enum class DaemonState {
+    UNKNOWN,
+    STOPPED,
+    STARTING,
+    READY,
+    RESTARTING,
+    ERROR,
+}
+
+@Serializable
+data class CodexThreadLocator(
     val hostId: String,
-    val tmuxServerId: String,
-    val paneId: String,
-    val sessionId: String? = null,
-    val windowId: String? = null,
-    val sessionName: String? = null,
-    val windowName: String? = null,
-    val paneIndex: Int? = null,
-    val paneTitle: String? = null,
-    val currentCommand: String? = null,
+    val threadId: String,
 )
 
 @Serializable
 data class Conversation(
     val id: String,
-    val locator: PaneLocator,
+    val locator: CodexThreadLocator,
     val alias: String,
-    val captureProfile: CaptureProfile = CaptureProfile.SCREEN_DIFF,
-    val presentationPolicy: PresentationPolicy = PresentationPolicy(),
-    val inputPolicy: InputPolicy = InputPolicy(),
     val state: ConversationState,
+    val intendedControlSurface: ControlSurface = ControlSurface.NONE,
     val lastSequence: Long,
     val unreadCount: Int,
 )
 
 @Serializable
-enum class ConversationState { ATTACHING, ONLINE, OFFLINE, STALE, DETACHED, ERROR }
+enum class ConversationState {
+    NOT_LOADED,
+    IDLE,
+    ACTIVE,
+    OFFLINE,
+    SYSTEM_ERROR,
+    ARCHIVED,
+}
 
 @Serializable
-enum class CaptureProfile { RAW_LINES, SCREEN_DIFF, SHELL_OSC133, STRUCTURED_AGENT }
+enum class ControlSurface {
+    NONE,
+    LOCAL_TUI,
+    DEALER,
+    POKER,
+}
 
 @Serializable
 data class Card(
@@ -58,16 +99,43 @@ data class Card(
 )
 
 @Serializable
-enum class CardRole { USER, AGENT, TERMINAL, SYSTEM }
+enum class CardRole {
+    USER,
+    AGENT,
+    TOOL,
+    SYSTEM,
+}
 
 @Serializable
-enum class CardState { OPEN, COMMITTED, CORRECTED, FAILED }
+enum class CardState {
+    OPEN,
+    COMMITTED,
+    CORRECTED,
+    FAILED,
+}
 
 @Serializable
-enum class DeliveryState { LOCAL_PENDING, ACCEPTED, DELIVERED, REJECTED, UNKNOWN }
+enum class DeliveryState {
+    LOCAL_PENDING,
+    ACCEPTED,
+    DELIVERED,
+    REJECTED,
+    UNKNOWN,
+}
 
 @Serializable
-enum class CardSource { POKER_INPUT, DEALER_INPUT, TMUX_OUTPUT, STRUCTURED_EVENT, SYSTEM }
+enum class CardSource {
+    POKER_INPUT,
+    DEALER_INPUT,
+    CODEX_USER_MESSAGE,
+    CODEX_AGENT_MESSAGE,
+    CODEX_PLAN,
+    CODEX_REASONING,
+    CODEX_COMMAND,
+    CODEX_FILE_CHANGE,
+    CODEX_APPROVAL,
+    SYSTEM,
+}
 
 @Serializable
 data class PresentationPolicy(
@@ -81,38 +149,19 @@ data class PresentationPolicy(
 )
 
 @Serializable
-enum class AgentDisplayMode { FULL, CONCLUSION_ONLY, CONCLUSION_THEN_FULL }
+enum class AgentDisplayMode {
+    FULL,
+    CONCLUSION_ONLY,
+    CONCLUSION_THEN_FULL,
+}
 
 @Serializable
 data class InputPolicy(
-    val defaultSubmitMode: SubmitMode = SubmitMode.PASTE_AND_ENTER,
     val requireReviewForAsr: Boolean = true,
     val requireReviewForMorse: Boolean = true,
-    val allowMultilineAutoSubmit: Boolean = false,
+    val allowTurnStart: Boolean = true,
+    val allowTurnSteer: Boolean = true,
+    val allowTurnInterrupt: Boolean = true,
+    val allowApprovalDecision: Boolean = true,
     val maxInputUtf8Bytes: Int = DEFAULT_MAX_REPLY_UTF8_BYTES,
-    val allowedKeyCommands: Set<KeyCommand> = KeyCommand.DEFAULT_ALLOWED,
 )
-
-@Serializable
-enum class SubmitMode { PASTE_ONLY, PASTE_AND_ENTER }
-
-@Serializable
-enum class KeyCommand {
-    ENTER,
-    ESCAPE,
-    TAB,
-    BACKSPACE,
-    UP,
-    DOWN,
-    LEFT,
-    RIGHT,
-    CONTROL_C,
-    CONTROL_D,
-    CONTROL_Z,
-    PAGE_UP,
-    PAGE_DOWN;
-
-    companion object {
-        val DEFAULT_ALLOWED = entries.toSet()
-    }
-}

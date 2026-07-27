@@ -65,6 +65,11 @@ private fun PokerMockCardReader() {
                 Text("1 / 1", color = Color(0xFFAFC4D8))
             }
             Text(
+                "${MockDeck.host.displayName} · ${MockDeck.conversation.locator.threadId}",
+                color = Color(0xFFAFC4D8),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
                 "AGENT · COMMITTED · ${card.fullText.length} chars · $transportState",
                 color = Color(0xFF83E6AD),
                 style = MaterialTheme.typography.labelSmall,
@@ -88,7 +93,7 @@ private fun PokerMockCardReader() {
         }
 
         Text(
-            "Swipe/drag to scroll · full text retained",
+            "Swipe/drag to scroll · full Codex text retained",
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Color(0xFF101820))
