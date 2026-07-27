@@ -153,12 +153,15 @@ The phone-local host is useful for developing and debugging Poker/Dealer and oth
 
 The repository uses Codex host/thread terminology throughout. The old Rust tmux bridge and scratch planning tree were removed. The previous SSH-supervised WebRTC/tmux proposal is closed as superseded.
 
+M1 is complete on u4090 through trusted-LAN SSH. The recorded proof is in `docs/evidence/u4090-m1-2026-07-27.md`.
+
+Dealer's M1 screen accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn.
+
 The next implementation sequence is:
 
-1. Build a route-neutral Spark SSH/app-server vertical slice using an available route, preferably LAN.
-2. Add the embedded-tsnet Android spike without rewriting SSH or app-server code.
-3. Add u4090.
-4. Add Fold6 Termux through the same app-server adapter.
+1. Add the embedded-tsnet Android spike without rewriting SSH or app-server code.
+2. Add the remaining workstation host.
+3. Add Fold6 Termux through the same app-server adapter.
 
 ## Build and test
 
@@ -178,6 +181,8 @@ Equivalent command:
 ```sh
 ./gradlew test lint
 ```
+
+The opt-in u4090 live test is `U4090LiveM1Test`. It takes the LAN endpoint, SSH username, private-key path, pinned `known_hosts` path, and an idle thread ID from `POKER_DEALER_LIVE_*` environment variables. Concrete private-network endpoints and credentials are intentionally not stored in this public repository.
 
 Build the developer APKs:
 

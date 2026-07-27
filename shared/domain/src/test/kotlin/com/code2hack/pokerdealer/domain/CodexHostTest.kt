@@ -34,24 +34,11 @@ class CodexHostTest {
 
     @Test
     fun `workstation preserves ordered route preference`() {
-        val host = CodexHost(
-            id = "spark",
-            displayName = "DGX Spark",
-            kind = CodexHostKind.LINUX_WORKSTATION,
-            architecture = HostArchitecture.LINUX_ARM64,
-            distribution = CodexDistribution.OPENAI_UPSTREAM,
-            connectionRoutes = listOf(
-                HostConnectionRoute.SSH_LAN,
-                HostConnectionRoute.SSH_EMBEDDED_TSNET,
-                HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
-            ),
-            activeConnectionRoute = HostConnectionRoute.SSH_EMBEDDED_TSNET,
-            availabilityClass = HostAvailabilityClass.PERSISTENT,
-            connectionState = HostConnectionState.CONNECTED,
-        )
+        val host = InitialCodexHosts.u4090.copy(activeConnectionRoute = HostConnectionRoute.SSH_EMBEDDED_TSNET)
 
         assertEquals(HostConnectionRoute.SSH_LAN, host.connectionRoutes.first())
         assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, host.connectionRoutes[1])
+        assertEquals(HostArchitecture.LINUX_X86_64, host.architecture)
         assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, host.activeConnectionRoute)
     }
 

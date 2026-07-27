@@ -33,7 +33,7 @@ Tailscale's Go `tsnet` library can run a userspace tailnet node inside one proce
 11. Interactive browser enrollment is the default onboarding path. One-time or ephemeral auth-key enrollment MAY be supported later with explicit secret-handling rules.
 12. The standalone Tailscale Android application is not required for Dealer operation, but remains an optional fallback and diagnostic tool.
 13. Underlying Hiddify/Clash routing may still affect UDP, coordination, or DERP reachability. Compatibility MUST be proven on the Fold6 with the user's real VPN configuration.
-14. Embedded `tsnet` work follows the initial transport-neutral Spark app-server slice. The first slice MUST isolate SSH behind a dialer/stream interface so adding `tsnet` does not rewrite SSH or app-server layers.
+14. Embedded `tsnet` work follows the initial transport-neutral workstation app-server slice. The first slice MUST isolate SSH behind a dialer/stream interface so adding `tsnet` does not rewrite SSH or app-server layers.
 
 ## Security requirements
 

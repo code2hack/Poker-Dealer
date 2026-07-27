@@ -87,6 +87,23 @@ data class CodexThreadLocator(
     val threadId: String,
 )
 
+object InitialCodexHosts {
+    val u4090 = CodexHost(
+        id = "u4090",
+        displayName = "u4090",
+        kind = CodexHostKind.LINUX_WORKSTATION,
+        architecture = HostArchitecture.LINUX_X86_64,
+        distribution = CodexDistribution.OPENAI_UPSTREAM,
+        connectionRoutes = listOf(
+            HostConnectionRoute.SSH_LAN,
+            HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+        ),
+        availabilityClass = HostAvailabilityClass.PERSISTENT,
+        connectionState = HostConnectionState.DISCONNECTED,
+    )
+}
+
 @Serializable
 data class Conversation(
     val id: String,

@@ -1,0 +1,9 @@
+{
+  "id": 1,
+  "result": {
+    "codexHome": "/home/code2hack/.codex",
+    "platformFamily": "unix",
+    "platformOs": "linux",
+    "userAgent": "codex-cli/0.145.0"
+  }
+}

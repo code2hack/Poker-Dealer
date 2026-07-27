@@ -1,0 +1,27 @@
+{
+  "method": "turn/completed",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "turn": {
+      "id": "turn_new",
+      "startedAt": 1784600400,
+      "completedAt": 1784600420,
+      "status": "completed",
+      "items": [
+        {
+          "id": "item_user_new",
+          "type": "userMessage",
+          "clientId": "dealer-client-u4090-m1",
+          "content": [
+            { "type": "text", "text": "Dealer M1 proof from u4090" }
+          ]
+        },
+        {
+          "id": "item_agent_stream",
+          "type": "agentMessage",
+          "text": "streamed answer"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "method": "thread/read",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "includeTurns": true
+  }
+}

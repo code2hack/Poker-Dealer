@@ -1,0 +1,326 @@
+package com.code2hack.pokerdealer.protocol.appserver
+
+import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
+
+private val WebSocketRandom = SecureRandom()
+private fun SecureRandom.bytes(size: Int): ByteArray = ByteArray(size).also(::nextBytes)
+
+val AppServerJson = Json {
+    encodeDefaults = false
+    explicitNulls = false
+    ignoreUnknownKeys = true
+}
+
+class AppServerWebSocket(
+    private val stream: DuplexByteStream,
+    private val hostHeader: String = "localhost",
+    private val keyFactory: () -> String = { Base64.getEncoder().encodeToString(WebSocketRandom.bytes(16)) },
+    private val maskFactory: () -> ByteArray = { WebSocketRandom.bytes(4) },
+    private val maxPayloadBytes: Long = 8L * 1_024 * 1_024,
+    private val maxHeaderBytes: Int = 16 * 1_024,
+) {
+    init {
+        require(maxPayloadBytes in 1..Int.MAX_VALUE.toLong()) { "WebSocket payload limit is invalid" }
+        require(maxHeaderBytes > 0) { "WebSocket header limit must be positive" }
+    }
+
+    suspend fun open() {
+        val key = keyFactory()
+        val request = buildString {
+            append("GET / HTTP/1.1\r\n")
+            append("Host: ").append(hostHeader).append("\r\n")
+            append("Upgrade: websocket\r\n")
+            append("Connection: Upgrade\r\n")
+            append("Sec-WebSocket-Key: ").append(key).append("\r\n")
+            append("Sec-WebSocket-Version: 13\r\n")
+            append("\r\n")
+        }
+        stream.write(request.toByteArray(Charsets.US_ASCII))
+        val response = readHttpHeader()
+        require(response.lineSequence().firstOrNull()?.contains(" 101 ") == true) {
+            "app-server proxy did not upgrade to WebSocket"
+        }
+        require(response.header("Upgrade").equals("websocket", ignoreCase = true)) {
+            "app-server proxy returned an invalid Upgrade header"
+        }
+        require(response.header("Connection")?.split(',')?.any { it.trim().equals("upgrade", ignoreCase = true) } == true) {
+            "app-server proxy returned an invalid Connection header"
+        }
+        val accept = response.header("Sec-WebSocket-Accept")
+        require(accept == websocketAccept(key)) { "app-server proxy returned an invalid WebSocket accept key" }
+    }
+
+    suspend fun sendText(text: String) {
+        val payload = text.toByteArray(Charsets.UTF_8)
+        require(payload.size.toLong() <= maxPayloadBytes) { "WebSocket payload exceeds limit" }
+        writeFrame(opcode = 0x1, payload = payload)
+    }
+
+    suspend fun readText(): String? {
+        val message = ByteArrayOutputStream()
+        var textStarted = false
+        while (true) {
+            val first = readByteOrNull() ?: return null
+            require(first and 0x70 == 0) { "WebSocket extensions are not supported" }
+            val fin = first and 0x80 != 0
+            val opcode = first and 0x0F
+            val second = readByte()
+            val masked = second and 0x80 != 0
+            require(!masked) { "Server WebSocket frames must not be masked" }
+            val length = readPayloadLength(second and 0x7F)
+            require(length <= maxPayloadBytes) { "WebSocket payload exceeds limit" }
+            if (opcode >= 0x8) {
+                require(fin) { "WebSocket control frames must not be fragmented" }
+                require(length <= 125) { "WebSocket control frame is too large" }
+            }
+            val payload = readExactly(length.toInt())
+
+            when (opcode) {
+                0x0 -> {
+                    require(textStarted) { "Unexpected continuation frame" }
+                    require(message.size().toLong() + length <= maxPayloadBytes) { "WebSocket message exceeds limit" }
+                    message.write(payload)
+                    if (fin) return message.toByteArray().toString(Charsets.UTF_8)
+                }
+                0x1 -> {
+                    require(!textStarted) { "Unexpected text frame before fragmented message completed" }
+                    require(length <= maxPayloadBytes) { "WebSocket message exceeds limit" }
+                    textStarted = true
+                    message.write(payload)
+                    if (fin) return message.toByteArray().toString(Charsets.UTF_8)
+                }
+                0x8 -> return null
+                0x9 -> writeFrame(opcode = 0xA, payload = payload)
+                0xA -> Unit
+                else -> error("Unsupported WebSocket opcode $opcode")
+            }
+        }
+    }
+
+    suspend fun close() {
+        stream.close()
+    }
+
+    private suspend fun writeFrame(opcode: Int, payload: ByteArray) {
+        val header = ByteArrayOutputStream()
+        header.write(0x80 or opcode)
+        when {
+            payload.size < 126 -> header.write(0x80 or payload.size)
+            payload.size <= 0xFFFF -> {
+                header.write(0x80 or 126)
+                header.write((payload.size ushr 8) and 0xFF)
+                header.write(payload.size and 0xFF)
+            }
+            else -> {
+                header.write(0x80 or 127)
+                for (shift in 56 downTo 0 step 8) header.write((payload.size.toLong() ushr shift).toInt() and 0xFF)
+            }
+        }
+        val mask = maskFactory()
+        require(mask.size == 4) { "WebSocket client mask must be four bytes" }
+        header.write(mask)
+        val maskedPayload = payload.copyOf()
+        maskedPayload.indices.forEach { index ->
+            maskedPayload[index] = (maskedPayload[index].toInt() xor mask[index % 4].toInt()).toByte()
+        }
+        stream.write(header.toByteArray() + maskedPayload)
+    }
+
+    private suspend fun readHttpHeader(): String {
+        val bytes = ByteArrayOutputStream()
+        val delimiter = byteArrayOf(13, 10, 13, 10)
+        var matched = 0
+        while (matched < delimiter.size) {
+            require(bytes.size() < maxHeaderBytes) { "WebSocket HTTP header exceeds limit" }
+            val byte = readByte()
+            bytes.write(byte)
+            matched = when {
+                byte == delimiter[matched].toInt() -> matched + 1
+                byte == delimiter[0].toInt() -> 1
+                else -> 0
+            }
+        }
+        return bytes.toByteArray().toString(Charsets.US_ASCII)
+    }
+
+    private suspend fun readPayloadLength(marker: Int): Long = when (marker) {
+        126 -> readExactly(2).fold(0L) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF).toLong() }
+        127 -> readExactly(8).also { require(it[0].toInt() and 0x80 == 0) { "Invalid WebSocket payload length" } }
+            .fold(0L) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF).toLong() }
+        else -> marker.toLong()
+    }
+
+    private suspend fun readByte(): Int = readByteOrNull() ?: error("Unexpected EOF")
+
+    private suspend fun readByteOrNull(): Int? {
+        val one = ByteArray(1)
+        while (true) {
+            when (stream.read(one)) {
+                -1 -> return null
+                0 -> error("Duplex stream made no read progress")
+                else -> return one[0].toInt() and 0xFF
+            }
+        }
+    }
+
+    private suspend fun readExactly(size: Int): ByteArray {
+        val out = ByteArray(size)
+        var offset = 0
+        while (offset < size) {
+            val read = stream.read(out, offset, size - offset)
+            require(read != -1) { "Unexpected EOF" }
+            require(read > 0) { "Duplex stream made no read progress" }
+            offset += read
+        }
+        return out
+    }
+}
+
+private fun String.header(name: String): String? {
+    return lineSequence().drop(1).firstNotNullOfOrNull { line ->
+        val separator = line.indexOf(':')
+        if (separator == -1 || !line.substring(0, separator).trim().equals(name, ignoreCase = true)) {
+            null
+        } else {
+            line.substring(separator + 1).trim()
+        }
+    }
+}
+
+private fun websocketAccept(key: String): String {
+    val digest = MessageDigest.getInstance("SHA-1")
+        .digest("${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".toByteArray(Charsets.US_ASCII))
+    return Base64.getEncoder().encodeToString(digest)
+}
+
+data class AppServerNotification(
+    val method: String,
+    val params: JsonElement = JsonObject(emptyMap()),
+    val raw: JsonObject? = null,
+)
+
+interface JsonRpcPeer {
+    suspend fun request(method: String, params: JsonElement = JsonObject(emptyMap())): JsonElement
+    suspend fun notify(method: String, params: JsonElement? = null)
+    suspend fun receiveNotification(): AppServerNotification?
+    suspend fun close()
+}
+
+class WebSocketJsonRpcPeer(
+    private val socket: AppServerWebSocket,
+    private val maxPendingNotifications: Int = 1_024,
+) : JsonRpcPeer {
+    private var nextId = 1L
+    private val pending = ArrayDeque<AppServerNotification>()
+
+    init {
+        require(maxPendingNotifications > 0) { "Pending notification limit must be positive" }
+    }
+
+    override suspend fun request(method: String, params: JsonElement): JsonElement {
+        val id = JsonPrimitive(nextId++)
+        send(
+            buildJsonObject {
+                put("id", id)
+                put("method", JsonPrimitive(method))
+                put("params", params)
+            },
+        )
+        while (true) {
+            when (val inbound = readInbound() ?: error("Connection closed before $method response")) {
+                is Inbound.Response -> {
+                    require(inbound.id == id) {
+                        "Unexpected app-server response ${inbound.id}; waiting for $id"
+                    }
+                    inbound.error?.let { error("app-server $method failed: $it") }
+                    return inbound.result ?: JsonNull
+                }
+                is Inbound.Notification -> {
+                    require(pending.size < maxPendingNotifications) { "Too many pending app-server notifications" }
+                    pending += AppServerNotification(inbound.method, inbound.params ?: JsonObject(emptyMap()), inbound.raw)
+                }
+                is Inbound.ServerRequest -> reject(inbound)
+            }
+        }
+    }
+
+    override suspend fun notify(method: String, params: JsonElement?) {
+        send(
+            buildJsonObject {
+                put("method", JsonPrimitive(method))
+                if (params != null) put("params", params)
+            },
+        )
+    }
+
+    override suspend fun receiveNotification(): AppServerNotification? {
+        if (pending.isNotEmpty()) return pending.removeFirst()
+        while (true) {
+            when (val inbound = readInbound() ?: return null) {
+                is Inbound.Notification ->
+                    return AppServerNotification(inbound.method, inbound.params ?: JsonObject(emptyMap()), inbound.raw)
+                is Inbound.ServerRequest -> reject(inbound)
+                is Inbound.Response -> error("Unexpected app-server response ${inbound.id}")
+            }
+        }
+    }
+
+    override suspend fun close() {
+        socket.close()
+    }
+
+    private suspend fun send(message: JsonObject) {
+        socket.sendText(AppServerJson.encodeToString(JsonElement.serializer(), message))
+    }
+
+    private suspend fun reject(request: Inbound.ServerRequest) {
+        send(
+            buildJsonObject {
+                put("id", request.id)
+                put(
+                    "error",
+                    buildJsonObject {
+                        put("code", JsonPrimitive(-32601))
+                        put("message", JsonPrimitive("Dealer cannot handle server request '${request.method}'"))
+                    },
+                )
+            },
+        )
+    }
+
+    private suspend fun readInbound(): Inbound? {
+        val text = socket.readText() ?: return null
+        val message = AppServerJson.parseToJsonElement(text) as? JsonObject
+            ?: error("Invalid JSON-RPC message: expected object")
+        val id = message["id"]
+        val method = (message["method"] as? JsonPrimitive)?.contentOrNull
+        return when {
+            method != null && id != null -> Inbound.ServerRequest(id, method, message["params"], message)
+            method != null -> Inbound.Notification(method, message["params"], message)
+            id != null -> Inbound.Response(id, message["result"], message["error"])
+            else -> error("Invalid JSON-RPC message: $message")
+        }
+    }
+
+    private sealed interface Inbound {
+        data class Response(val id: JsonElement, val result: JsonElement?, val error: JsonElement?) : Inbound
+        data class Notification(val method: String, val params: JsonElement?, val raw: JsonObject) : Inbound
+        data class ServerRequest(
+            val id: JsonElement,
+            val method: String,
+            val params: JsonElement?,
+            val raw: JsonObject,
+        ) : Inbound
+    }
+}

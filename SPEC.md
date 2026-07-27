@@ -1,6 +1,6 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 5  
+**Status:** Normative implementation contract, revision 6
 **Date:** 2026-07-27  
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
@@ -739,11 +739,11 @@ Codex authentication remains owned by Codex on each host.
 
 Complete when the tmux backend is removed and all default-branch guidance consistently uses Codex host/thread terminology.
 
-### M1 — Transport-neutral DGX Spark app-server slice
+### M1 — Transport-neutral one-workstation app-server slice
 
 Complete when Dealer:
 
-1. models Spark with ordered route metadata;
+1. models the first available persistent Linux workstation with ordered route metadata, currently u4090 while DGX Spark is unavailable;
 2. exposes a route-neutral TCP/duplex-stream boundary;
 3. connects through one available route, preferably trusted LAN;
 4. establishes SSH;
@@ -759,13 +759,15 @@ External Tailscale MAY be used temporarily if LAN is unavailable, but M1 MUST NO
 
 Do not include Poker, Morse, ASR, terminal features, or broad experimental APIs in M1.
 
+M1 completed on u4090 through trusted-LAN SSH on 2026-07-27. The implementation and recorded evidence are transport-neutral; the proof did not claim embedded-tsnet or Fold6 validation. See `docs/evidence/u4090-m1-2026-07-27.md`.
+
 ### M1T — Embedded tsnet Android spike
 
 Complete when:
 
 - a pinned Tailscale Go dependency builds reproducibly into an Android ARM64 AAR/module;
 - Dealer can enroll a distinct tailnet node without `VpnService`;
-- Dealer can open an SSH-capable loopback tunnel or authenticated SOCKS route to Spark;
+- Dealer can open an SSH-capable loopback tunnel or authenticated SOCKS route to the selected workstation;
 - the M1 SSH/app-server stack runs through embedded tsnet without code duplication;
 - node state survives Dealer restart;
 - logout/reset works;
@@ -774,7 +776,7 @@ Complete when:
 - direct and DERP-relayed behavior is recorded;
 - foreground-service, battery, reconnect, and route-fallback behavior is recorded.
 
-### M2 — u4090 and route continuity
+### M2 — remaining workstation and route continuity
 
 Complete when:
 
@@ -815,12 +817,6 @@ Complete when:
 
 ## 17. Immediate next job
 
-A fresh Codex worker MUST begin with M1, the transport-neutral DGX Spark Dealer slice.
+A fresh Codex worker MUST begin with M1T, the embedded-tsnet Android spike defined above. It MUST reuse the M1 route-neutral stream, SSH, proxy WebSocket, app-server, projection, and reconnect implementation without introducing transport dependencies above the dialer boundary.
 
-The first deliverable is a tested Dealer-side stack that can obtain a byte stream from a route provider, establish SSH, reach the long-lived Spark daemon through `codex app-server proxy`, initialize app-server, list and resume one thread, stream one turn, and recover without duplicate input.
-
-The worker MUST NOT hardwire app-server logic to the standalone Tailscale Android app, and MUST NOT implement a system VPN.
-
-After M1, the next connectivity job is M1T: the embedded-tsnet Android spike defined above.
-
-The worker MUST NOT restore a bridge, integrate tmux as backend, add Poker networking, build a terminal, or start Termux-specific lifecycle behavior before the shared stack is stable.
+The worker MUST NOT implement a system VPN, restore a bridge, integrate tmux as backend, add Poker networking, build a terminal, or start Termux-specific lifecycle behavior during M1T.

@@ -16,6 +16,7 @@ import com.code2hack.pokerdealer.domain.HostArchitecture
 import com.code2hack.pokerdealer.domain.HostAvailabilityClass
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.HostConnectionState
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
 
 object MockDeck {
     val sparkHost = CodexHost(
@@ -37,19 +38,12 @@ object MockDeck {
         appServerVersion = "mock-current",
     )
 
-    val u4090Host = CodexHost(
-        id = "u4090",
-        displayName = "u4090",
-        kind = CodexHostKind.LINUX_WORKSTATION,
-        architecture = HostArchitecture.LINUX_X86_64,
-        distribution = CodexDistribution.OPENAI_UPSTREAM,
-        connectionRoutes = listOf(
-            HostConnectionRoute.SSH_LAN,
-            HostConnectionRoute.SSH_EMBEDDED_TSNET,
-            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
-        ),
-        availabilityClass = HostAvailabilityClass.PERSISTENT,
-        connectionState = HostConnectionState.DISCONNECTED,
+    val u4090Host = InitialCodexHosts.u4090.copy(
+        activeConnectionRoute = HostConnectionRoute.SSH_LAN,
+        connectionState = HostConnectionState.CONNECTED,
+        daemonState = DaemonState.READY,
+        codexVersion = "mock-current",
+        appServerVersion = "mock-current",
     )
 
     val termuxHost = CodexHost(
@@ -65,7 +59,7 @@ object MockDeck {
     )
 
     val hosts = listOf(sparkHost, u4090Host, termuxHost)
-    val host = sparkHost
+    val host = u4090Host
 
     val conversation = Conversation(
         id = "mock-conversation",

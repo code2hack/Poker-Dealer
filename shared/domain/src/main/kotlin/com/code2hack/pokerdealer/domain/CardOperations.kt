@@ -15,7 +15,9 @@ class CardRevisionStore {
     }
 
     fun get(cardId: String): Card? = cards[cardId]
+    fun values(): List<Card> = cards.values.sortedWith(compareBy(Card::sequence, Card::id))
 }
+
 fun splitCardTextAtNewlines(
     text: String,
     maxUtf8Bytes: Int = MAX_CARD_UTF8_BYTES,

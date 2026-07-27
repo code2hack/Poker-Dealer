@@ -1,0 +1,20 @@
+{
+  "id": 5,
+  "result": {
+    "turn": {
+      "id": "turn_new",
+      "startedAt": 1784600400,
+      "status": "inProgress",
+      "items": [
+        {
+          "id": "item_user_new",
+          "type": "userMessage",
+          "clientId": "dealer-client-u4090-m1",
+          "content": [
+            { "type": "text", "text": "Dealer M1 proof from u4090" }
+          ]
+        }
+      ]
+    }
+  }
+}

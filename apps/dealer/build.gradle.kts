@@ -11,7 +11,7 @@ android {
         minSdk = 33
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0-m0"
+        versionName = "0.1.0-m1"
     }
 
     buildFeatures {
@@ -36,7 +36,6 @@ android {
 dependencies {
     implementation(project(":shared:domain"))
     implementation(project(":shared:protocol"))
-    implementation(project(":shared:testing"))
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
     implementation(libs.compose.ui)

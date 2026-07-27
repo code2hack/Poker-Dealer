@@ -65,7 +65,7 @@ Fold6 Termux uses only:
 SSH_LOOPBACK
 ```
 
-The initial Spark app-server slice may use a simpler available route, but it must introduce a route-neutral stream abstraction before embedded `tsnet` is implemented.
+M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundary required by embedded `tsnet`. The live proof completed on 2026-07-27; see `docs/evidence/u4090-m1-2026-07-27.md`. M1T is the current milestone.
 
 ## Core identity
 

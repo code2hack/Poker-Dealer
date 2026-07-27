@@ -14,6 +14,20 @@ Before changing code:
 
 If code disagrees with `SPEC.md`, the specification wins until code and specification are deliberately changed in the same commit.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `code2hack/Poker-Dealer`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default triage label vocabulary is used. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo with root `CONTEXT.md` and root ADRs. See `docs/agents/domain.md`.
+
 ## Current product
 
 Poker–Dealer is a private mobile and wearable Codex client.
@@ -137,25 +151,11 @@ Git history may contain these designs. History is evidence only, not current gui
 
 ## Immediate next slice
 
-Unless a newer committed plan says otherwise, implement one narrow vertical slice on DGX Spark first:
+M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`.
 
-1. Define a route-neutral host TCP/duplex-stream interface.
-2. Configure the Spark host in Dealer with LAN and tailnet route metadata.
-3. Use a simple available route for the first proof, preferably trusted LAN; external Tailscale may be used temporarily when LAN is unavailable.
-4. Connect SSH through the route-neutral interface.
-5. Query daemon status/version and ensure it is running.
-6. Launch `codex app-server proxy` through SSH.
-7. Complete the WebSocket and app-server initialization handshakes.
-8. Call `thread/list`.
-9. Resume one thread.
-10. Render its existing turns/items in Dealer.
-11. Send one `turn/start` with an idempotent client message identifier when supported.
-12. Stream the agent message to completion.
-13. Reconnect and prove no duplicate user turn is created.
+Unless a newer committed plan says otherwise, implement M1T: the embedded-tsnet Android spike. Keep the existing route-neutral SSH, WebSocket, and app-server layers unchanged. Package pinned Go/Tailscale dependencies behind a narrow Android boundary, enroll a Dealer-owned userspace node without `VpnService`, expose only Dealer-owned workstation connections, and record real Fold6 direct/DERP, VPN-coexistence, reconnect, foreground-service, and battery evidence.
 
-After that slice is stable, implement the embedded-tsnet Android spike without rewriting SSH or app-server layers. Add u4090 after Spark, then Fold6 Termux through the same app-server adapter.
-
-Do not start with Poker networking, Morse, ASR, a terminal, broad experimental app-server APIs, or Termux-specific lifecycle work.
+Do not start Poker networking, Morse, ASR, a terminal, broad experimental app-server APIs, or Termux-specific lifecycle work in M1T.
 
 ## Completion discipline
 
