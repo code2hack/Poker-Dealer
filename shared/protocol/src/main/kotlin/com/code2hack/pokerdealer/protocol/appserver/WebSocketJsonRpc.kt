@@ -1,6 +1,9 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
+import com.code2hack.pokerdealer.protocol.host.withConnectionPhaseTimeout
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -29,36 +32,51 @@ class AppServerWebSocket(
     private val maskFactory: () -> ByteArray = { WebSocketRandom.bytes(4) },
     private val maxPayloadBytes: Long = 8L * 1_024 * 1_024,
     private val maxHeaderBytes: Int = 16 * 1_024,
+    private val handshakeTimeoutMs: Long = 10_000,
 ) {
     init {
         require(maxPayloadBytes in 1..Int.MAX_VALUE.toLong()) { "WebSocket payload limit is invalid" }
         require(maxHeaderBytes > 0) { "WebSocket header limit must be positive" }
+        require(handshakeTimeoutMs > 0) { "WebSocket handshake timeout must be positive" }
     }
 
     suspend fun open() {
-        val key = keyFactory()
-        val request = buildString {
-            append("GET / HTTP/1.1\r\n")
-            append("Host: ").append(hostHeader).append("\r\n")
-            append("Upgrade: websocket\r\n")
-            append("Connection: Upgrade\r\n")
-            append("Sec-WebSocket-Key: ").append(key).append("\r\n")
-            append("Sec-WebSocket-Version: 13\r\n")
-            append("\r\n")
+        try {
+            withConnectionPhaseTimeout("WebSocket HTTP upgrade", handshakeTimeoutMs) {
+                val key = keyFactory()
+                val request = buildString {
+                    append("GET / HTTP/1.1\r\n")
+                    append("Host: ").append(hostHeader).append("\r\n")
+                    append("Upgrade: websocket\r\n")
+                    append("Connection: Upgrade\r\n")
+                    append("Sec-WebSocket-Key: ").append(key).append("\r\n")
+                    append("Sec-WebSocket-Version: 13\r\n")
+                    append("\r\n")
+                }
+                stream.write(request.toByteArray(Charsets.US_ASCII))
+                val response = readHttpHeader()
+                require(response.lineSequence().firstOrNull()?.contains(" 101 ") == true) {
+                    "app-server proxy did not upgrade to WebSocket"
+                }
+                require(response.header("Upgrade").equals("websocket", ignoreCase = true)) {
+                    "app-server proxy returned an invalid Upgrade header"
+                }
+                require(
+                    response.header("Connection")?.split(',')?.any {
+                        it.trim().equals("upgrade", ignoreCase = true)
+                    } == true,
+                ) {
+                    "app-server proxy returned an invalid Connection header"
+                }
+                val accept = response.header("Sec-WebSocket-Accept")
+                require(accept == websocketAccept(key)) {
+                    "app-server proxy returned an invalid WebSocket accept key"
+                }
+            }
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+            throw failure
         }
-        stream.write(request.toByteArray(Charsets.US_ASCII))
-        val response = readHttpHeader()
-        require(response.lineSequence().firstOrNull()?.contains(" 101 ") == true) {
-            "app-server proxy did not upgrade to WebSocket"
-        }
-        require(response.header("Upgrade").equals("websocket", ignoreCase = true)) {
-            "app-server proxy returned an invalid Upgrade header"
-        }
-        require(response.header("Connection")?.split(',')?.any { it.trim().equals("upgrade", ignoreCase = true) } == true) {
-            "app-server proxy returned an invalid Connection header"
-        }
-        val accept = response.header("Sec-WebSocket-Accept")
-        require(accept == websocketAccept(key)) { "app-server proxy returned an invalid WebSocket accept key" }
     }
 
     suspend fun sendText(text: String) {
@@ -67,7 +85,14 @@ class AppServerWebSocket(
         writeFrame(opcode = 0x1, payload = payload)
     }
 
-    suspend fun readText(): String? {
+    suspend fun readText(): String? = try {
+        readTextFrames()
+    } catch (failure: Throwable) {
+        closeAfterFailure(failure)
+        throw failure
+    }
+
+    private suspend fun readTextFrames(): String? {
         val message = ByteArrayOutputStream()
         var textStarted = false
         while (true) {
@@ -110,6 +135,16 @@ class AppServerWebSocket(
 
     suspend fun close() {
         stream.close()
+    }
+
+    private suspend fun closeAfterFailure(failure: Throwable) {
+        withContext(NonCancellable) {
+            try {
+                stream.close()
+            } catch (closeFailure: Throwable) {
+                failure.addSuppressed(closeFailure)
+            }
+        }
     }
 
     private suspend fun writeFrame(opcode: Int, payload: ByteArray) {

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
+- **Last amended:** 2026-07-27 for issue #5 lifecycle hardening
 - **Amended by:** ADR 0003, which adds Fold6 Termux as a supported host
 - **Amended by:** ADR 0004, which embeds a userspace Tailscale node in Dealer
 - **Supersedes:** the tmux-pane bridge backend and any planned custom host conversation bridge
@@ -40,6 +41,9 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 16. Linux ARM64, Linux x86-64, and Android/Termux ARM64 are supported. Native Windows is not required.
 17. Distribution-specific lifecycle and update behavior is isolated behind a small adapter.
 18. SSH and app-server layers consume a route-neutral TCP/duplex-stream abstraction so connectivity changes do not rewrite Codex protocol code.
+19. TCP, SSH, daemon command, proxy, WebSocket upgrade, app-server request, turn-notification inactivity, and reconnect inspection phases have separate bounds. Cancellation actively closes blocking resources.
+20. An uncertain `turn/start` is never replayed. One client-identified user card advances from local pending to accepted and then delivered; it becomes unknown only when acceptance was not established.
+21. One-shot Dealer runs end in completed, recovered, cancelled, or error state. Service-owned run state survives Activity recreation and service rebinding within the application process.
 
 ## Consequences
 

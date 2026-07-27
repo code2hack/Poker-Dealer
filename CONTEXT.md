@@ -65,7 +65,7 @@ Fold6 Termux uses only:
 SSH_LOOPBACK
 ```
 
-M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundary required by embedded `tsnet`. The live proof completed on 2026-07-27; see `docs/evidence/u4090-m1-2026-07-27.md`. M1T is the current milestone.
+M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundary required by embedded `tsnet`. The live proof completed on 2026-07-27; see `docs/evidence/u4090-m1-2026-07-27.md`. Before M1T, issue #5 hardened that boundary with capability-aware route filtering, phase-specific timeouts, active cancellation, truthful one-shot states, and one-card user-message delivery reconciliation; see `docs/evidence/u4090-m1-hardening-2026-07-27.md`. M1T is the current milestone.
 
 ## Core identity
 

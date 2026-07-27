@@ -1,6 +1,6 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 6
+**Status:** Normative implementation contract, revision 7
 **Date:** 2026-07-27  
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
@@ -372,6 +372,15 @@ interface HostTcpDialer {
 
 The concrete type may differ, but route selection MUST remain below the SSH layer.
 
+Each route provider MUST report one capability state per host route:
+
+- supported and configured;
+- supported but temporarily unavailable;
+- unsupported by the installed provider;
+- disabled by configuration.
+
+Route selection MUST attempt only supported, configured routes.
+
 ### 6.2 Workstation route selection
 
 For DGX Spark and u4090, Dealer SHOULD attempt configured routes in this order:
@@ -383,6 +392,8 @@ For DGX Spark and u4090, Dealer SHOULD attempt configured routes in this order:
 Dealer MUST display the active route and route failures in diagnostics.
 
 Failing one route MUST NOT delete host state or thread cache. Dealer MAY move to the next route after bounded retry and endpoint validation.
+
+Skipped routes MUST NOT replace an actionable failure from an attempted route. Diagnostics MUST retain the route label, capability state, attempted status, and failure for every evaluated route. SSH host-key failure is terminal and MUST NOT fall through to another route.
 
 SSH host identity MUST be pinned or verified using a user-approved trust-on-first-use flow. Host-key changes MUST require explicit review regardless of route.
 
@@ -473,6 +484,10 @@ Dealer MUST implement:
 - bounded ingress and egress queues;
 - message-size limits;
 - clean cancellation and reconnect.
+
+TCP connect, SSH connect and command execution, WebSocket upgrade, app-server request/response, turn-notification inactivity, and reconnect inspection MUST have separate configurable bounds. Cancellation MUST actively close the underlying TCP stream, SSH session, proxy channel, and WebSocket so blocked Java reads return.
+
+A turn MUST NOT use one short whole-turn timeout. The initial implementation uses a notification-inactivity timeout that resets after each app-server notification.
 
 The proxy stream MUST NOT be treated as newline-delimited JSON.
 
@@ -583,6 +598,8 @@ Morse and ASR both produce reviewable text drafts. ASR partial and final states 
 
 Dealer SHOULD send a client-generated user-message identifier when supported. On timeout or reconnect it MUST inspect authoritative state and MUST NOT blindly replay an uncertain `turn/start`.
 
+Dealer MUST project a submitted prompt immediately as one user card keyed by that client identifier. Its delivery state advances monotonically from `LOCAL_PENDING` to `ACCEPTED` after a successful `turn/start`, then to `DELIVERED` when authoritative `thread/read` contains the matching `userMessage.clientId`. If acceptance cannot be established, the same card becomes `UNKNOWN`. Authoritative reconciliation MUST update that card rather than adding a duplicate.
+
 ---
 
 ## 11. Approvals and safety
@@ -632,6 +649,8 @@ When Termux is unavailable, Dealer SHOULD distinguish open/start Termux, restore
 When embedded tailnet is unavailable, Dealer SHOULD distinguish login required, engine startup failure, underlay unavailable, peer unreachable, relayed/degraded, and policy denied where diagnosable.
 
 An app-server restart during an active turn MUST produce an explicit recovered, interrupted, failed, or unknown outcome based on authoritative state. Dealer MUST not fabricate completion.
+
+One-shot Dealer operations MUST expose truthful lifecycle states. Closing all host resources after success MUST produce `COMPLETED` or `RECOVERED`, never `CONNECTED`. User cancellation MUST produce `CANCELLED`, stop the foreground operation, and remain available from Dealer UI and its foreground-service notification. Run state MUST be service-owned and remain visible across Activity recreation and service rebinding for the life of the application process.
 
 On Poker reconnect, Dealer SHOULD send a deterministic retained snapshot followed by idempotent live updates.
 
@@ -759,7 +778,7 @@ External Tailscale MAY be used temporarily if LAN is unavailable, but M1 MUST NO
 
 Do not include Poker, Morse, ASR, terminal features, or broad experimental APIs in M1.
 
-M1 completed on u4090 through trusted-LAN SSH on 2026-07-27. The implementation and recorded evidence are transport-neutral; the proof did not claim embedded-tsnet or Fold6 validation. See `docs/evidence/u4090-m1-2026-07-27.md`.
+M1 completed on u4090 through trusted-LAN SSH on 2026-07-27. The implementation and recorded evidence are transport-neutral; the proof did not claim embedded-tsnet or Fold6 validation. See `docs/evidence/u4090-m1-2026-07-27.md`. Connection lifecycle hardening required before M1T is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md` so the original proof limitations remain intact.
 
 ### M1T — Embedded tsnet Android spike
 

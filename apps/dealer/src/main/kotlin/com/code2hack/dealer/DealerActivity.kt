@@ -71,6 +71,9 @@ class DealerActivity : ComponentActivity() {
             serviceStateJob?.cancel()
             service = null
             setupState.update { it.copy(serviceReady = false) }
+            uiState.update {
+                if (it.running) it.copy(status = DealerRunState.DISCONNECTED, route = null) else it
+            }
         }
     }
 
@@ -87,6 +90,7 @@ class DealerActivity : ComponentActivity() {
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
+                        onCancel = { service?.cancelRun() },
                     )
                 }
             }
@@ -190,6 +194,7 @@ private fun DealerApp(
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
+    onCancel: () -> Unit,
 ) {
     var lanHost by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
@@ -220,14 +225,24 @@ private fun DealerApp(
         ) {
             Text("u4090", style = MaterialTheme.typography.headlineSmall, color = Color.White)
             Text(
-                "${state.status} | ${state.route ?: "no active route"}",
+                "${state.status.label} | ${state.route ?: "no active route"}",
                 color = if (state.error == null && setup.error == null) Color(0xFF8EE7B2) else Color(0xFFFFA8A8),
             )
             Text(
-                "LAN > embedded tsnet > external Tailscale",
+                "Route order: LAN > embedded tsnet > external Tailscale | provider: LAN",
                 color = Color(0xFFBBC8D6),
                 style = MaterialTheme.typography.labelMedium,
             )
+            state.routeDiagnostics
+                .filter { it.failure != null }
+                .distinctBy { it.route to it.failure }
+                .forEach {
+                    Text(
+                        "${it.route}: ${it.failure}",
+                        color = Color(0xFFFFC38B),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             state.threadId?.let {
                 Text(it, color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
             }
@@ -288,19 +303,25 @@ private fun DealerApp(
                 minLines = 2,
                 modifier = Modifier.fillMaxWidth(),
             )
-            Button(
-                onClick = {
-                    val config = DealerRunConfig(
-                        lanHost.trim(),
-                        sshUser.trim(),
-                        threadId.trim(),
-                        turnText,
-                    )
-                    onRun(config)
-                },
-                enabled = canRun,
-            ) {
-                Text(if (state.running) "Running" else "Run turn")
+            if (state.running) {
+                Button(onClick = onCancel) {
+                    Text("Cancel")
+                }
+            } else {
+                Button(
+                    onClick = {
+                        val config = DealerRunConfig(
+                            lanHost.trim(),
+                            sshUser.trim(),
+                            threadId.trim(),
+                            turnText,
+                        )
+                        onRun(config)
+                    },
+                    enabled = canRun,
+                ) {
+                    Text("Run turn")
+                }
             }
             setup.error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -326,7 +347,7 @@ private fun DealerCards(cards: List<Card>, modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    "${card.role} | ${card.state}",
+                    listOfNotNull(card.role.name, card.state.name, card.delivery?.name).joinToString(" | "),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF56616D),
                 )

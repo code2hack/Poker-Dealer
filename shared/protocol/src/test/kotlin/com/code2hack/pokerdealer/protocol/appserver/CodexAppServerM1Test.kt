@@ -1,13 +1,18 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.domain.CardRole
+import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.host.CommandResult
+import com.code2hack.pokerdealer.protocol.host.ConnectionPhaseTimeoutException
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
 import com.code2hack.pokerdealer.protocol.host.HostSshClient
 import com.code2hack.pokerdealer.protocol.host.HostSshSession
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
+import com.code2hack.pokerdealer.protocol.host.HostIdentityException
+import com.code2hack.pokerdealer.protocol.host.RouteCapability
+import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -51,6 +56,8 @@ class CodexAppServerM1Test {
         val sshClient = RecordingSshClient()
         val daemon = UpstreamCodexDaemon()
         val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
+        val phases = mutableListOf<M1ConnectionPhase>()
+        val activeRoutes = mutableListOf<HostConnectionRoute>()
         val slice = M1OneHostDealerSlice(
             dialer = dialer,
             sshClient = sshClient,
@@ -64,6 +71,8 @@ class CodexAppServerM1Test {
                 clientUserMessageId = "dealer-client-u4090-m1",
             ),
             onCard = renderedCards::add,
+            onPhase = phases::add,
+            onRoute = { route, _ -> activeRoutes += route },
         )
 
         assertEquals(InitialCodexHosts.u4090.id, result.host.id)
@@ -80,10 +89,33 @@ class CodexAppServerM1Test {
         assertEquals(CardRole.AGENT, result.streamedCards.single().role)
         assertEquals("streamed answer", result.streamedCards.single().fullText)
         assertEquals(3, result.streamedCards.single().revision)
+        assertEquals("dealer-client-u4090-m1", result.userCard.id)
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
         assertEquals(1, result.matchingUserMessagesAfterReconnect)
         assertEquals(false, result.recoveredAfterDisconnect)
         assertEquals(
-            listOf("Existing prompt", "Existing answer", "streamed ", "streamed answer", "streamed answer"),
+            listOf(M1ConnectionPhase.CONNECTING, M1ConnectionPhase.RUNNING, M1ConnectionPhase.RECONNECTING),
+            phases,
+        )
+        assertEquals(listOf(HostConnectionRoute.SSH_LAN, HostConnectionRoute.SSH_LAN), activeRoutes)
+        val userRevisions = renderedCards.filter { it.id == "dealer-client-u4090-m1" }
+        assertEquals(
+            listOf(DeliveryState.LOCAL_PENDING, DeliveryState.ACCEPTED, DeliveryState.DELIVERED),
+            userRevisions.map { it.delivery },
+        )
+        assertEquals(listOf(1L, 2L, 3L), userRevisions.map { it.revision })
+        assertEquals(1, userRevisions.map { it.id }.distinct().size)
+        assertEquals(
+            listOf(
+                "Existing prompt",
+                "Existing answer",
+                "Dealer M1 proof from u4090",
+                "Dealer M1 proof from u4090",
+                "streamed ",
+                "streamed answer",
+                "streamed answer",
+                "Dealer M1 proof from u4090",
+            ),
             renderedCards.map { it.fullText },
         )
         assertEquals(
@@ -133,6 +165,53 @@ class CodexAppServerM1Test {
         assertEquals(2, result.streamedCards.single().revision)
         assertEquals(1, result.matchingUserMessagesAfterReconnect)
         assertEquals(true, result.recoveredAfterDisconnect)
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
+        assertTrue(result.streamedCards.all { it.sequence > result.userCard.sequence })
+        assertEquals(1, firstPeer.requests.count { it == "turn/start" })
+        assertEquals(0, secondPeer.requests.count { it == "turn/start" })
+    }
+
+    @Test
+    fun `uncertain turn acceptance keeps one user card marked unknown without replay`() = runTest {
+        val firstPeer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("thread-list-request.json", "thread-list-response.json"),
+                fixture("thread-resume-request.json", "thread-resume-response.json"),
+                fixture("thread-read-request.json", "thread-read-response-before.json"),
+                fixture("turn-start-request.json", "turn-start-response.json"),
+            ),
+            failOnRequestMethod = "turn/start",
+        )
+        val secondPeer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("thread-resume-request.json", "thread-resume-response.json"),
+                fixture("thread-read-request.json", "thread-read-response-before.json"),
+            ),
+        )
+        val peers = ArrayDeque(listOf(firstPeer, secondPeer))
+        val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
+        val slice = M1OneHostDealerSlice(
+            dialer = RecordingDialer(),
+            sshClient = RecordingSshClient(),
+            appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
+        )
+
+        val failure = runCatching {
+            slice.run(
+                M1TurnInput("Dealer M1 proof from u4090", clientUserMessageId = "dealer-client-u4090-m1"),
+                onCard = renderedCards::add,
+            )
+        }.exceptionOrNull()
+
+        val userRevisions = renderedCards.filter { it.id == "dealer-client-u4090-m1" }
+        assertEquals(
+            listOf(DeliveryState.LOCAL_PENDING, DeliveryState.UNKNOWN),
+            userRevisions.map { it.delivery },
+        )
+        assertEquals(listOf(1L, 2L), userRevisions.map { it.revision })
+        assertTrue(failure?.message.orEmpty().contains("turn/start was not replayed"))
         assertEquals(1, firstPeer.requests.count { it == "turn/start" })
         assertEquals(0, secondPeer.requests.count { it == "turn/start" })
     }
@@ -174,6 +253,46 @@ class CodexAppServerM1Test {
     }
 
     @Test
+    fun `cancellation while awaiting turn acceptance marks the same user card unknown`() = runTest {
+        val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
+        val peer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("thread-list-request.json", "thread-list-response.json"),
+                fixture("thread-resume-request.json", "thread-resume-response.json"),
+                fixture("thread-read-request.json", "thread-read-response-before.json"),
+                fixture("turn-start-request.json", "turn-start-response.json"),
+            ),
+            waitOnRequestMethod = "turn/start",
+        )
+        val slice = M1OneHostDealerSlice(
+            dialer = RecordingDialer(),
+            sshClient = RecordingSshClient(),
+            appServerFactory = { CodexAppServerSession(peer) },
+        )
+
+        val job = launch {
+            slice.run(
+                M1TurnInput(
+                    text = "Dealer M1 proof from u4090",
+                    clientUserMessageId = "dealer-client-u4090-m1",
+                ),
+                onCard = renderedCards::add,
+            )
+        }
+        while ("turn/start" !in peer.requests) yield()
+        job.cancelAndJoin()
+
+        val userRevisions = renderedCards.filter { it.id == "dealer-client-u4090-m1" }
+        assertEquals(
+            listOf(DeliveryState.LOCAL_PENDING, DeliveryState.UNKNOWN),
+            userRevisions.map { it.delivery },
+        )
+        assertEquals(1, userRevisions.map { it.id }.distinct().size)
+        assertTrue(peer.closed)
+    }
+
+    @Test
     fun `daemon ensure starts upstream daemon when status is stopped`() = runTest {
         val session = ScriptedSshSession(
             CommandResult(0, """{"status":"stopped"}"""),
@@ -195,7 +314,241 @@ class CodexAppServerM1Test {
         )
     }
 
+    @Test
+    fun `LAN-only provider skips unsupported routes and preserves the LAN failure`() = runTest {
+        val lanFailure = IllegalStateException("LAN connection refused")
+        val dialer = RecordingDialer(failures = mapOf(HostConnectionRoute.SSH_LAN to lanFailure))
+        val slice = M1OneHostDealerSlice(dialer = dialer, sshClient = RecordingSshClient())
+
+        val failure = runCatching {
+            slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is RouteConnectionException)
+        assertEquals(listOf(HostConnectionRoute.SSH_LAN), dialer.routes)
+        assertEquals(lanFailure.message, failure?.cause?.message)
+        assertTrue(failure?.message.orEmpty().contains("SSH_LAN: LAN connection refused"))
+    }
+
+    @Test
+    fun `route fallback follows host order among supported configured routes`() = runTest {
+        val firstPeer = completeFirstPeer()
+        val secondPeer = completeReconnectPeer()
+        val peers = ArrayDeque(listOf(firstPeer, secondPeer))
+        val dialer = RecordingDialer(
+            capabilities = mapOf(
+                HostConnectionRoute.SSH_LAN to RouteCapability.SUPPORTED_CONFIGURED,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET to RouteCapability.SUPPORTED_CONFIGURED,
+            ),
+            failures = mapOf(HostConnectionRoute.SSH_LAN to IllegalStateException("LAN unavailable")),
+        )
+        val slice = M1OneHostDealerSlice(
+            dialer = dialer,
+            sshClient = RecordingSshClient(),
+            appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
+        )
+
+        val result = slice.run(M1TurnInput("Dealer M1 proof from u4090", clientUserMessageId = "dealer-client-u4090-m1"))
+
+        assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, result.route)
+        assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, result.reconnectRoute)
+        assertEquals(
+            listOf(
+                HostConnectionRoute.SSH_LAN,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET,
+                HostConnectionRoute.SSH_LAN,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            ),
+            dialer.routes,
+        )
+        assertTrue(result.routeDiagnostics.any { it.route == HostConnectionRoute.SSH_LAN && it.failure != null })
+    }
+
+    @Test
+    fun `SSH host-key failure is terminal across routes`() = runTest {
+        val dialer = RecordingDialer(
+            capabilities = mapOf(
+                HostConnectionRoute.SSH_LAN to RouteCapability.SUPPORTED_CONFIGURED,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET to RouteCapability.SUPPORTED_CONFIGURED,
+            ),
+        )
+        val identityFailure = HostIdentityException("host key changed", IllegalStateException("mismatch"))
+        val sshClient = object : HostSshClient {
+            override suspend fun connect(
+                host: com.code2hack.pokerdealer.domain.CodexHost,
+                tcpStream: DuplexByteStream,
+            ): HostSshSession = throw identityFailure
+        }
+        val slice = M1OneHostDealerSlice(dialer = dialer, sshClient = sshClient)
+
+        val failure = runCatching {
+            slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is HostIdentityException)
+        assertEquals(identityFailure.message, failure?.message)
+        assertEquals(listOf(HostConnectionRoute.SSH_LAN), dialer.routes)
+        val diagnostics = (failure as HostIdentityException).diagnostics
+        assertEquals(true, diagnostics.first { it.route == HostConnectionRoute.SSH_LAN }.attempted)
+        assertEquals("host key changed", diagnostics.first { it.route == HostConnectionRoute.SSH_LAN }.failure)
+        assertEquals(false, diagnostics.first { it.route == HostConnectionRoute.SSH_EMBEDDED_TSNET }.attempted)
+    }
+
+    @Test
+    fun `TCP dial timeout is bounded and route labelled`() = runTest {
+        val dialer = object : HostTcpDialer {
+            override fun capability(
+                host: com.code2hack.pokerdealer.domain.CodexHost,
+                route: HostConnectionRoute,
+            ) = if (route == HostConnectionRoute.SSH_LAN) {
+                RouteCapability.SUPPORTED_CONFIGURED
+            } else {
+                RouteCapability.UNSUPPORTED
+            }
+
+            override suspend fun connect(
+                host: com.code2hack.pokerdealer.domain.CodexHost,
+                route: HostConnectionRoute,
+                port: Int,
+            ): DuplexByteStream = awaitCancellation()
+        }
+        val slice = M1OneHostDealerSlice(
+            dialer = dialer,
+            sshClient = RecordingSshClient(),
+            timeouts = M1Timeouts(tcpConnectMs = 100),
+        )
+
+        val failure = runCatching {
+            slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is RouteConnectionException)
+        assertTrue(failure?.cause is ConnectionPhaseTimeoutException)
+        assertTrue(failure?.message.orEmpty().contains("SSH_LAN"))
+    }
+
+    @Test
+    fun `SSH connect timeout closes the established TCP stream`() = runTest {
+        val dialer = RecordingDialer()
+        val sshClient = object : HostSshClient {
+            override suspend fun connect(
+                host: com.code2hack.pokerdealer.domain.CodexHost,
+                tcpStream: DuplexByteStream,
+            ): HostSshSession = awaitCancellation()
+        }
+        val slice = M1OneHostDealerSlice(
+            dialer = dialer,
+            sshClient = sshClient,
+            timeouts = M1Timeouts(sshConnectMs = 100),
+        )
+
+        val failure = runCatching {
+            slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
+        }.exceptionOrNull()
+
+        assertTrue(failure is RouteConnectionException)
+        assertTrue(failure?.cause is ConnectionPhaseTimeoutException)
+        assertTrue(dialer.streams.single().closed)
+    }
+
+    @Test
+    fun `daemon command timeout closes resources and retains fallback route diagnostics`() = runTest {
+        val dialer = RecordingDialer(
+            capabilities = mapOf(
+                HostConnectionRoute.SSH_LAN to RouteCapability.SUPPORTED_CONFIGURED,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET to RouteCapability.SUPPORTED_CONFIGURED,
+            ),
+            failures = mapOf(HostConnectionRoute.SSH_LAN to IllegalStateException("LAN unavailable")),
+        )
+        val session = BlockingCommandSshSession()
+        val activeRoutes = mutableListOf<HostConnectionRoute>()
+        val sshClient = object : HostSshClient {
+            override suspend fun connect(
+                host: com.code2hack.pokerdealer.domain.CodexHost,
+                tcpStream: DuplexByteStream,
+            ): HostSshSession = session
+        }
+        val slice = M1OneHostDealerSlice(
+            dialer = dialer,
+            sshClient = sshClient,
+            timeouts = M1Timeouts(daemonCommandMs = 100),
+        )
+
+        val failure = runCatching {
+            slice.run(
+                M1TurnInput("test", clientUserMessageId = "client-1"),
+                onRoute = { route, _ -> activeRoutes += route },
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is RouteConnectionException)
+        assertTrue(failure?.cause is ConnectionPhaseTimeoutException)
+        val diagnostics = (failure as RouteConnectionException).diagnostics
+        assertEquals("LAN unavailable", diagnostics.first { it.route == HostConnectionRoute.SSH_LAN }.failure)
+        assertTrue(
+            diagnostics.first { it.route == HostConnectionRoute.SSH_EMBEDDED_TSNET }
+                .failure
+                .orEmpty()
+                .contains("daemon status/start timed out"),
+        )
+        assertEquals(listOf(HostConnectionRoute.SSH_EMBEDDED_TSNET), activeRoutes)
+        assertTrue(session.closed)
+        assertTrue(dialer.streams.single().closed)
+    }
+
+    @Test
+    fun `reconnect inspection timeout does not regress an accepted user card`() = runTest {
+        val firstPeer = completeFirstPeer()
+        val secondPeer = HangingJsonRpcPeer()
+        val peers = ArrayDeque<JsonRpcPeer>(listOf(firstPeer, secondPeer))
+        val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
+        val slice = M1OneHostDealerSlice(
+            dialer = RecordingDialer(),
+            sshClient = RecordingSshClient(),
+            timeouts = M1Timeouts(reconnectInspectionMs = 100),
+            appServerFactory = { CodexAppServerSession(peers.removeFirst(), requestTimeoutMs = 10_000) },
+        )
+
+        val failure = runCatching {
+            slice.run(
+                M1TurnInput("Dealer M1 proof from u4090", clientUserMessageId = "dealer-client-u4090-m1"),
+                onCard = renderedCards::add,
+            )
+        }.exceptionOrNull()
+
+        assertTrue(failure is ConnectionPhaseTimeoutException)
+        assertTrue(failure?.message.orEmpty().contains("reconnect inspection timed out after 100ms"))
+        assertEquals(
+            listOf(DeliveryState.LOCAL_PENDING, DeliveryState.ACCEPTED),
+            renderedCards.filter { it.id == "dealer-client-u4090-m1" }.map { it.delivery },
+        )
+        assertTrue(secondPeer.closed)
+    }
+
     private fun fixture(request: String, response: String) = FixtureExchange(request, response)
+
+    private fun completeFirstPeer() = FixtureJsonRpcPeer(
+        exchanges = listOf(
+            fixture("initialize-request.json", "initialize-response.json"),
+            fixture("thread-list-request.json", "thread-list-response.json"),
+            fixture("thread-resume-request.json", "thread-resume-response.json"),
+            fixture("thread-read-request.json", "thread-read-response-before.json"),
+            fixture("turn-start-request.json", "turn-start-response.json"),
+        ),
+        notifications = listOf(
+            "agent-delta-notification-1.json",
+            "agent-delta-notification-2.json",
+            "turn-completed-notification.json",
+        ),
+    )
+
+    private fun completeReconnectPeer() = FixtureJsonRpcPeer(
+        exchanges = listOf(
+            fixture("initialize-request.json", "initialize-response.json"),
+            fixture("thread-resume-request.json", "thread-resume-response.json"),
+            fixture("thread-read-request.json", "thread-read-response-after.json"),
+        ),
+    )
 }
 
 private data class FixtureExchange(
@@ -208,6 +561,8 @@ private class FixtureJsonRpcPeer(
     notifications: List<String> = emptyList(),
     clientNotifications: List<String> = listOf("initialized-notification.json"),
     private val waitForNotifications: Boolean = false,
+    private val failOnRequestMethod: String? = null,
+    private val waitOnRequestMethod: String? = null,
 ) : JsonRpcPeer {
     private val exchanges = ArrayDeque(exchanges)
     private val notificationFixtures = ArrayDeque(notifications)
@@ -222,6 +577,8 @@ private class FixtureJsonRpcPeer(
         assertEquals(expected["method"]?.toString()?.trim('"'), method)
         assertEquals(expected["params"], params)
         requests += method
+        if (method == failOnRequestMethod) error("$method disconnected before response")
+        if (method == waitOnRequestMethod) awaitCancellation()
         return loadFixture(exchange.responseFixture).jsonObject["result"] ?: JsonObject(emptyMap())
     }
 
@@ -251,16 +608,36 @@ private class FixtureJsonRpcPeer(
     }
 }
 
+private class HangingJsonRpcPeer : JsonRpcPeer {
+    var closed = false
+
+    override suspend fun request(method: String, params: JsonElement): JsonElement = awaitCancellation()
+    override suspend fun notify(method: String, params: JsonElement?) = Unit
+    override suspend fun receiveNotification(): AppServerNotification? = awaitCancellation()
+    override suspend fun close() {
+        closed = true
+    }
+}
+
 private fun loadFixture(name: String): JsonElement {
     val text = object {}.javaClass.getResource("/app-server/v2/$name")?.readText()
         ?: error("Missing fixture $name")
     return AppServerJson.parseToJsonElement(text)
 }
 
-private class RecordingDialer : HostTcpDialer {
+private class RecordingDialer(
+    private val capabilities: Map<HostConnectionRoute, RouteCapability> =
+        mapOf(HostConnectionRoute.SSH_LAN to RouteCapability.SUPPORTED_CONFIGURED),
+    private val failures: Map<HostConnectionRoute, Throwable> = emptyMap(),
+) : HostTcpDialer {
     val routes = mutableListOf<HostConnectionRoute>()
     val ports = mutableListOf<Int>()
     val streams = mutableListOf<NoopStream>()
+
+    override fun capability(
+        host: com.code2hack.pokerdealer.domain.CodexHost,
+        route: HostConnectionRoute,
+    ): RouteCapability = capabilities[route] ?: RouteCapability.UNSUPPORTED
 
     override suspend fun connect(
         host: com.code2hack.pokerdealer.domain.CodexHost,
@@ -269,6 +646,7 @@ private class RecordingDialer : HostTcpDialer {
     ): DuplexByteStream {
         routes += route
         ports += port
+        failures[route]?.let { throw it }
         return NoopStream().also { streams += it }
     }
 }
@@ -304,6 +682,16 @@ private class ScriptedSshSession(
         return NoopStream()
     }
 
+    override suspend fun close() {
+        closed = true
+    }
+}
+
+private class BlockingCommandSshSession : HostSshSession {
+    var closed = false
+
+    override suspend fun exec(command: String): CommandResult = awaitCancellation()
+    override suspend fun execStream(command: String): DuplexByteStream = NoopStream()
     override suspend fun close() {
         closed = true
     }

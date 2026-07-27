@@ -106,6 +106,8 @@ Git history may contain these designs. History is evidence only, not current gui
 - A workstation host has an ordered route list rather than one permanent route.
 - Route priority is trusted LAN, embedded `tsnet`, then optional external Tailscale.
 - A failed route MAY fall through to the next configured route after host-key and endpoint checks.
+- Route providers MUST report configured, temporarily unavailable, unsupported, or disabled capability; attempt only configured routes and retain route-labelled failures.
+- Bound TCP, SSH, proxy, WebSocket, app-server request, turn inactivity, and reconnect phases separately. Cancellation MUST actively close blocking resources.
 - Embedded `tsnet` is packaged behind a narrow Go/Android module boundary. Go networking types MUST NOT leak into Compose or app-server protocol code.
 - The embedded node MUST NOT request `VpnService`, install a default route, act as an exit node, or carry unrelated app traffic.
 - Tailnet identity state belongs in Dealer-private storage. Never store auth keys or node secrets in plaintext Room/DataStore fields or logs.
@@ -151,7 +153,7 @@ Git history may contain these designs. History is evidence only, not current gui
 
 ## Immediate next slice
 
-M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`.
+M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`. The pre-M1T lifecycle hardening tracked in GitHub issue #5 adds bounded cancellation, capability-aware fallback, truthful one-shot states, and user-message delivery reconciliation; see `docs/evidence/u4090-m1-hardening-2026-07-27.md`.
 
 Unless a newer committed plan says otherwise, implement M1T: the embedded-tsnet Android spike. Keep the existing route-neutral SSH, WebSocket, and app-server layers unchanged. Package pinned Go/Tailscale dependencies behind a narrow Android boundary, enroll a Dealer-owned userspace node without `VpnService`, expose only Dealer-owned workstation connections, and record real Fold6 direct/DERP, VPN-coexistence, reconnect, foreground-service, and battery evidence.
 

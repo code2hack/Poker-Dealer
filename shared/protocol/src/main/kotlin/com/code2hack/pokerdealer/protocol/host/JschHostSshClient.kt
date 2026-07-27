@@ -13,11 +13,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.Socket
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 data class SshHostAuthentication(
     val username: String,
@@ -31,8 +34,16 @@ class JschHostSshClient(
     private val authenticationByHostId: Map<String, SshHostAuthentication>,
     private val connectTimeoutMs: Int = 10_000,
     private val channelTimeoutMs: Int = 10_000,
+    private val commandTimeoutMs: Long = 30_000,
     private val maxCommandOutputBytes: Int = 1_048_576,
 ) : HostSshClient {
+    init {
+        require(connectTimeoutMs > 0) { "SSH connect timeout must be positive" }
+        require(channelTimeoutMs > 0) { "SSH channel timeout must be positive" }
+        require(commandTimeoutMs > 0) { "SSH command timeout must be positive" }
+        require(maxCommandOutputBytes > 0) { "SSH command output limit must be positive" }
+    }
+
     override suspend fun connect(
         host: CodexHost,
         tcpStream: DuplexByteStream,
@@ -58,8 +69,15 @@ class JschHostSshClient(
             setConfig("PreferredAuthentications", "publickey")
         }
         try {
-            session.connect(connectTimeoutMs)
-            JschHostSshSession(session, channelTimeoutMs, maxCommandOutputBytes)
+            cancellableBlocking(
+                onCancel = {
+                    session.disconnect()
+                    runBlocking { tcpStream.close() }
+                },
+            ) {
+                session.connect(connectTimeoutMs)
+            }
+            JschHostSshSession(session, channelTimeoutMs, commandTimeoutMs, maxCommandOutputBytes)
         } catch (failure: JSchChangedHostKeyException) {
             session.disconnect()
             throw HostIdentityException("SSH host key changed for ${host.id}", failure)
@@ -79,6 +97,7 @@ class JschHostSshClient(
 private class JschHostSshSession(
     private val session: Session,
     private val channelTimeoutMs: Int,
+    private val commandTimeoutMs: Long,
     private val maxCommandOutputBytes: Int,
 ) : HostSshSession {
     override suspend fun exec(command: String): CommandResult {
@@ -89,19 +108,27 @@ private class JschHostSshSession(
             }
         }
         return try {
-            val stdout = channel.inputStream
-            val stderr = channel.errStream
-            withContext(Dispatchers.IO) { channel.connect(channelTimeoutMs) }
-            coroutineScope {
-                val stdoutRead = async(Dispatchers.IO) { stdout.readLimited(maxCommandOutputBytes) }
-                val stderrRead = async(Dispatchers.IO) { stderr.readLimited(maxCommandOutputBytes) }
-                val stdoutText = stdoutRead.await()
-                val stderrText = stderrRead.await()
-                CommandResult(
-                    exitCode = channel.exitStatus,
-                    stdout = stdoutText,
-                    stderr = stderrText,
-                )
+            withConnectionPhaseTimeout("SSH command", commandTimeoutMs) {
+                val stdout = channel.inputStream
+                val stderr = channel.errStream
+                cancellableBlocking(channel::disconnect) {
+                    channel.connect(channelTimeoutMs)
+                }
+                coroutineScope {
+                    val stdoutRead = async {
+                        cancellableBlocking(channel::disconnect) { stdout.readLimited(maxCommandOutputBytes) }
+                    }
+                    val stderrRead = async {
+                        cancellableBlocking(channel::disconnect) { stderr.readLimited(maxCommandOutputBytes) }
+                    }
+                    val stdoutText = stdoutRead.await()
+                    val stderrText = stderrRead.await()
+                    CommandResult(
+                        exitCode = channel.exitStatus,
+                        stdout = stdoutText,
+                        stderr = stderrText,
+                    )
+                }
             }
         } finally {
             channel.disconnect()
@@ -116,7 +143,9 @@ private class JschHostSshSession(
         try {
             val input = channel.inputStream
             val output = channel.outputStream
-            channel.connect(channelTimeoutMs)
+            cancellableBlocking(channel::disconnect) {
+                channel.connect(channelTimeoutMs)
+            }
             JschChannelStream(channel, input, output)
         } catch (failure: Throwable) {
             channel.disconnect()
@@ -140,14 +169,16 @@ private class JschChannelStream(
     private val input: InputStream,
     private val output: OutputStream,
 ) : DuplexByteStream {
-    override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int = withContext(Dispatchers.IO) {
-        input.read(buffer, offset, length)
-    }
+    override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+        cancellableBlocking(channel::disconnect) {
+            input.read(buffer, offset, length)
+        }
 
-    override suspend fun write(buffer: ByteArray, offset: Int, length: Int) = withContext(Dispatchers.IO) {
-        output.write(buffer, offset, length)
-        output.flush()
-    }
+    override suspend fun write(buffer: ByteArray, offset: Int, length: Int) =
+        cancellableBlocking(channel::disconnect) {
+            output.write(buffer, offset, length)
+            output.flush()
+        }
 
     override suspend fun close() = withContext(Dispatchers.IO) {
         channel.disconnect()
@@ -192,4 +223,19 @@ private class DuplexStreamProxy(
 private object DiscardingOutputStream : OutputStream() {
     override fun write(value: Int) = Unit
     override fun write(buffer: ByteArray, offset: Int, length: Int) = Unit
+}
+
+private suspend fun <T> cancellableBlocking(
+    onCancel: () -> Unit,
+    operation: () -> T,
+): T = withContext(Dispatchers.IO) {
+    suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { runCatching(onCancel) }
+        try {
+            val result = operation()
+            if (continuation.isActive) continuation.resume(result)
+        } catch (failure: Throwable) {
+            if (continuation.isActive) continuation.resumeWithException(failure)
+        }
+    }
 }

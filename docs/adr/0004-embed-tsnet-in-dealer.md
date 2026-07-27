@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
+- **Last amended:** 2026-07-27 for issue #5 route hardening
 - **Amends:** ADR 0002 workstation connectivity
 
 ## Context
@@ -34,6 +35,9 @@ Tailscale's Go `tsnet` library can run a userspace tailnet node inside one proce
 12. The standalone Tailscale Android application is not required for Dealer operation, but remains an optional fallback and diagnostic tool.
 13. Underlying Hiddify/Clash routing may still affect UDP, coordination, or DERP reachability. Compatibility MUST be proven on the Fold6 with the user's real VPN configuration.
 14. Embedded `tsnet` work follows the initial transport-neutral workstation app-server slice. The first slice MUST isolate SSH behind a dialer/stream interface so adding `tsnet` does not rewrite SSH or app-server layers.
+15. Every route provider reports whether each host route is configured, temporarily unavailable, unsupported, or disabled. Route selection attempts only configured routes in priority order.
+16. Diagnostics retain every evaluated route's label, capability, attempted state, and failure. A skipped route never hides an actionable attempted-route failure.
+17. SSH host-key failure remains terminal across route providers and carries the evaluated route diagnostics.
 
 ## Security requirements
 
