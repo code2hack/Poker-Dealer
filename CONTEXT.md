@@ -16,12 +16,56 @@ The workstation hosts are expected to be persistent. Fold6 Termux is an opportun
 
 - **Host-local Codex TUI:** full interface connected to that host's daemon-backed app-server.
 - **Dealer:** native Android client on the Fold6.
-  - It connects to DGX Spark and u4090 through Tailscale + SSH + `codex app-server proxy`.
-  - It connects to Fold6 Termux through loopback SSH + `codex app-server proxy`.
+  - For DGX Spark and u4090 it selects among trusted LAN SSH, embedded-tsnet SSH, and optional external-Tailscale SSH.
+  - For Fold6 Termux it uses loopback SSH + `codex app-server proxy`.
 - **Poker:** Rokid HUD and lightweight input endpoint connected only to Dealer.
 - **Termux terminal workflow:** full shell/editor/recovery surface. Termux may simultaneously be a first-class Codex host, but Dealer still does not become a terminal emulator.
 
-Dealer cannot directly open Termux's private Unix socket because Dealer and Termux are separate Android applications. The common abstraction is SSH plus the official proxy stream on all hosts.
+Dealer cannot directly open Termux's private Unix socket because Dealer and Termux are separate Android applications. The common host abstraction remains SSH plus the official proxy stream.
+
+## Embedded tailnet
+
+Dealer embeds a userspace Tailscale node based on `tsnet` for remote workstation connections.
+
+```text
+Hiddify / Clash
+└── owns Android VpnService
+
+Dealer
+└── embedded userspace tsnet node
+    └── Dealer-owned SSH connections only
+        ├── DGX Spark
+        └── u4090
+```
+
+The embedded node:
+
+- does not request Android `VpnService`;
+- does not route all Fold6 traffic;
+- does not act as an exit-node client;
+- has its own tailnet identity;
+- stores state only in Dealer-private storage;
+- remains subject to real-device compatibility testing with the user's Hiddify/Clash configuration.
+
+The standalone Tailscale Android app is an optional fallback, not a runtime requirement for Dealer.
+
+## Workstation route priority
+
+Dealer treats connection routing separately from SSH and app-server protocol logic.
+
+```text
+1. SSH_LAN
+2. SSH_EMBEDDED_TSNET
+3. SSH_EXTERNAL_TAILSCALE
+```
+
+Fold6 Termux uses only:
+
+```text
+SSH_LOOPBACK
+```
+
+The initial Spark app-server slice may use a simpler available route, but it must introduce a route-neutral stream abstraction before embedded `tsnet` is implemented.
 
 ## Core identity
 
@@ -54,7 +98,7 @@ The execution host does not change. Cross-host continuation requires repository 
 ## Authority
 
 - Codex app-server owns threads, turns, items, approvals, command/file-change state, and persisted Codex history.
-- Dealer owns configured hosts, connection routes, distribution-specific lifecycle behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, and Poker synchronization.
+- Dealer owns configured hosts, route priority, embedded-tailnet lifecycle, distribution-specific daemon behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, and Poker synchronization.
 - Poker owns only its viewport, composition state, and explicitly persisted pending input.
 
 ## Control rule
@@ -63,10 +107,10 @@ Several clients may observe one thread. Only one human-control surface should ac
 
 ## Host distinctions
 
-| Host | Kind | Architecture | Dealer route | Availability |
+| Host | Kind | Architecture | Dealer routes | Availability |
 | --- | --- | --- | --- | --- |
-| DGX Spark | Linux workstation | ARM64 | Tailscale SSH | persistent |
-| u4090 | Linux workstation | x86-64 | Tailscale SSH | persistent |
+| DGX Spark | Linux workstation | ARM64 | LAN → embedded tsnet → external Tailscale | persistent |
+| u4090 | Linux workstation | x86-64 | LAN → embedded tsnet → external Tailscale | persistent |
 | Fold6 Termux | Android/Termux | ARM64 | loopback SSH | opportunistic |
 
 Termux installation and update behavior is distribution-specific. Dealer must capability-test daemon status, Unix-socket binding, proxy operation, initialization, thread APIs, and reconnect rather than assuming complete parity from a version string.
@@ -76,7 +120,8 @@ Termux installation and update behavior is distribution-specific. Dealer must ca
 - **Host:** DGX Spark, u4090, or Fold6 Termux.
 - **Host kind:** Linux workstation or Android/Termux.
 - **Codex distribution:** upstream Linux or community Termux.
-- **Connection route:** Tailscale SSH or loopback SSH.
+- **Connection route:** LAN SSH, embedded-tsnet SSH, external-Tailscale SSH, or loopback SSH.
+- **Embedded tailnet:** Dealer-private userspace Tailscale node used only for Dealer sockets.
 - **Thread:** durable Codex conversation/work context stored on one host.
 - **Turn:** one user request and Codex execution/response cycle.
 - **Item:** structured user input or Codex output within a turn, such as an agent message, command execution, file change, plan, or approval request.

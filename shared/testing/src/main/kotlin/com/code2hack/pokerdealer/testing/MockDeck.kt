@@ -24,7 +24,12 @@ object MockDeck {
         kind = CodexHostKind.LINUX_WORKSTATION,
         architecture = HostArchitecture.LINUX_ARM64,
         distribution = CodexDistribution.OPENAI_UPSTREAM,
-        connectionRoute = HostConnectionRoute.SSH_TAILSCALE,
+        connectionRoutes = listOf(
+            HostConnectionRoute.SSH_LAN,
+            HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+        ),
+        activeConnectionRoute = HostConnectionRoute.SSH_EMBEDDED_TSNET,
         availabilityClass = HostAvailabilityClass.PERSISTENT,
         connectionState = HostConnectionState.CONNECTED,
         daemonState = DaemonState.READY,
@@ -38,7 +43,11 @@ object MockDeck {
         kind = CodexHostKind.LINUX_WORKSTATION,
         architecture = HostArchitecture.LINUX_X86_64,
         distribution = CodexDistribution.OPENAI_UPSTREAM,
-        connectionRoute = HostConnectionRoute.SSH_TAILSCALE,
+        connectionRoutes = listOf(
+            HostConnectionRoute.SSH_LAN,
+            HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+        ),
         availabilityClass = HostAvailabilityClass.PERSISTENT,
         connectionState = HostConnectionState.DISCONNECTED,
     )
@@ -49,7 +58,7 @@ object MockDeck {
         kind = CodexHostKind.TERMUX_ANDROID,
         architecture = HostArchitecture.ANDROID_ARM64,
         distribution = CodexDistribution.TERMUX_COMMUNITY,
-        connectionRoute = HostConnectionRoute.SSH_LOOPBACK,
+        connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
         availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
         connectionState = HostConnectionState.WAITING_FOR_HOST_APP,
         daemonState = DaemonState.UNKNOWN,
@@ -91,6 +100,7 @@ object MockDeck {
         appendLine("This card deliberately exceeds 20,000 characters. It represents a structured agent-message projection from a daemon-backed Codex thread and preserves Unicode, indentation, and complete text.")
         appendLine()
         appendLine("Configured hosts: DGX Spark, u4090, and Fold6 Termux.")
+        appendLine("Workstation route priority: trusted LAN, embedded tsnet, optional external Tailscale fallback.")
         appendLine()
         var line = 1
         while (length < 20_000) {

@@ -63,9 +63,14 @@ private fun DealerMockApp() {
                 Text("Active: ${MockDeck.host.displayName}", color = Color(0xFFBBC8D6))
             }
             Text(
-                "${MockDeck.host.distribution} · ${MockDeck.host.connectionRoute} · ${MockDeck.host.daemonState}",
+                "${MockDeck.host.distribution} · active ${MockDeck.host.activeConnectionRoute} · ${MockDeck.host.daemonState}",
                 color = Color(0xFFBBC8D6),
                 style = MaterialTheme.typography.labelMedium,
+            )
+            Text(
+                "Routes: ${MockDeck.host.connectionRoutes.joinToString(" → ")}",
+                color = Color(0xFFBBC8D6),
+                style = MaterialTheme.typography.labelSmall,
             )
             Text(
                 "${MockDeck.conversation.alias} · ${MockDeck.conversation.locator.threadId}",

@@ -12,7 +12,8 @@ data class CodexHost(
     val kind: CodexHostKind,
     val architecture: HostArchitecture,
     val distribution: CodexDistribution,
-    val connectionRoute: HostConnectionRoute,
+    val connectionRoutes: List<HostConnectionRoute>,
+    val activeConnectionRoute: HostConnectionRoute? = null,
     val availabilityClass: HostAvailabilityClass,
     val connectionState: HostConnectionState,
     val daemonState: DaemonState = DaemonState.UNKNOWN,
@@ -41,7 +42,9 @@ enum class CodexDistribution {
 
 @Serializable
 enum class HostConnectionRoute {
-    SSH_TAILSCALE,
+    SSH_LAN,
+    SSH_EMBEDDED_TSNET,
+    SSH_EXTERNAL_TAILSCALE,
     SSH_LOOPBACK,
 }
 
@@ -55,6 +58,9 @@ enum class HostAvailabilityClass {
 enum class HostConnectionState {
     DISCONNECTED,
     WAITING_FOR_HOST_APP,
+    WAITING_FOR_TAILNET_LOGIN,
+    STARTING_TAILNET,
+    CONNECTING_ROUTE,
     CONNECTING_SSH,
     CHECKING_DAEMON,
     CONNECTING_PROXY,
