@@ -25,9 +25,12 @@ Poker–Dealer is a private mobile and wearable Codex client.
   - **u4090** — Ubuntu/Linux, x86-64 with RTX 4090.
   - **Fold6 Termux** — Android/Termux, ARM64, using a compatible community Termux Codex distribution.
 - Every host runs a long-lived `codex app-server` managed by an app-server daemon and exposed through a Unix control socket.
-- Dealer reaches DGX Spark and u4090 through Tailscale + SSH + `codex app-server proxy`.
+- Dealer reaches workstation SSH through a prioritized route set:
+  1. trusted LAN;
+  2. Dealer's embedded userspace `tsnet` node;
+  3. optional external Tailscale-app fallback.
 - Dealer reaches Fold6 Termux through loopback SSH + `codex app-server proxy`; it MUST NOT open Termux-private files or Unix sockets directly across Android app sandboxes.
-- The local Codex TUI on each host should use the same daemon-backed app-server.
+- The host-local Codex TUI should use the same daemon-backed app-server.
 - A durable conversation identity is `(hostId, threadId)`.
 
 ## Non-negotiable decisions
@@ -47,6 +50,8 @@ Do not reopen these decisions unless the user explicitly requests an architectur
 11. **Poker receives a structured projection from Dealer; it does not connect directly to any app-server.**
 12. **Dealer↔Poker uses the validated ordinary Android hotspot path, with Dealer initiating and Poker listening.**
 13. **No proprietary Rokid CXR transport is a production dependency.**
+14. **Dealer embeds a userspace Tailscale node for workstation access without claiming Android's `VpnService` slot.**
+15. **The embedded tailnet routes only Dealer-owned connections; Dealer is not a system VPN or exit-node client.**
 
 ## Stale-design ban
 
@@ -61,6 +66,9 @@ Do not implement or restore any of the following:
 - a terminal emulator inside Dealer;
 - direct Poker-to-host control;
 - direct Dealer access to Termux-private Unix sockets or files;
+- requiring the standalone Tailscale Android app as Dealer's only remote route;
+- using Android `VpnService` for Dealer's embedded tailnet;
+- routing all Fold6 traffic through Dealer's embedded tailnet;
 - CXR-M, CXR-S, CXR-L, ADB tunnels, or proprietary Rokid data channels.
 
 Git history may contain these designs. History is evidence only, not current guidance.
@@ -78,12 +86,24 @@ Git history may contain these designs. History is evidence only, not current gui
 - Do not require hosts to run identical Codex versions or distributions.
 - Keep daemon lifecycle and update behavior behind a distribution-aware adapter.
 
+## Connectivity rules
+
+- SSH and app-server code MUST depend on a route-neutral TCP/duplex-stream abstraction.
+- A workstation host has an ordered route list rather than one permanent route.
+- Route priority is trusted LAN, embedded `tsnet`, then optional external Tailscale.
+- A failed route MAY fall through to the next configured route after host-key and endpoint checks.
+- Embedded `tsnet` is packaged behind a narrow Go/Android module boundary. Go networking types MUST NOT leak into Compose or app-server protocol code.
+- The embedded node MUST NOT request `VpnService`, install a default route, act as an exit node, or carry unrelated app traffic.
+- Tailnet identity state belongs in Dealer-private storage. Never store auth keys or node secrets in plaintext Room/DataStore fields or logs.
+- SSH host-key verification remains mandatory even over the tailnet.
+- Hiddify/Clash coexistence, direct UDP, DERP fallback, foreground-service behavior, and battery behavior require real Fold6 testing.
+
 ## Host-specific rules
 
 ### DGX Spark and u4090
 
 - Distribution: upstream Linux Codex.
-- Route: Tailscale + SSH.
+- Route set: trusted LAN SSH, embedded-tsnet SSH, optional external-Tailscale SSH.
 - Availability class: persistent workstation host.
 - Dealer may use daemon bootstrap/update flows supported by the installed upstream distribution.
 
@@ -98,7 +118,7 @@ Git history may contain these designs. History is evidence only, not current gui
 
 ## Client continuity rules
 
-- The local TUI, Dealer, and Poker are surfaces for the same host-qualified thread.
+- The host-local TUI, Dealer, and Poker are surfaces for the same host-qualified thread.
 - Dealer should list, read, resume, start, fork, archive, steer, interrupt, and respond to supported approvals through app-server APIs.
 - Dealer must distinguish observer state from active human control.
 - Poker should support reading, thread switching, reviewed Morse/ASR text, steering, interruption, and only approvals that can be displayed completely and safely.
@@ -119,24 +139,29 @@ Git history may contain these designs. History is evidence only, not current gui
 
 Unless a newer committed plan says otherwise, implement one narrow vertical slice on DGX Spark first:
 
-1. Configure the Spark host in Dealer.
-2. Connect with SSH over Tailscale.
-3. Query daemon status/version and ensure it is running.
-4. Launch `codex app-server proxy` through SSH.
-5. Complete the WebSocket and app-server initialization handshakes.
-6. Call `thread/list`.
-7. Resume one thread.
-8. Render its existing turns/items in Dealer.
-9. Send one `turn/start` with an idempotent client message identifier when supported.
-10. Stream the agent message to completion.
-11. Reconnect and prove no duplicate user turn is created.
+1. Define a route-neutral host TCP/duplex-stream interface.
+2. Configure the Spark host in Dealer with LAN and tailnet route metadata.
+3. Use a simple available route for the first proof, preferably trusted LAN; external Tailscale may be used temporarily when LAN is unavailable.
+4. Connect SSH through the route-neutral interface.
+5. Query daemon status/version and ensure it is running.
+6. Launch `codex app-server proxy` through SSH.
+7. Complete the WebSocket and app-server initialization handshakes.
+8. Call `thread/list`.
+9. Resume one thread.
+10. Render its existing turns/items in Dealer.
+11. Send one `turn/start` with an idempotent client message identifier when supported.
+12. Stream the agent message to completion.
+13. Reconnect and prove no duplicate user turn is created.
 
-Do not start with Termux-specific lifecycle work. Add u4090 after Spark, then add Fold6 Termux through the same app-server adapter with its route/distribution differences.
+After that slice is stable, implement the embedded-tsnet Android spike without rewriting SSH or app-server layers. Add u4090 after Spark, then Fold6 Termux through the same app-server adapter.
+
+Do not start with Poker networking, Morse, ASR, a terminal, broad experimental app-server APIs, or Termux-specific lifecycle work.
 
 ## Completion discipline
 
 - Keep each change narrow and testable.
 - Update `SPEC.md` and the relevant ADR in the same commit when changing architecture.
 - Add compatibility fixtures for every app-server method introduced.
-- Avoid claims of real-hardware, Termux-daemon, or multi-version compatibility without recorded evidence.
+- Pin native/Go dependencies and make Android ARM64 packaging reproducible.
+- Avoid claims of real-hardware, embedded-tailnet, Termux-daemon, VPN-coexistence, or multi-version compatibility without recorded evidence.
 - Leave the repository in a state where another fresh Codex session can determine the active design solely from the files on the default branch.
