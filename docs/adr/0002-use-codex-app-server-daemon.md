@@ -2,67 +2,76 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
+- **Amended by:** ADR 0003, which adds Fold6 Termux as a supported host
 - **Supersedes:** the tmux-pane bridge backend and any planned custom host conversation bridge
 
 ## Context
 
 Poker–Dealer originally treated selected tmux panes as conversations. That design required terminal capture, ANSI handling, screen-diff heuristics, message-boundary inference, pane identity management, and tmux input injection. It also made the terminal pane rather than the Codex conversation the durable product identity.
 
-The user's actual primary workflow is Codex work on two Ubuntu/Linux workstations:
+The user's actual workflow is Codex work on three Unix-like execution hosts:
 
-- DGX Spark, ARM64;
-- u4090, x86-64 with RTX 4090.
+- DGX Spark, Ubuntu/Linux ARM64;
+- u4090, Ubuntu/Linux x86-64 with RTX 4090;
+- Fold6 Termux, Android/Termux ARM64 using a compatible community Codex distribution.
 
-The user wants to begin work in the official Codex TUI, continue the same Codex work from the Fold6, and later use Rokid glasses as a third client surface.
+The user wants to begin work in a host-local Codex TUI, continue the same Codex work from Dealer on the Fold6, and use Rokid glasses as another client surface.
 
-Codex app-server already exposes structured thread, turn, item, streaming, interruption, steering, approval, and history APIs. The current Unix Codex TUI can connect to a local daemon-backed app-server, allowing local TUI and Dealer to operate on the same long-lived runtime.
+Codex app-server exposes structured thread, turn, item, streaming, interruption, steering, approval, and history APIs. A daemon-backed app-server allows the host-local TUI and Dealer to operate on the same long-lived runtime.
 
 ## Decision
 
 1. Codex app-server is the only product backend.
-2. Each supported workstation runs a long-lived `codex app-server` managed directly by the experimental `codex app-server daemon`.
+2. Every supported host runs a long-lived `codex app-server` managed by an app-server daemon.
 3. The daemon's Unix control socket is the local app-server endpoint.
-4. Dealer connects over Tailscale + SSH and executes `codex app-server proxy` to reach the socket.
-5. Dealer implements WebSocket framing and the app-server JSON-RPC lifecycle over that SSH stream.
-6. The official Codex TUI should use the same daemon-backed app-server locally.
-7. The durable product identity is `(hostId, threadId)`.
-8. Threads remain bound to their execution host; switching client surfaces does not migrate execution.
-9. Multiple clients may observe one thread, while Poker–Dealer presents one intended active human-control surface at a time.
-10. Dealer is a native Codex client, not a terminal emulator.
-11. Termux + Mosh + tmux remains a separate terminal, editor, process-continuity, recovery, and administration path.
-12. Poker connects only to Dealer and receives a structured projection of Codex activity.
-13. Production Dealer uses the stable app-server API surface by default and a tolerant wire adapter. Direct use of the experimental daemon lifecycle is accepted.
-14. Linux ARM64 and Linux x86-64 are required. Native Windows is not required.
+4. Dealer reaches the socket through SSH and `codex app-server proxy`.
+5. DGX Spark and u4090 use Tailscale SSH.
+6. Fold6 Termux uses loopback SSH because Dealer cannot directly access Termux-private files or Unix sockets across Android application sandboxes.
+7. Dealer implements WebSocket framing and the app-server JSON-RPC lifecycle over the SSH proxy stream.
+8. The host-local Codex TUI should use the same daemon-backed app-server.
+9. The durable product identity is `(hostId, threadId)`.
+10. Threads remain bound to their execution host; switching client surfaces does not migrate execution.
+11. Multiple clients may observe one thread, while Poker–Dealer presents one intended active human-control surface at a time.
+12. Dealer is a native Codex client, not a terminal emulator.
+13. Termux may be both a first-class phone-local Codex host and a separate full terminal/editor/recovery surface.
+14. Poker connects only to Dealer and receives a structured projection of Codex activity.
+15. Production Dealer uses the stable app-server API surface by default and a tolerant wire adapter. Direct use of the experimental daemon lifecycle is accepted.
+16. Linux ARM64, Linux x86-64, and Android/Termux ARM64 are supported. Native Windows is not required.
+17. Distribution-specific lifecycle and update behavior is isolated behind a small adapter.
 
 ## Consequences
 
 ### Positive
 
 - Removes terminal scraping and message inference.
-- Preserves real Codex thread identity across workstation, phone, and glasses.
+- Preserves real Codex thread identity across host-local TUI, phone, and glasses.
 - Makes command executions, file changes, approvals, errors, and turn state structured.
-- Allows the local TUI and Dealer to share one host runtime.
+- Allows Dealer to use one app-server client abstraction across remote workstations and phone-local Termux.
 - Removes the custom Rust bridge and its security/protocol burden.
 - Makes Poker input semantic: start, steer, interrupt, approve, deny, and switch thread.
-- Keeps full terminal power available through the existing Termux workflow without duplicating a terminal in Dealer.
+- Keeps full terminal power available through Termux without duplicating a terminal in Dealer.
 
 ### Negative
 
 - Poker–Dealer no longer supports arbitrary tmux sessions or non-Codex agents.
-- The product directly depends on an experimental daemon lifecycle whose commands may change.
+- The product directly depends on experimental daemon lifecycle behavior.
 - Dealer must implement SSH, WebSocket-over-proxy, app-server JSON-RPC, tolerant parsing, and reconnect reconciliation.
+- The community Termux distribution may lag or diverge from upstream Codex.
+- Android may suspend or stop the Termux host, so it cannot promise workstation-level availability.
 - Threads remain host-bound; cross-host handoff requires a separate future design.
 - Simultaneous human control from local TUI and Dealer requires explicit UX coordination.
 
 ### Mitigations
 
-- Isolate daemon command parsing in a small lifecycle adapter.
+- Isolate daemon command parsing and update behavior by distribution.
 - Use the stable app-server surface by default.
 - Ignore unknown optional fields and notifications; preserve raw payloads for diagnostics.
 - Safely reject unknown server-initiated requests.
 - Treat every client connection as disposable and rebuild state after reconnect.
 - Never blindly resend an uncertain `turn/start`.
-- Maintain Termux + Mosh + tmux as the recovery path.
+- Capability-test the installed Termux build instead of trusting version strings alone.
+- Model the Termux host as opportunistic and provide explicit recovery states.
+- Keep Termux terminal workflows as the recovery path.
 
 ## Rejected alternatives
 
@@ -72,16 +81,20 @@ Rejected because it preserves terminal processes but forces Poker–Dealer to in
 
 ### Run a disposable app-server per SSH connection
 
-Rejected because the product requires a long-lived runtime shared with the local TUI and resilient to phone disconnection.
+Rejected because the product requires a long-lived runtime shared with the host-local TUI and resilient to Dealer disconnection.
 
 ### Add a custom host bridge around app-server
 
 Rejected for the first version because the daemon and proxy already provide lifecycle and local-socket access. A wrapper may be introduced only if real daemon churn justifies it.
 
+### Open the Termux Unix socket directly from Dealer
+
+Rejected because Dealer and Termux are separate Android applications with separate private sandboxes. Loopback SSH plus the proxy preserves one host-access abstraction.
+
 ### Make Dealer a terminal emulator
 
 Rejected because it duplicates Termux, weakens the structured Codex UX, and reintroduces terminal complexity.
 
-### Use WebRTC between Dealer and workstations
+### Use WebRTC between Dealer and hosts
 
-Rejected because SSH over Tailscale plus the official app-server proxy is simpler and sufficient for the current Linux-only environment.
+Rejected because SSH plus the official app-server proxy is simpler and sufficient for the current environment.

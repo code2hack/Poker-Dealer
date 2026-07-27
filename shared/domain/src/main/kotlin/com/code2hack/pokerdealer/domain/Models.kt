@@ -9,7 +9,11 @@ const val DEFAULT_MAX_REPLY_UTF8_BYTES = 64 * 1_024
 data class CodexHost(
     val id: String,
     val displayName: String,
+    val kind: CodexHostKind,
     val architecture: HostArchitecture,
+    val distribution: CodexDistribution,
+    val connectionRoute: HostConnectionRoute,
+    val availabilityClass: HostAvailabilityClass,
     val connectionState: HostConnectionState,
     val daemonState: DaemonState = DaemonState.UNKNOWN,
     val codexVersion: String? = null,
@@ -17,19 +21,46 @@ data class CodexHost(
 )
 
 @Serializable
+enum class CodexHostKind {
+    LINUX_WORKSTATION,
+    TERMUX_ANDROID,
+}
+
+@Serializable
 enum class HostArchitecture {
     LINUX_ARM64,
     LINUX_X86_64,
+    ANDROID_ARM64,
+}
+
+@Serializable
+enum class CodexDistribution {
+    OPENAI_UPSTREAM,
+    TERMUX_COMMUNITY,
+}
+
+@Serializable
+enum class HostConnectionRoute {
+    SSH_TAILSCALE,
+    SSH_LOOPBACK,
+}
+
+@Serializable
+enum class HostAvailabilityClass {
+    PERSISTENT,
+    OPPORTUNISTIC,
 }
 
 @Serializable
 enum class HostConnectionState {
     DISCONNECTED,
+    WAITING_FOR_HOST_APP,
     CONNECTING_SSH,
     CHECKING_DAEMON,
     CONNECTING_PROXY,
     INITIALIZING,
     CONNECTED,
+    SUSPENDED,
     BACKING_OFF,
     ERROR,
 }
