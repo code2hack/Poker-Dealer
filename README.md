@@ -16,29 +16,58 @@ Each host runs a long-lived `codex app-server` managed by an app-server daemon a
 
 ```text
 DGX Spark / u4090
-Official Codex TUI ─┐
-                     ├─ daemon-managed codex app-server
-Dealer ─ Tailscale SSH proxy ┘       │
-                                     ▼
-                                Codex threads
+Host-local Codex TUI ─┐
+                       ├─ daemon-managed codex app-server
+Dealer ─ SSH + proxy ──┘               │
+                                        ▼
+                                   Codex threads
 
 Fold6 Termux
-Termux Codex TUI ───┐
-                     ├─ daemon-managed codex app-server
-Dealer ─ loopback SSH proxy ┘         │
-                                      ▼
-                                 Codex threads
+Termux Codex TUI ─────┐
+                       ├─ daemon-managed codex app-server
+Dealer ─ loopback SSH ┘               │
+          + proxy                      ▼
+                                  Codex threads
 
 Dealer ─ authenticated Dealer↔Poker link ─ Poker on Rokid glasses
 ```
 
-Dealer uses the same app-server protocol for all hosts. The route and lifecycle adapter differ:
+Dealer uses the same SSH, proxy, WebSocket, and app-server protocol stack for all hosts. Connectivity and lifecycle details remain behind adapters.
 
-| Host | Distribution | Dealer route | Availability |
+## Workstation connectivity without Android VPN conflict
+
+Dealer embeds a userspace Tailscale node based on `tsnet`. It is not an Android system VPN and does not request the `VpnService` slot.
+
+```text
+Hiddify / Clash
+└── Android VpnService
+
+Dealer
+└── embedded userspace tsnet
+    └── SSH to DGX Spark / u4090
+```
+
+Only Dealer-owned connections enter this tailnet. Dealer does not route all device traffic and does not act as an exit-node client.
+
+Workstation route priority is:
+
+```text
+1. trusted LAN SSH
+2. embedded-tsnet SSH
+3. optional external-Tailscale SSH fallback
+```
+
+The standalone Tailscale Android application is therefore optional for Dealer. It may remain installed for diagnostics or fallback, but Dealer's target architecture does not require it to stay connected.
+
+The embedded Go component will be packaged behind a narrow Android module boundary. SSH and app-server code consume a route-neutral stream or local-proxy abstraction rather than Go networking objects directly.
+
+## Host matrix
+
+| Host | Distribution | Dealer routes | Availability |
 | --- | --- | --- | --- |
-| DGX Spark | upstream Linux Codex | Tailscale + SSH + proxy | persistent |
-| u4090 | upstream Linux Codex | Tailscale + SSH + proxy | persistent |
-| Fold6 Termux | community Termux Codex | loopback SSH + proxy | opportunistic |
+| DGX Spark | upstream Linux Codex | LAN → embedded tsnet → external Tailscale | persistent |
+| u4090 | upstream Linux Codex | LAN → embedded tsnet → external Tailscale | persistent |
+| Fold6 Termux | community Termux Codex | loopback SSH | opportunistic |
 
 Dealer MUST NOT attempt to open Termux's private Unix socket directly across Android application sandboxes.
 
@@ -52,7 +81,7 @@ A thread remains on its execution host. Switching from workstation or Termux to 
 
 ## Product roles
 
-- **Dealer** is a native Android Codex client and the authority for host connections, distribution-aware lifecycle behavior, phone UI, Poker projection, unread state, and wearable input routing.
+- **Dealer** is a native Android Codex client and the authority for host connections, route selection, embedded-tailnet lifecycle, distribution-aware daemon behavior, phone UI, Poker projection, unread state, and wearable input routing.
 - **Poker** is the Rokid HUD and lightweight input surface. It reads projected Codex activity and sends reviewed text or explicit semantic actions through Dealer.
 - **Codex app-server** is authoritative for threads, turns, items, approvals, command execution, and persisted Codex history.
 - **Termux** has two distinct roles:
@@ -73,6 +102,16 @@ It does not migrate a live thread among DGX Spark, u4090, and Fold6 Termux. Cros
 
 Multiple clients may observe one thread. Poker–Dealer follows a **one active human-control surface per thread** rule to avoid conflicting input or duplicate approval decisions.
 
+## Embedded-tailnet boundaries
+
+- The embedded node has its own tailnet identity, expected to be named similarly to `dealer-fold6`.
+- Tailnet policy should grant only required workstation services, initially SSH.
+- SSH host-key verification remains mandatory over every route.
+- Tailscale node state belongs only in Dealer-private storage.
+- Auth keys, state keys, proxy credentials, and SSH private keys must never appear in logs or plaintext Room/DataStore columns.
+- Any loopback proxy or tunnel exposed by the Go module must bind only to loopback and be authenticated or otherwise process-confined.
+- Hiddify/Clash coexistence, direct UDP, DERP fallback, battery behavior, and foreground-service behavior require real Fold6 acceptance tests.
+
 ## Compatibility policy
 
 - Dealer talks directly to daemon lifecycle commands through SSH.
@@ -83,6 +122,7 @@ Multiple clients may observe one thread. Poker–Dealer follows a **one active h
 - The daemon is experimental by deliberate product decision; daemon churn is isolated in a small lifecycle adapter.
 - Termux support is capability-based. Dealer must not infer daemon/proxy compatibility solely from a package version.
 - Upstream Linux and community Termux update mechanisms are handled separately.
+- The embedded Tailscale Go dependency is pinned and updated through Dealer releases.
 
 ## Fold6 Termux host
 
@@ -113,7 +153,12 @@ The phone-local host is useful for developing and debugging Poker/Dealer and oth
 
 The repository uses Codex host/thread terminology throughout. The old Rust tmux bridge and scratch planning tree were removed. The previous SSH-supervised WebRTC/tmux proposal is closed as superseded.
 
-The next implementation slice remains DGX Spark first: connect Dealer to one daemon through SSH + `codex app-server proxy`, initialize the app-server connection, list threads, resume one thread, and stream one turn end to end. Add u4090 second and Fold6 Termux third through the same adapter.
+The next implementation sequence is:
+
+1. Build a route-neutral Spark SSH/app-server vertical slice using an available route, preferably LAN.
+2. Add the embedded-tsnet Android spike without rewriting SSH or app-server code.
+3. Add u4090.
+4. Add Fold6 Termux through the same app-server adapter.
 
 ## Build and test
 
@@ -141,6 +186,8 @@ Build the developer APKs:
 ```
 
 On ARM64 Termux, install the native `aapt2` package. `tooling/check.sh` automatically supplies its path to Gradle when available.
+
+The future embedded-tailnet module will additionally require a pinned Go toolchain, `gomobile`, Android ARM64 native packaging, and reproducible AAR generation. Those gates are not implemented yet.
 
 ## Start a fresh Codex implementation session
 
