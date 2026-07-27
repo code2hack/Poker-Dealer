@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-27
 - **Amends:** ADR 0002
+- **Related:** ADR 0004 defines Dealer's workstation route strategy
 
 ## Context
 
@@ -25,6 +26,7 @@ Dealer and Termux run as separate Android applications. Dealer therefore cannot 
 9. Fold6 Termux is an opportunistic mobile host. Dealer must treat Android suspension, process death, missing `sshd`, and a stopped daemon as recoverable host states.
 10. Termux threads remain bound to the Fold6. Moving work to Spark or u4090 requires repository synchronization and an explicit new-thread handoff.
 11. Termux remains the full terminal/editor/recovery surface. Adding it as a backend does not make Dealer a terminal emulator.
+12. The embedded tailnet in ADR 0004 is for remote workstation reachability; it is not part of the Termux loopback path.
 
 ## Connection shape
 
@@ -53,8 +55,10 @@ Fold6-local Codex threads and repositories
 - host kind: Linux workstation or Android/Termux;
 - architecture: Linux ARM64, Linux x86-64, or Android ARM64;
 - distribution: upstream Codex or community Termux Codex;
-- connection route: Tailscale SSH or loopback SSH;
+- an ordered route list and current active route;
 - availability class: persistent or opportunistic.
+
+Fold6 Termux's required route list contains only `SSH_LOOPBACK`. Workstation hosts may have the LAN, embedded-tsnet, and external-Tailscale routes defined by ADR 0004.
 
 Durable thread identity remains `(hostId, threadId)`.
 
