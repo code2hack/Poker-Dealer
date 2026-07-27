@@ -15,7 +15,8 @@ class CodexHostTest {
             kind = CodexHostKind.TERMUX_ANDROID,
             architecture = HostArchitecture.ANDROID_ARM64,
             distribution = CodexDistribution.TERMUX_COMMUNITY,
-            connectionRoute = HostConnectionRoute.SSH_LOOPBACK,
+            connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
+            activeConnectionRoute = HostConnectionRoute.SSH_LOOPBACK,
             availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
             connectionState = HostConnectionState.WAITING_FOR_HOST_APP,
             daemonState = DaemonState.STOPPED,
@@ -27,8 +28,31 @@ class CodexHostTest {
 
         assertEquals(host, decoded)
         assertEquals(CodexHostKind.TERMUX_ANDROID, decoded.kind)
-        assertEquals(HostConnectionRoute.SSH_LOOPBACK, decoded.connectionRoute)
+        assertEquals(listOf(HostConnectionRoute.SSH_LOOPBACK), decoded.connectionRoutes)
         assertEquals(HostAvailabilityClass.OPPORTUNISTIC, decoded.availabilityClass)
+    }
+
+    @Test
+    fun `workstation preserves ordered route preference`() {
+        val host = CodexHost(
+            id = "spark",
+            displayName = "DGX Spark",
+            kind = CodexHostKind.LINUX_WORKSTATION,
+            architecture = HostArchitecture.LINUX_ARM64,
+            distribution = CodexDistribution.OPENAI_UPSTREAM,
+            connectionRoutes = listOf(
+                HostConnectionRoute.SSH_LAN,
+                HostConnectionRoute.SSH_EMBEDDED_TSNET,
+                HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+            ),
+            activeConnectionRoute = HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            availabilityClass = HostAvailabilityClass.PERSISTENT,
+            connectionState = HostConnectionState.CONNECTED,
+        )
+
+        assertEquals(HostConnectionRoute.SSH_LAN, host.connectionRoutes.first())
+        assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, host.connectionRoutes[1])
+        assertEquals(HostConnectionRoute.SSH_EMBEDDED_TSNET, host.activeConnectionRoute)
     }
 
     @Test
