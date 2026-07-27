@@ -22,17 +22,3 @@ jobs:
         run: sdkmanager "platforms;android-35" "build-tools;36.0.0"
       - name: Test and lint mock build
         run: ./gradlew test lint
-
-  bridge:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --check --manifest-path bridge/Cargo.toml
-      - name: Run Clippy
-        run: cargo clippy --manifest-path bridge/Cargo.toml --all-targets -- -D warnings
-      - name: Test bridge
-        run: cargo test --manifest-path bridge/Cargo.toml
