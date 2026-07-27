@@ -3,6 +3,7 @@ package com.code2hack.pokerdealer.domain
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Test
 
 class CodexHostTest {
@@ -37,6 +38,6 @@ class CodexHostTest {
 
         assertEquals("thr_same", spark.threadId)
         assertEquals("thr_same", termux.threadId)
-        assert(spark != termux)
+        assertNotEquals(spark, termux)
     }
 }
