@@ -59,16 +59,21 @@ private fun DealerMockApp() {
             Text("Dealer", style = MaterialTheme.typography.headlineSmall, color = Color.White)
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Poker: $state", color = Color(0xFF8EE7B2))
-                Text("Bridges: mock", color = Color(0xFFBBC8D6))
-                Text("Panes: 1", color = Color(0xFFBBC8D6))
+                Text("Host: ${MockDeck.host.displayName}", color = Color(0xFFBBC8D6))
+                Text("Daemon: ${MockDeck.host.daemonState}", color = Color(0xFFBBC8D6))
             }
             Text(
-                "${MockDeck.conversation.alias} · ${MockDeck.conversation.locator.paneId}",
+                "${MockDeck.conversation.alias} · ${MockDeck.conversation.locator.threadId}",
                 color = Color.White,
+            )
+            Text(
+                "${MockDeck.conversation.state} · control ${MockDeck.conversation.intendedControlSurface}",
+                color = Color(0xFFBBC8D6),
+                style = MaterialTheme.typography.labelMedium,
             )
         }
         Text(
-            "Conversation preview · complete card (${MockDeck.longCard.fullText.length} chars)",
+            "Codex agent-message projection · complete card (${MockDeck.longCard.fullText.length} chars)",
             modifier = Modifier.padding(16.dp),
             style = MaterialTheme.typography.titleMedium,
         )
