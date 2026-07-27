@@ -1,10 +1,13 @@
 package com.code2hack.dealer
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import androidx.activity.ComponentActivity
@@ -100,6 +103,7 @@ class DealerActivity : ComponentActivity() {
                 }
             }
         }
+        requestNotificationPermission()
     }
 
     override fun onStart() {
@@ -184,6 +188,14 @@ class DealerActivity : ComponentActivity() {
             Intent(this, DealerConnectionService::class.java)
                 .setAction(DealerConnectionService.ACTION_START_TAILNET),
         )
+    }
+
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+        }
     }
 
     private fun openEmbeddedTailnetLogin(loginUrl: String) {

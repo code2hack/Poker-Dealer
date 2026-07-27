@@ -65,7 +65,7 @@ Fold6 Termux uses only:
 SSH_LOOPBACK
 ```
 
-M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundary required by embedded `tsnet`. The live proof completed on 2026-07-27; see `docs/evidence/u4090-m1-2026-07-27.md`. Before M1T, issue #5 hardened that boundary with capability-aware route filtering, phase-specific timeouts, active cancellation, truthful one-shot states, and one-card user-message delivery reconciliation; see `docs/evidence/u4090-m1-hardening-2026-07-27.md`. Fold6 direct routing and Karing coexistence were proven on 2026-07-28; see `docs/evidence/fold6-m1t-routing-2026-07-28.md`. A real DERP-relayed turn and the remaining lifecycle/power checks are still required, so M1T remains the current milestone.
+M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundary required by embedded `tsnet`. The live proof completed on 2026-07-27; see `docs/evidence/u4090-m1-2026-07-27.md`. Before M1T, issue #5 hardened that boundary with capability-aware route filtering, phase-specific timeouts, active cancellation, truthful one-shot states, and one-card user-message delivery reconciliation; see `docs/evidence/u4090-m1-hardening-2026-07-27.md`. Fold6 direct routing and Karing coexistence were proven on 2026-07-28; see `docs/evidence/fold6-m1t-routing-2026-07-28.md`. Short Activity/service recreation, process restart, forced-idle, fallback, tunnel-interruption, and UI-cancellation checks are recorded in `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`. A real DERP-relayed turn, long unattended lifecycle recovery, notification-action tap, and controlled physical battery measurements are still required, so M1T remains the current milestone.
 
 ## Core identity
 
