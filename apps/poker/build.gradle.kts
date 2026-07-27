@@ -8,10 +8,10 @@ android {
 
     defaultConfig {
         applicationId = "com.code2hack.poker"
-        minSdk = 33
+        minSdk = 28
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0-m0"
+        versionName = "0.2.0-codex-reset"
     }
 
     flavorDimensions += "transport"
