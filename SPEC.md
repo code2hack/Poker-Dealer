@@ -1,7 +1,7 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 2
-**Date:** 2026-07-25
+**Status:** Normative implementation contract, revision 5
+**Date:** 2026-07-26
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** local Codex worker  
 **Product names:** **Poker** = RG-glasses Android HUD app; **Dealer** = Android companion app
@@ -29,8 +29,10 @@ The intended topology is:
 
 ```text
 Termux tmux ─┐
-             ├─ Poker–Dealer Bridge ── secure WebSocket ── Dealer on Android
-DGX Spark ───┘                                      Fold6 hotspot owner
+             ├─ Poker–Dealer Bridge ══ WebRTC data ══ Dealer on Android
+DGX Spark ───┘               ╲ restricted SSH bootstrap ╱
+                              and lifetime supervision
+                                                 Fold6 hotspot owner
                                                            │
                                                            │ authenticated TLS/TCP
                                                            │ Dealer initiates
@@ -80,7 +82,8 @@ The MVP is complete only when all of the following work on real hardware:
 
 - RG-glasses Android HUD application named **Poker**.
 - Android companion application named **Dealer**.
-- A host-side daemon/CLI named **`poker-dealer-bridge`** for Termux and Linux.
+- A user-scoped Host-side CLI and per-session process named
+  **`poker-dealer-bridge`** for Termux and Linux.
 - Local Termux tmux servers.
 - Remote Linux tmux servers, initially DGX Spark over Tailscale.
 - One attached conversation per tmux pane.
@@ -114,6 +117,10 @@ The MVP is complete only when all of the following work on real hardware:
   SDK dependency for Dealer↔Poker transport.
 - Publishing proprietary Rokid SDK binaries in the repository.
 
+Live photos, audio, and video for Host-side AI agents are a possible
+post-MVP extension, not an M1–M9 deliverable. Their later transport and agent
+integration remain undecided and MUST NOT expand or delay M1.
+
 ---
 
 ## 3. Fixed naming and identifiers
@@ -129,9 +136,14 @@ The MVP is complete only when all of the following work on real hardware:
 
 ### 3.2 Definitions
 
-- **Host:** A machine or Android/Termux environment running one or more tmux servers and one bridge.
-- **Tmux server:** A tmux instance selected by default socket, `-L socket-name`, or `-S socket-path`.
-- **Pane locator:** Runtime coordinates identifying one pane on one host and tmux server.
+- **Host:** A user-scoped Linux or Android/Termux environment containing
+  OpenSSH, the Bridge executable, and one or more tmux servers.
+- **Tmux server:** A durable socket locator selected by the default socket,
+  `-L socket-name`, or `-S socket-path`.
+- **Tmux server instance:** One lifetime of the tmux process reached through a
+  Tmux server locator.
+- **Pane locator:** Runtime coordinates identifying one pane on one Host and
+  Tmux server instance.
 - **Conversation:** Dealer’s durable logical attachment to a pane locator.
 - **Card:** A user, agent, terminal, or system message shown in chronological order.
 - **Card pile:** Recent cards belonging to one conversation.
@@ -140,6 +152,13 @@ The MVP is complete only when all of the following work on real hardware:
 - **Committed card:** A card whose current turn is complete. It may still receive a correction revision.
 - **Poker transport:** The authenticated, bidirectional Dealer↔Poker
   application link, independent of product logic.
+- **Bridge transport:** One supervised compound session consisting of a
+  restricted SSH bootstrap channel and a WebRTC data plane.
+- **Bridge bootstrap channel:** The restricted SSH exec channel that
+  authenticates the peers, exchanges WebRTC signaling, and remains open to
+  supervise one Bridge session.
+- **Bridge data plane:** The WebRTC peer connection whose reliable ordered
+  data channel carries Bridge Protocol messages.
 - **Network initiator:** Dealer on the Fold6. This is a socket role, not
   protocol authority terminology.
 - **Network listener:** Poker on the RG-glasses. This is a socket role, not
@@ -153,6 +172,7 @@ A pane locator MUST contain:
 data class PaneLocator(
     val hostId: String,
     val tmuxServerId: String,
+    val tmuxServerInstanceId: String,
     val paneId: String,          // tmux runtime ID, e.g. "%17"
     val sessionId: String?,      // metadata, e.g. "$1"
     val windowId: String?,       // metadata, e.g. "@4"
@@ -164,7 +184,15 @@ data class PaneLocator(
 )
 ```
 
-`paneId` is authoritative only for the lifetime of that tmux pane. Names and indices are metadata and MUST NOT be treated as durable unique IDs. Dealer assigns its own stable `conversationId` and marks the conversation **stale** when the original pane disappears. Automatic reassignment to a new pane MUST NOT occur without an exact configured reattachment rule or user confirmation.
+`tmuxServerId` identifies a durable socket locator.
+`tmuxServerInstanceId` identifies one lifetime of the tmux process reached
+through that locator. `paneId` is authoritative only within that server
+instance and for the lifetime of that pane. Names and indices are metadata and
+MUST NOT be treated as durable unique IDs. Dealer assigns its own stable
+`conversationId` and marks the conversation **stale** when the original pane
+disappears or its tmux server instance changes. Automatic reassignment to a new
+pane MUST NOT occur without an exact configured reattachment rule or user
+confirmation.
 
 ---
 
@@ -180,10 +208,15 @@ Required architectural choices:
 - Kotlin coroutines and `Flow`/`StateFlow` for asynchronous state.
 - Room for recent history and attachment persistence.
 - DataStore for non-secret preferences.
-- Android Keystore-backed encryption for bridge and Poker pairing secrets and
-  certificate pins.
-- OkHttp or Ktor client for bridge WebSockets. Pick one and use it consistently.
-- A foreground service while live bridge and Poker network connections are enabled.
+- Android Keystore-backed protection for Dealer's SSH client private keys and
+  Poker pairing secrets.
+- Android-compatible SSH and WebRTC implementations isolated behind
+  coroutine/`Flow` Bridge-session interfaces. SSH MUST support pinned host-key
+  verification, public-key authentication, and an exec channel without a PTY.
+  WebRTC MUST support a reliable ordered data channel. The exact libraries and
+  platform-module boundary remain an M1 decision; production and acceptance
+  tests MUST exercise the same implementations used by Dealer.
+- A foreground service while live Bridge and Poker network connections are enabled.
 - `minSdk = 33`.
 - `compileSdk` and `targetSdk` MUST be pinned to the latest stable SDK installed when the project is bootstrapped; they MUST NOT use preview SDKs without a separate build flavor.
 
@@ -314,6 +347,7 @@ The worker MUST bootstrap a monorepo using this logical layout. Minor Gradle dir
 │   └── poker/                    # Android HUD application for RG-glasses
 ├── shared/
 │   ├── protocol/                 # pure Kotlin DTOs, codecs, sequencing, chunking
+│   ├── bridge-client/            # reusable Bridge session core/interfaces
 │   ├── domain/                   # pure Kotlin cards/conversations/input state
 │   └── testing/                  # fixtures and fake transports
 ├── bridge/                       # Rust bridge workspace/crate
@@ -329,22 +363,19 @@ The worker MUST bootstrap a monorepo using this logical layout. Minor Gradle dir
 
 Reasons captured as requirements:
 
-- one native daemon/CLI binary;
-- reliable process and byte-stream handling;
+- one native CLI/WebRTC bridge binary;
+- reliable process, signaling, and data-channel handling;
 - explicit memory and concurrency behavior;
-- mature async WebSocket/TLS ecosystem;
 - a VT parser can consume tmux output without shelling out for every byte;
 - it can be built natively in Termux and for Linux x86_64/aarch64.
 
 Recommended crates are not mandatory, but substitutions require equal testability:
 
 - `tokio`
-- `tokio-tungstenite` or `axum` WebSocket support
-- `rustls`
 - `serde`, `serde_json`
 - `clap`
 - `tracing`
-- `hmac`, `sha2`, `rand`
+- `sha2`, `rand`
 - `uuid`
 - `vt100` or an equivalent maintained terminal parser
 - `thiserror`
@@ -371,11 +402,12 @@ The bridge MUST compile with stable Rust and pass `rustfmt`, `clippy -D warnings
 │   ├── control-mode client(s)                                 │
 │   ├── terminal parsing                                      │
 │   ├── constrained input injection                            │
-│   ├── pairing/authentication                                │
-│   └── WSS server                                             │
+│   ├── SSH bootstrap + WebRTC session                        │
+│   └── durable request dedupe                                │
 └───────────────────────────────┬──────────────────────────────┘
                                 │
-                                │ Bridge Protocol v1
+                                │ Bridge Protocol v1 over a reliable ordered
+                                │ WebRTC data channel
                                 ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Dealer                                                       │
@@ -435,15 +467,16 @@ data class TmuxHost(
 )
 
 enum class HostSecurityMode {
-    LOOPBACK_PINNED,
-    TLS_PINNED_HMAC
+    SSH_PINNED_HOST_KEY
 }
 ```
 
 Dealer SHOULD ship with creation helpers for:
 
-- `Termux (local)` — `127.0.0.1`, loopback only.
-- `DGX Spark (Tailscale)` — user-provided Tailscale hostname/IP and pinned bridge identity.
+- `Termux (local)` — user-configured loopback SSH endpoint and pinned Host
+  identity.
+- `DGX Spark (Tailscale)` — user-provided Tailscale SSH endpoint and pinned
+  Host identity.
 
 ### 7.2 Tmux server
 
@@ -451,6 +484,7 @@ Dealer SHOULD ship with creation helpers for:
 data class TmuxServer(
     val id: String,
     val hostId: String,
+    val instanceId: String?,
     val selectorType: TmuxSelectorType,
     val selectorValue: String?,
     val tmuxVersion: String?,
@@ -461,6 +495,13 @@ enum class TmuxSelectorType { DEFAULT, SOCKET_NAME, SOCKET_PATH }
 ```
 
 The bridge MUST invoke tmux with an argv array. It MUST NOT interpolate selector values into shell strings.
+
+`id` is stable for the canonical socket locator. `instanceId` is present only
+while a server process is reachable and MUST remain stable across Bridge
+restarts while that tmux process survives. The Bridge derives it from the
+canonical socket locator plus tmux's reported server UID, PID, and start time.
+If that tuple changes, the Bridge MUST report a replacement instance even when
+the socket name and pane IDs are reused.
 
 ### 7.3 Conversation
 
@@ -593,19 +634,41 @@ Defaults:
 
 ### 8.1 Process model
 
-The bridge runs one daemon per host user account. It may manage multiple tmux servers.
+OpenSSH invokes one Bridge bootstrap process for the authenticated Dealer
+session. That process exchanges WebRTC signaling, owns the resulting peer
+connection, may manage multiple tmux servers, and remains supervised by the
+open SSH exec channel. Closing that channel terminates both the process and its
+WebRTC session. Product operation MUST NOT require a separately persistent
+Bridge daemon.
 
 Commands:
 
 ```text
-poker-dealer-bridge serve
-poker-dealer-bridge pair
+poker-dealer-bridge rtc-bootstrap
 poker-dealer-bridge doctor
 poker-dealer-bridge list-servers
 poker-dealer-bridge emit ...        # optional structured-agent input
 ```
 
-Configuration lives in an OS-appropriate user config directory and MUST be file-permission protected. Secrets MUST never appear in process arguments or logs.
+Human-editable configuration and generated private state MUST be separated:
+
+- `bridge.toml` lives in the OS-appropriate user configuration directory and
+  contains the tmux executable and explicitly added custom tmux socket paths
+  only. It MUST NOT contain SSH credentials.
+- Any durable request-deduplication state lives in an OS-appropriate private
+  user data directory, never the repository or current working directory.
+- Private directories MUST be owned by the current user and owner-only.
+  Sensitive files MUST be regular, non-symlink files owned by the current user
+  with mode `0600`. Any Bridge command that reads them MUST refuse insecure
+  ownership, type, or mode.
+- Durable state creation and replacement MUST use create-new or atomic
+  replacement semantics so partial state cannot be loaded.
+- A single explicit root override MAY relocate both trees for isolated tests;
+  production MUST NOT silently fall back to the working directory.
+
+The Bridge does not own SSH host or Dealer private keys. Secrets MUST never
+appear in process arguments, bootstrap diagnostics, Bridge Protocol messages,
+or logs.
 
 ### 8.2 tmux compatibility
 
@@ -615,7 +678,22 @@ Configuration lives in an OS-appropriate user config directory and MUST be file-
 
 ### 8.3 Discovery
 
-For each configured server, enumerate panes using `list-panes -a -F` with tab-delimited fields including at least:
+After Dealer authenticates to a Host, the bridge MUST discover tmux servers
+owned by the bridge's OS user as follows:
+
+- enumerate the default and named socket files in tmux's standard per-user
+  socket directory;
+- require each socket and its containing directory to be owned by the bridge
+  user;
+- include custom `tmux -S` socket paths only when locally declared in
+  `bridge.toml`;
+- never accept a tmux executable, socket name, or socket path supplied by
+  Dealer over the network;
+- never scan the general filesystem for Unix sockets.
+
+This is Host-level authorization, not a per-tmux-server permission prompt. For
+each discovered or locally declared server, enumerate panes using
+`list-panes -a -F` with tab-delimited fields including at least:
 
 ```text
 session_id
@@ -644,6 +722,28 @@ Discovery events:
 - pane death/close;
 - server unavailable/recovered.
 
+Every topology snapshot and delta MUST carry both `tmuxServerId` and
+`tmuxServerInstanceId`. An instance change invalidates all prior pane runtime
+identities before the replacement topology is exposed.
+
+Topology is snapshot-authoritative:
+
+1. The bridge builds the initial state from formatted `list-panes -a` output.
+2. Control-mode lifecycle notifications are low-latency change signals, not
+   independently authoritative topology mutations.
+3. A notification schedules a short debounced re-read of the affected tmux
+   server. The bridge diffs that complete result against its last accepted
+   snapshot and emits the ordered change set.
+4. The bridge also reconciles periodically and after every control-mode
+   reconnect or tmux-server recovery so missed notifications are repaired.
+5. No replacement-instance pane may be emitted until removal/invalidation of
+   every prior-instance pane has been established in the same reconciliation.
+6. One reconciliation emits one atomic topology revision. Its `host.delta`
+   contains `baseRevision`, the new `revision`, all upserts, removals, and
+   instance invalidations needed to move between the two complete snapshots.
+   Dealer applies the batch only when `baseRevision` equals its current
+   revision; otherwise it requests a new `host.snapshot`.
+
 ### 8.4 Primary output source: tmux control mode
 
 The bridge MUST use tmux control mode as the primary live event source.
@@ -658,6 +758,8 @@ Properties relied upon:
 The bridge SHOULD maintain one control-mode client per attached tmux session unless a verified implementation can receive all required pane output through fewer clients. It MUST set flags that prevent its virtual client from changing ordinary client layout size. It MUST implement backpressure and recover from `%pause`, “too far behind,” process exit, and server restart.
 
 The bridge MUST NOT claim or overwrite a pane’s `pipe-pane` configuration.
+Topology notifications feed the snapshot reconciliation process from Section
+8.3; they MUST NOT bypass it and directly become authoritative Dealer state.
 
 ### 8.5 Bootstrap and recovery: `capture-pane`
 
@@ -807,22 +909,107 @@ PageUp, PageDown
 
 Additional keys require an explicit per-conversation allowlist. There is no generic “run command” operation.
 
-### 8.11 Bridge transport and pairing
+### 8.11 Bridge bootstrap, supervision, and Host authorization
 
-- Bridge serves WebSocket over TLS (`wss`) for non-loopback endpoints.
-- On first start, bridge generates a long-lived TLS identity and a 256-bit pairing secret.
-- Dealer pins the bridge certificate/public-key fingerprint during pairing.
-- Each connection performs a fresh HMAC-SHA256 challenge-response using the pairing secret.
-- Replay protection MUST include nonce, timestamp window, and connection ID.
-- Secrets are never logged.
-- Loopback plaintext MAY be supported only for `127.0.0.1` and still requires application authentication.
-- Remote binding MUST default to a specifically configured Tailscale address, never `0.0.0.0`.
-- The bridge MUST reject unauthenticated pane listing as well as input.
-- Multiple failed authentication attempts MUST be rate-limited.
+Dealer reaches both Termux and Spark through OpenSSH:
+
+```text
+Dealer SSH client
+    │ pinned SSH Host identity + Dealer product public key
+    ▼
+Host sshd
+    │ forced bootstrap command, no PTY or forwarding
+    ▼
+poker-dealer-bridge rtc-bootstrap
+    │ authenticated WebRTC signaling; SSH remains open as supervisor
+    ▼
+reliable ordered WebRTC data channel
+```
+
+Normative rules:
+
+1. Dealer MUST pin the selected Host's SSH host key before accepting Bridge
+   bootstrap signaling. A new or changed host key is an identity change requiring
+   explicit user approval; trust-on-every-use and accept-any-host-key modes are
+   forbidden.
+2. Dealer owns one standard OpenSSH-compatible product key pair and reuses it
+   across authorized Hosts. A user's existing general-purpose login key,
+   password, keyboard-interactive authentication, and agent forwarding MUST
+   NOT be product authentication paths.
+3. V1 permits exactly one active Poker–Dealer authorized-key entry per Host.
+   Reauthorization removes the prior entry before enabling its replacement.
+4. Authorization provisioning is manual in M1. Dealer displays or exports its
+   public key and fingerprint; the user installs the restricted entry in that
+   Host's `authorized_keys` using the correct absolute Bridge path. Dealer and
+   the Bridge MAY display a copyable template but MUST NOT modify
+   `authorized_keys` or `sshd_config`.
+5. The Host's authorization entry MUST use OpenSSH `restrict` and a forced
+   absolute command equivalent to:
+
+   ```text
+   restrict,command="/absolute/path/poker-dealer-bridge rtc-bootstrap" KEY COMMENT
+   ```
+
+   It MUST disable PTY allocation, local/remote/dynamic forwarding, agent and
+   X11 forwarding, tunneling, and user RC execution. The fixed command MUST
+   ignore `SSH_ORIGINAL_COMMAND` and MUST NOT pass client-controlled text to a
+   shell.
+6. The SSH exec channel carries only bounded WebRTC signaling, supervision,
+   health, and recovery messages. It remains open for the WebRTC session's
+   lifetime but MUST NOT carry Bridge Protocol requests, topology, pane output,
+   or pane input after the data channel opens. Machine-readable bootstrap
+   output uses `stdout`; human diagnostics and content-redacted logs use
+   `stderr`.
+7. The SDP, ICE credentials/candidates, and expected DTLS fingerprint used for
+   the WebRTC session MUST be exchanged through and bound to the authenticated
+   SSH bootstrap. Dealer MUST reject a WebRTC peer whose negotiated identity
+   does not match that binding.
+8. A Bridge session is not connected until ICE, DTLS, the reliable ordered
+   data channel, and Bridge Protocol version negotiation all succeed. Loss of
+   the supervisory SSH channel terminates the associated WebRTC session;
+   recovery starts with a new authenticated SSH bootstrap.
+9. M1 MUST configure an empty WebRTC ICE-server list: no STUN or TURN URL,
+   credential, or Poker–Dealer relay service. Termux WebRTC traffic MUST use
+   an on-device route that does not depend on the LAN, hotspot, or public
+   network. Spark WebRTC traffic MUST use its user-approved Tailscale route.
+   Candidate gathering and signaling MUST NOT expose unrelated LAN, cellular,
+   or public routes to the peer, and a connection failure MUST NOT silently
+   widen this policy. Tailscale MAY internally select a direct, peer-relay, or
+   DERP path beneath the WebRTC layer.
+10. The Termux SSH endpoint MUST be user-configured and SHOULD be loopback-only.
+   The Spark endpoint MUST be the user-approved Tailscale SSH address. Ports
+   are configurable because Termux commonly differs from OpenSSH's default.
+11. Poker–Dealer does not reconfigure or silently start a general-purpose SSH
+   service. Dealer diagnostics MUST distinguish an unreachable endpoint,
+   host-key mismatch, rejected key, missing forced-command restriction, and
+   premature bootstrap exit separately from ICE, DTLS, data-channel, and
+   protocol-negotiation failures. The local `doctor` command reports Host-side
+   Bridge, tmux, configuration, WebRTC, and authorization prerequisites; it
+   does not claim to validate Dealer-owned endpoint settings or host-key pins.
+12. The forced Bridge process MAY open only the WebRTC sockets required for
+   its supervised session. It MUST NOT expose a separately persistent product
+   daemon or custom WSS/TLS/HMAC listener; port `39816` is not a fallback.
+13. Mosh MUST NOT carry bootstrap or Bridge Protocol traffic. Its interactive terminal and
+   latest-screen synchronization semantics are incompatible with lossless
+   ordered application frames.
 
 ### 8.12 Bridge protocol v1
 
-Use UTF-8 JSON text frames for control and normalized text. Use binary frames only if later required for efficiency; v1 does not need binary bridge frames.
+Bridge Protocol v1 runs on one WebRTC data channel configured for reliable,
+ordered delivery. Each data-channel message contains exactly one UTF-8 JSON
+envelope; no additional stream-length prefix is used. Both peers MUST reject
+an unordered or partially reliable channel and MUST reject a message above the
+negotiated hard limit before decoding or allocating from its declared content.
+V1 carries JSON only; compression and arbitrary binary transfer are out of
+scope.
+
+After the WebRTC peer identity has been bound to the authenticated SSH
+bootstrap and the data channel opens, the Bridge sends `server.hello`; Dealer
+answers with `client.hello`. No product request or topology data is legal on
+SSH or WebRTC before version negotiation completes. Bridge Protocol v1 has no
+additional authentication challenge messages because the SSH-authenticated
+signaling and verified DTLS peer provide the connection identity and fresh
+session boundary.
 
 Common envelope:
 
@@ -844,7 +1031,6 @@ Required client→bridge types:
 
 ```text
 client.hello
-auth.response
 host.snapshot.request
 pane.attach
 pane.detach
@@ -858,8 +1044,6 @@ Required bridge→client types:
 
 ```text
 server.hello
-auth.challenge
-auth.result
 host.snapshot
 host.delta
 pane.attached
@@ -875,7 +1059,29 @@ error
 pong
 ```
 
+`host.snapshot` establishes a complete topology revision. `host.delta` is an
+atomic batch, not a single-object event, and MUST include:
+
+```json
+{
+  "base_revision": 41,
+  "revision": 42,
+  "server_upserts": [],
+  "session_upserts": [],
+  "window_upserts": [],
+  "pane_upserts": [],
+  "removals": [],
+  "server_instance_invalidations": []
+}
+```
+
+Dealer MUST NOT partially apply a delta. A base-revision mismatch or connection
+sequence gap requires `host.snapshot.request`.
+
 Every mutating request MUST have a unique `message_id`; the bridge MUST retain a bounded deduplication cache so reconnect/retry cannot paste a reply twice.
+Every pane-addressed request, event, snapshot item, and result MUST carry both
+`tmux_server_id` and `tmux_server_instance_id`; a socket locator and pane ID
+alone are insufficient to reject input aimed at a replacement tmux process.
 
 Example input request:
 
@@ -890,6 +1096,7 @@ Example input request:
   "sequence": 91,
   "payload": {
     "tmux_server_id": "spark-default",
+    "tmux_server_instance_id": "instance-2f3c",
     "pane_id": "%17",
     "text": "Proceed with the transport abstraction.",
     "submit_mode": "paste_and_enter"
@@ -912,6 +1119,7 @@ Example result:
   "payload": {
     "status": "delivered",
     "tmux_server_id": "spark-default",
+    "tmux_server_instance_id": "instance-2f3c",
     "pane_id": "%17"
   }
 }
@@ -983,7 +1191,7 @@ Show:
 - configured Poker endpoint and listener reachability;
 - pinned Poker identity and last authentication result;
 - reconnect count and last reconnect duration;
-- each bridge connected/disconnected/error;
+- each Bridge's SSH-bootstrap, WebRTC, and protocol-negotiation state;
 - attached pane count;
 - unread card count;
 - foreground service state;
@@ -993,12 +1201,12 @@ Show:
 
 User can:
 
-- pair a bridge;
+- add and authorize a Host;
 - add/edit endpoint;
-- verify certificate fingerprint;
+- verify the pinned SSH host-key fingerprint;
 - enable/disable autoconnect;
 - run diagnostics;
-- revoke a pairing;
+- revoke the Dealer key authorization;
 - view tmux version and server availability.
 
 #### 9.4.3 Pane discovery
@@ -1057,7 +1265,7 @@ Dealer maintains live sockets and the glasses link in a foreground service while
   implementation and current platform rules. `connectedDevice` MUST NOT be
   assumed merely because the peer is the glasses.
 - Add `microphone` only when Dealer itself opens the phone microphone, and start that capture from a visible user action in compliance with while-in-use restrictions.
-- Do not use WorkManager for live WebSocket or glasses connections.
+- Do not use WorkManager for live SSH-supervised WebRTC or glasses connections.
 - Persistent notification must state connection counts and provide a stop action.
 - Stopping the service disconnects transports but does not delete attachments/history.
 - Autostart after reboot MUST follow current Android restrictions; never silently bypass platform controls.
@@ -1925,9 +2133,14 @@ Protect against:
 - replaying a prior reply;
 - sending a reply to the wrong pane;
 - shell injection through reply text;
-- leaking pairing secrets in logs/backups;
+- leaking Dealer SSH private keys or Poker pairing secrets in logs/backups;
 - logging sensitive terminal content;
-- accidentally exposing bridge on public interfaces;
+- a Dealer SSH key opening a general-purpose Host shell or forwarding channel;
+- accepting a changed or attacker-controlled SSH host key;
+- accepting a WebRTC peer or DTLS fingerprint not bound to the authenticated
+  SSH bootstrap;
+- exposing or selecting an unapproved LAN, cellular, or public ICE route;
+- continuing a Bridge session after its supervisory SSH channel is lost;
 - duplicate input after reconnect;
 - a compromised Poker transport issuing arbitrary tmux commands.
 
@@ -1944,9 +2157,19 @@ Protect against:
   authentication succeed. Authentication failures are rate-limited, and there
   is no unauthenticated production fallback.
 - Poker binds only to the selected hotspot/Wi-Fi address and configured port.
-- TLS pinning and HMAC pairing for remote bridges.
-- Loopback binding by default.
-- Tailscale-interface binding for Spark.
+- Pinned SSH host keys for Termux and Spark.
+- One standard, revocable Dealer product public key reused across Hosts, with
+  every Host authorizing it only through OpenSSH `restrict` and the forced
+  `poker-dealer-bridge rtc-bootstrap` command.
+- SSH-authenticated signaling binds the expected WebRTC DTLS peer identity,
+  and Bridge Protocol uses only a reliable ordered data channel.
+- M1 configures no STUN/TURN and permits only the on-device Termux route or the
+  user-approved Tailscale route for Spark; route failure does not silently
+  widen candidate exposure.
+- A user-configured loopback SSH endpoint for Termux and Tailscale SSH endpoint
+  for Spark.
+- No PTY, forwarding, tunneling, agent, X11, user-RC, arbitrary command, Mosh,
+  persistent Bridge daemon, or custom WSS/TLS/HMAC fallback.
 - Strict protocol schema validation.
 - No arbitrary shell endpoint.
 - Direct process argv execution.
@@ -1955,7 +2178,8 @@ Protect against:
 - Per-conversation attachment authorization.
 - 64 KiB input maximum.
 - Rate limiting.
-- Secrets in Android Keystore and protected host files.
+- Dealer SSH private keys and Poker secrets protected by Android Keystore;
+  authorized public keys and Bridge state in protected Host files.
 - Content-redacted production logs.
 - Debug content logging disabled by default and automatically time-limited when enabled.
 - An always-visible destination on input review.
@@ -2019,8 +2243,9 @@ Production logs include IDs, counts, durations, and error codes, not card text, 
 - tmux version and control-mode state.
 
 Diagnostics MUST describe application acknowledgements and sequence gaps. They
-MUST NOT label those counters as raw Wi-Fi/radio packet loss because TCP
-retransmission hides lower-layer loss.
+MUST NOT label those counters as raw Wi-Fi/radio packet loss because both the
+reliable Bridge WebRTC data channel and Dealer↔Poker TCP transport retransmit
+below the application layer.
 
 ### 18.3 Doctor command
 
@@ -2030,8 +2255,9 @@ retransmission hides lower-layer loss.
 - configured sockets;
 - control-mode startup;
 - pane listing;
-- TLS identity permissions;
-- bind address;
+- Host-side SSH authorization prerequisites and forced-command configuration;
+- Host-side WebRTC runtime initialization and the ability to create the
+  supervised data-channel endpoint without contacting Dealer;
 - config permissions;
 - ability to load/paste into a disposable test pane only when explicitly requested.
 
@@ -2056,8 +2282,12 @@ Mandatory fixtures/tests:
 - screen diff;
 - RAW_LINES idle coalescing;
 - structured-agent dedupe;
-- HMAC challenge and replay rejection;
-- WebSocket message validation;
+- SSH host-key mismatch and unauthorized-key rejection;
+- restricted forced-command and no-PTY/no-forwarding validation;
+- SSH-signaled WebRTC fingerprint-binding and mismatch rejection;
+- empty ICE-server configuration and approved-route candidate filtering;
+- reliable ordered data-channel configuration and message-boundary validation;
+- supervisory SSH-loss teardown and authenticated re-bootstrap;
 - input request dedupe;
 - argv-safe tmux invocation;
 - payload and key allowlists.
@@ -2217,9 +2447,12 @@ Exit criteria:
 
 Deliver:
 
-- bridge config/pair/doctor;
-- TLS identity and HMAC auth;
-- WebSocket server;
+- bridge config/manual authorization instructions/doctor;
+- pinned SSH Host identity and standard Dealer product-key authentication;
+- restricted SSH bootstrap and lifetime supervision;
+- SSH-bound WebRTC negotiation and reliable ordered Bridge data channel;
+- Fold6 route probe proving on-device Termux and Tailscale Spark data-channel
+  connectivity without STUN/TURN or unapproved candidate exposure;
 - tmux server and pane discovery;
 - control-mode parser;
 - topology events;
@@ -2227,8 +2460,16 @@ Deliver:
 
 Exit criteria:
 
-- Dealer test client securely lists panes;
-- unauthenticated client cannot list panes;
+- the production Kotlin Bridge session client securely lists panes over the
+  WebRTC data channel after bootstrapping through a temporary local sshd and
+  the test fixture;
+- an unauthorized key cannot invoke the Bridge, and the authorized Dealer key
+  cannot obtain a shell, PTY, or forwarding channel;
+- a WebRTC peer with an unbound DTLS fingerprint cannot list panes, and closing
+  the supervisory SSH channel tears down its data session;
+- the production Fold6 establishes the Termux and Spark data channels over
+  their approved routes with an empty ICE-server list, and reports failure
+  rather than widening to an unrelated network;
 - pane add/close events work.
 
 ### M2 — Bridge output and safe input
@@ -2432,14 +2673,19 @@ Deliver:
 
 ### Scenario G — Security
 
-1. Unpaired client connects to bridge.
-2. Pane listing and input are rejected.
-3. Unpaired or incorrectly pinned Dealer connects to Poker and is rejected
+1. An unauthorized SSH key attempts to invoke the Bridge.
+2. SSH rejects it before pane listing or input is available.
+3. The authorized Dealer key attempts a shell, PTY, forwarding channel, or a
+   command other than `poker-dealer-bridge rtc-bootstrap`; all are rejected or
+   forced to the Bridge bootstrap command.
+4. A WebRTC peer whose DTLS fingerprint was not bound through that SSH
+   bootstrap is rejected before Bridge Protocol negotiation.
+5. Unpaired or incorrectly pinned Dealer connects to Poker and is rejected
    before any product frame is accepted.
-4. A paired client sends text containing `` `$(touch /tmp/pwned)` ``.
-5. The literal characters appear in the target pane input; no host-side shell interpretation occurs in the bridge.
-6. A disallowed key token is rejected.
-7. Logs contain request IDs and error codes, not the reply text or secrets.
+6. A paired client sends text containing `` `$(touch /tmp/pwned)` ``.
+7. The literal characters appear in the target pane input; no host-side shell interpretation occurs in the bridge.
+8. A disallowed key token is rejected.
+9. Logs contain request IDs and error codes, not the reply text or secrets.
 
 ---
 

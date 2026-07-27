@@ -21,13 +21,93 @@ Resolve every remaining product, architecture, security, and hardware-dependent 
 
 ## Active next step
 
-- Implement `SPEC.md` M5: authenticated TLS/TCP, endpoint pairing/configuration, persistent outbox/replay, dedupe, lifecycle recovery, and the extended hotspot power-policy matrix.
+- Resume implementation at `SPEC.md` M1 and follow the normative milestone order
+  through M9. The hotspot prototype resolved the transport direction but does
+  not permit skipping the bridge, Dealer core, or loopback Poker foundations
+  required before production M5 transport hardening.
+- Implement M1 next: restricted SSH bootstrap and supervision, the reliable
+  ordered WebRTC Bridge data channel, tmux discovery, topology events, and the
+  control-mode parser.
 - Keep the throwaway prototype on `prototype/android-hotspot-transport`; lift only validated decisions and production interfaces into main.
+
+## M1 implementation decisions
+
+- M1's secure pane-discovery acceptance client will use the production Kotlin
+  SSH and WebRTC implementations intended for reuse by Dealer. Acceptance
+  tests exercise those implementations against the Rust bridge; Android UI,
+  Room persistence, and the foreground connection service remain M3 work. A
+  disposable client that validates only the Rust side is insufficient.
+- `shared:bridge-client` owns the reusable Bridge session state and
+  platform-facing interfaces. Bridge wire DTOs, validation, and codecs remain
+  in `shared:protocol`. The final Android/platform module boundary remains
+  open until the M1 WebRTC implementation is selected; ADR-0006 supersedes the
+  earlier pure-JVM placement decision.
+- Bridge transport is one compound supervised session. Dealer pins the
+  OpenSSH Host key, authenticates with its single standard product SSH key
+  reused across Hosts, and opens an exec channel whose authorized-key entry
+  uses `restrict` plus a forced absolute
+  `poker-dealer-bridge rtc-bootstrap` command. That channel exchanges WebRTC
+  signaling and remains open as the session supervisor.
+- Dealer does not import or use the user's general-purpose shell-login key.
+- In M1, Dealer displays or exports that public key and fingerprint. The user
+  manually installs the exact restricted entry in each Host's
+  `authorized_keys`; Poker–Dealer may show a template but never edits
+  `authorized_keys` or `sshd_config`.
+- The Dealer key cannot open a shell or PTY, forward ports, use an agent/X11,
+  run user RC files, tunnel, or select another command. Bridge protocol frames
+  use one reliable ordered WebRTC data channel with one UTF-8 JSON envelope per
+  data-channel message. The SSH channel carries only bounded signaling,
+  supervision, health, and recovery messages; human diagnostics use stderr.
+- `poker-dealer-bridge` may open only the WebRTC sockets owned by its
+  SSH-supervised session. It owns no separately persistent product daemon,
+  custom WSS listener, TLS CA, HMAC pairing secret, or WebSocket
+  authentication state machine. ADR-0006 supersedes the earlier SSH-stdio and
+  custom-listener decisions.
+- M1 configures no STUN/TURN. Termux WebRTC stays on-device and Spark WebRTC
+  stays on its approved Tailscale route. Tailscale may internally use a
+  direct, peer-relay, or DERP path, but Poker–Dealer never silently widens to
+  an unrelated LAN, cellular, or public route. A Fold6 route probe is required
+  before the selected WebRTC implementation is accepted.
+- Mosh is not a Bridge transport fallback because its interactive
+  latest-screen synchronization is not a lossless application channel.
+- Human-editable `bridge.toml` contains only tmux configuration. Any durable
+  request-dedupe state uses an owner-only private user-data directory. Tests
+  may relocate both through one explicit root override, never an implicit
+  working-directory fallback.
+- Successful Host authorization permits discovery of same-user default and
+  named sockets in tmux's standard per-user directory. Only custom `tmux -S`
+  paths require local `bridge.toml` entries; Dealer cannot submit executables
+  or socket paths, and the Bridge never scans the general filesystem.
+- `tmuxServerId` is the durable socket-locator identity, while
+  `tmuxServerInstanceId` identifies one tmux process lifetime using the
+  canonical locator plus reported UID, PID, and server start time. Pane
+  locators carry both; an instance change makes every old pane attachment stale
+  before replacement panes are published.
+- Tmux topology is snapshot-authoritative. Control-mode lifecycle
+  notifications trigger a short debounced full re-read of the affected server;
+  the Bridge diffs snapshots into ordered changes and also reconciles
+  periodically and after reconnect/recovery.
+- Each reconciliation emits one atomic `host.delta` batch with matching
+  `baseRevision` and new `revision`, including all upserts, removals, and
+  instance invalidations. Dealer never partially applies a batch and requests
+  a snapshot on a gap or base mismatch.
 
 ## Not yet specified
 
+- Whether the `Termux (local)` profile may use a tightly scoped loopback ICE
+  candidate exception despite RFC 8445. The current recommendation is yes,
+  but it is not accepted until explicitly approved.
+- The exact Android and Rust WebRTC implementations, Bridge-client module
+  seam, Android AAR provenance, Android SSH library, and SSH host-key
+  enrollment UX. Current implementation research is preserved in
+  `research/m1-webrtc-implementation-options.md`.
 - Endpoint discovery/pairing UX, DHCP address-change recovery, and long unattended hotspot idle behavior.
 - Public-Android microphone/ASR and input-event capabilities on the current glasses firmware.
+- Post-MVP live photo/audio/video ingestion for Host-side AI agents. Its
+  viability research is recorded in
+  `research/media-agent-transport-viability.md`. M1 implements only the
+  WebRTC data plane required for Bridge Protocol; no media tracks, capture
+  pipeline, codecs, or agent-media integration are added to M1–M9.
 
 ## Out of scope
 
