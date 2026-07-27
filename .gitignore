@@ -9,3 +9,5 @@ rokid.properties
 *.keystore
 bridge/target/
 .DS_Store
+.toolchains/
+native/embedded-tailnet/build/

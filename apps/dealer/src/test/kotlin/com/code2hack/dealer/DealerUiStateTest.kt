@@ -80,4 +80,19 @@ class DealerUiStateTest {
 
         assertEquals(listOf(diagnostic), initialFailure.routeDiagnostics())
     }
+
+    @Test
+    fun nativeTailnetStatusPreservesEnrollmentDiagnostics() {
+        val login = """
+            {"state":"login_required","loginUrl":"https://login.tailscale.com/a/test"}
+        """.trimIndent().toEmbeddedTailnetUiState()
+        val connected = """
+            {"state":"connected","nodeName":"dealer-fold6","health":[]}
+        """.trimIndent().toEmbeddedTailnetUiState()
+
+        assertEquals(EmbeddedTailnetState.LOGIN_REQUIRED, login.state)
+        assertEquals("https://login.tailscale.com/a/test", login.loginUrl)
+        assertEquals(EmbeddedTailnetState.CONNECTED, connected.state)
+        assertEquals("dealer-fold6", connected.nodeName)
+    }
 }

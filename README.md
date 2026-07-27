@@ -171,6 +171,8 @@ Requirements:
 
 - JDK 21.
 - Android SDK platform 35.
+- Android NDK `23.1.7779620`.
+- `curl`, `sha256sum`, and `unzip`.
 
 Run local gates:
 
@@ -194,7 +196,21 @@ Build the developer APKs:
 
 On ARM64 Termux, install the native `aapt2` package. `tooling/check.sh` automatically supplies its path to Gradle when available.
 
-The future embedded-tailnet module will additionally require a pinned Go toolchain, `gomobile`, Android ARM64 native packaging, and reproducible AAR generation. Those gates are not implemented yet.
+Dealer's embedded-tailnet AAR is built automatically before Dealer. Go, `gomobile`, and NDK inputs are
+pinned in `native/embedded-tailnet/versions.env`; Tailscale is pinned by `go.mod` and `go.sum`. The build
+verifies the Go archive SHA-256 and Go module checksums, then produces only
+`jni/arm64-v8a/libgojni.so`. `ANDROID_NDK_HOME` may point at the pinned NDK when it is not installed
+below `ANDROID_HOME`.
+
+A clean native and Dealer build is:
+
+```sh
+rm -rf native/embedded-tailnet/build
+./gradlew clean :apps:dealer:verifyEmbeddedTailnetPackaging
+```
+
+The verification task assembles Dealer, checks that the ARM64 Go library reached the APK, and rejects a
+merged manifest containing Android `VpnService`.
 
 ## Start a fresh Codex implementation session
 

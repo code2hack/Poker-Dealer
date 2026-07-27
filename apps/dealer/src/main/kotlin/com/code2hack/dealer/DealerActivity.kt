@@ -91,6 +91,9 @@ class DealerActivity : ComponentActivity() {
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
                         onCancel = { service?.cancelRun() },
+                        onStartTailnet = ::startEmbeddedTailnet,
+                        onStopTailnet = { service?.stopEmbeddedTailnet() },
+                        onLoginTailnet = ::openEmbeddedTailnetLogin,
                     )
                 }
             }
@@ -173,6 +176,23 @@ class DealerActivity : ComponentActivity() {
             setupState.update { it.copy(error = failure.message ?: failure::class.java.simpleName) }
         }
     }
+
+    private fun startEmbeddedTailnet() {
+        startForegroundService(
+            Intent(this, DealerConnectionService::class.java)
+                .setAction(DealerConnectionService.ACTION_START_TAILNET),
+        )
+    }
+
+    private fun openEmbeddedTailnetLogin(loginUrl: String) {
+        try {
+            val uri = Uri.parse(loginUrl)
+            require(uri.scheme == "https") { "Tailnet login URL must use HTTPS" }
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (failure: Throwable) {
+            setupState.update { it.copy(error = failure.message ?: failure::class.java.simpleName) }
+        }
+    }
 }
 
 private enum class CredentialKind {
@@ -195,6 +215,9 @@ private fun DealerApp(
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
     onCancel: () -> Unit,
+    onStartTailnet: () -> Unit,
+    onStopTailnet: () -> Unit,
+    onLoginTailnet: (String) -> Unit,
 ) {
     var lanHost by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
@@ -233,6 +256,43 @@ private fun DealerApp(
                 color = Color(0xFFBBC8D6),
                 style = MaterialTheme.typography.labelMedium,
             )
+            Text(
+                "Embedded tailnet: ${state.tailnet.state.label}",
+                color = if (state.tailnet.state == EmbeddedTailnetState.ERROR) {
+                    Color(0xFFFFA8A8)
+                } else {
+                    Color(0xFFBBC8D6)
+                },
+                style = MaterialTheme.typography.labelMedium,
+            )
+            state.tailnet.error?.let {
+                Text(it, color = Color(0xFFFFA8A8), style = MaterialTheme.typography.labelSmall)
+            }
+            state.tailnet.nodeName?.let {
+                Text("Node: $it", color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
+            }
+            state.tailnet.health.forEach {
+                Text(it, color = Color(0xFFFFC38B), style = MaterialTheme.typography.labelSmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = onStartTailnet,
+                    enabled = !state.tailnet.active,
+                ) {
+                    Text("Start tailnet")
+                }
+                OutlinedButton(
+                    onClick = onStopTailnet,
+                    enabled = state.tailnet.active && state.tailnet.state != EmbeddedTailnetState.STOPPING,
+                ) {
+                    Text("Stop tailnet")
+                }
+                state.tailnet.loginUrl?.let { loginUrl ->
+                    OutlinedButton(onClick = { onLoginTailnet(loginUrl) }) {
+                        Text("Log in")
+                    }
+                }
+            }
             state.routeDiagnostics
                 .filter { it.failure != null }
                 .distinctBy { it.route to it.failure }

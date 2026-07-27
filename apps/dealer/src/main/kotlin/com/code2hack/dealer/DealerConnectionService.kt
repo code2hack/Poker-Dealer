@@ -9,6 +9,7 @@ import android.content.Intent
 import android.graphics.drawable.Icon
 import android.os.Binder
 import android.os.IBinder
+import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
@@ -30,17 +31,24 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 
 class DealerConnectionService : Service() {
     private val binder = LocalBinder()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var runJob: Job? = null
+    private var tailnetJob: Job? = null
+    private val tailnetEngine = Engine()
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -55,11 +63,14 @@ class DealerConnectionService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_CANCEL) {
-            cancelRun()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_CANCEL -> {
+                cancelRun()
+                stopEmbeddedTailnet()
+            }
+            ACTION_START_TAILNET -> startEmbeddedTailnet()
+            else -> ensureForeground()
         }
-        ensureForeground()
         return START_NOT_STICKY
     }
 
@@ -157,8 +168,10 @@ class DealerConnectionService : Service() {
             } finally {
                 privateKey.fill(0)
                 knownHosts.fill(0)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                if (!mutableState.value.tailnet.active) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
                 synchronized(this@DealerConnectionService) {
                     runJob = null
                 }
@@ -174,7 +187,81 @@ class DealerConnectionService : Service() {
         return true
     }
 
+    @Synchronized
+    fun startEmbeddedTailnet(): Boolean {
+        if (tailnetJob != null || mutableState.value.tailnet.active) return false
+        ensureForeground()
+        mutableState.update {
+            it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STARTING))
+        }
+        tailnetJob = scope.launch(Dispatchers.IO) {
+            try {
+                var nativeStatus = tailnetEngine.start(
+                    filesDir.resolve("embedded-tailnet").absolutePath,
+                )
+                while (true) {
+                    mutableState.update { it.copy(tailnet = nativeStatus.toEmbeddedTailnetUiState()) }
+                    delay(TAILNET_STATUS_INTERVAL_MILLIS)
+                    nativeStatus = tailnetEngine.status()
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Throwable) {
+                runCatching { tailnetEngine.stop() }
+                mutableState.update {
+                    it.copy(
+                        tailnet = EmbeddedTailnetUiState(
+                            state = EmbeddedTailnetState.ERROR,
+                            error = failure.message ?: failure::class.java.simpleName,
+                        ),
+                    )
+                }
+                if (runJob == null) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            } finally {
+                synchronized(this@DealerConnectionService) {
+                    tailnetJob = null
+                }
+            }
+        }
+        return true
+    }
+
+    @Synchronized
+    fun stopEmbeddedTailnet(): Boolean {
+        if (mutableState.value.tailnet.state == EmbeddedTailnetState.STOPPING) return false
+        tailnetJob?.cancel()
+        mutableState.update {
+            it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPING))
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                tailnetEngine.stop()
+                mutableState.update {
+                    it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPED))
+                }
+                if (runJob == null) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        tailnet = EmbeddedTailnetUiState(
+                            state = EmbeddedTailnetState.ERROR,
+                            error = failure.message ?: failure::class.java.simpleName,
+                        ),
+                    )
+                }
+            }
+        }
+        return true
+    }
+
     override fun onDestroy() {
+        runCatching { tailnetEngine.stop() }
         scope.cancel()
         super.onDestroy()
     }
@@ -191,7 +278,7 @@ class DealerConnectionService : Service() {
         val notification = Notification.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_dealer_connection)
             .setContentTitle("Dealer")
-            .setContentText("u4090 turn in progress")
+            .setContentText("Dealer connection active")
             .setOngoing(true)
             .addAction(
                 Notification.Action.Builder(
@@ -209,10 +296,13 @@ class DealerConnectionService : Service() {
         startForeground(NOTIFICATION_ID, notification)
     }
 
-    private companion object {
+    companion object {
+        internal const val ACTION_START_TAILNET = "com.code2hack.dealer.action.START_TAILNET"
+
         const val NOTIFICATION_CHANNEL = "dealer-host-connection"
         const val NOTIFICATION_ID = 4090
         const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
+        const val TAILNET_STATUS_INTERVAL_MILLIS = 1_000L
     }
 }
 
@@ -237,6 +327,7 @@ data class DealerUiState(
     val appServerVersion: String? = null,
     val cards: List<Card> = emptyList(),
     val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
+    val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val error: String? = null,
 ) {
     val running: Boolean
@@ -261,6 +352,50 @@ internal fun DealerUiState.afterRun(
     routeDiagnostics = routeDiagnostics,
     error = null,
 )
+
+enum class EmbeddedTailnetState(
+    val label: String,
+    val active: Boolean = false,
+) {
+    STOPPED("Stopped"),
+    STARTING("Starting", active = true),
+    STOPPING("Stopping", active = true),
+    LOGIN_REQUIRED("Login required", active = true),
+    CONNECTED("Connected", active = true),
+    DEGRADED("Degraded", active = true),
+    UNAVAILABLE("Unavailable", active = true),
+    ERROR("Error"),
+}
+
+data class EmbeddedTailnetUiState(
+    val state: EmbeddedTailnetState = EmbeddedTailnetState.STOPPED,
+    val loginUrl: String? = null,
+    val nodeName: String? = null,
+    val health: List<String> = emptyList(),
+    val error: String? = null,
+) {
+    val active: Boolean
+        get() = state.active
+}
+
+internal fun String.toEmbeddedTailnetUiState(): EmbeddedTailnetUiState {
+    val status = Json.parseToJsonElement(this).jsonObject
+    val state = when (status.getValue("state").jsonPrimitive.content) {
+        "stopped" -> EmbeddedTailnetState.STOPPED
+        "starting" -> EmbeddedTailnetState.STARTING
+        "login_required" -> EmbeddedTailnetState.LOGIN_REQUIRED
+        "connected" -> EmbeddedTailnetState.CONNECTED
+        "degraded" -> EmbeddedTailnetState.DEGRADED
+        "unavailable" -> EmbeddedTailnetState.UNAVAILABLE
+        else -> EmbeddedTailnetState.ERROR
+    }
+    return EmbeddedTailnetUiState(
+        state = state,
+        loginUrl = status["loginUrl"]?.jsonPrimitive?.content,
+        nodeName = status["nodeName"]?.jsonPrimitive?.content,
+        health = status["health"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
+    )
+}
 
 internal fun DealerUiState.withPhase(phase: M1ConnectionPhase): DealerUiState = copy(
     status = phase.toDealerRunState(),

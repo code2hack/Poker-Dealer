@@ -2,7 +2,7 @@
 set -eu
 
 if [ -n "${PREFIX:-}" ] && [ -x "${PREFIX}/bin/aapt2" ]; then
-    ./gradlew test lint "-Pandroid.aapt2FromMavenOverride=${PREFIX}/bin/aapt2"
+    ./gradlew test lint :apps:dealer:verifyEmbeddedTailnetPackaging "-Pandroid.aapt2FromMavenOverride=${PREFIX}/bin/aapt2"
 else
-    ./gradlew test lint
+    ./gradlew test lint :apps:dealer:verifyEmbeddedTailnetPackaging
 fi
