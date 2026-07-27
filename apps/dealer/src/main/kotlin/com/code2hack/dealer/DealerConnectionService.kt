@@ -3,8 +3,10 @@ package com.code2hack.dealer
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.os.Binder
 import android.os.IBinder
 import com.code2hack.pokerdealer.domain.Card
@@ -13,9 +15,13 @@ import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
+import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
+import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
 import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
+import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
+import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
 import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
 import kotlinx.coroutines.CancellationException
@@ -34,10 +40,12 @@ import java.util.UUID
 class DealerConnectionService : Service() {
     private val binder = LocalBinder()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val mutableState = MutableStateFlow(DealerUiState())
     private var runJob: Job? = null
 
-    val state: StateFlow<DealerUiState> = mutableState.asStateFlow()
+    private val mutableState: MutableStateFlow<DealerUiState>
+        get() = DealerServiceState.mutableState
+    val state: StateFlow<DealerUiState>
+        get() = DealerServiceState.state
 
     inner class LocalBinder : Binder() {
         val service: DealerConnectionService
@@ -47,6 +55,10 @@ class DealerConnectionService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL) {
+            cancelRun()
+            return START_NOT_STICKY
+        }
         ensureForeground()
         return START_NOT_STICKY
     }
@@ -65,19 +77,30 @@ class DealerConnectionService : Service() {
         ensureForeground()
         runJob = scope.launch {
             val cards = CardRevisionStore()
+            val host = InitialCodexHosts.u4090
+            val input = M1TurnInput(
+                text = config.turnText,
+                threadId = config.threadId,
+                clientUserMessageId = UUID.randomUUID().toString(),
+            )
+            cards.apply(
+                input.pendingUserCard(
+                    conversationId = "${host.id}/${config.threadId}",
+                    sequence = Long.MAX_VALUE,
+                ),
+            )
             mutableState.update {
                 it.copy(
-                    status = "Connecting",
+                    status = DealerRunState.CONNECTING,
                     route = null,
                     threadId = null,
                     appServerVersion = null,
-                    cards = emptyList(),
-                    running = true,
+                    cards = cards.values(),
+                    routeDiagnostics = emptyList(),
                     error = null,
                 )
             }
             try {
-                val host = InitialCodexHosts.u4090
                 val slice = M1OneHostDealerSlice(
                     host = host,
                     dialer = SocketHostTcpDialer(
@@ -96,32 +119,38 @@ class DealerConnectionService : Service() {
                     ),
                 )
                 val result = slice.run(
-                    M1TurnInput(
-                        text = config.turnText,
-                        threadId = config.threadId,
-                        clientUserMessageId = UUID.randomUUID().toString(),
-                    ),
+                    input,
                     onCard = { card ->
                         if (cards.apply(card) != RevisionApplication.IGNORED_STALE) {
                             mutableState.update { it.copy(cards = cards.values()) }
                         }
                     },
+                    onPhase = { phase ->
+                        mutableState.update { it.withPhase(phase) }
+                    },
+                    onRoute = { route, diagnostics ->
+                        mutableState.update { it.withActiveRoute(route, diagnostics) }
+                    },
                 )
                 mutableState.update {
-                    it.copy(
-                        status = if (result.recoveredAfterDisconnect) "Recovered" else "Connected",
-                        route = result.reconnectRoute,
+                    it.afterRun(
+                        recovered = result.recoveredAfterDisconnect,
                         threadId = result.threadId,
                         appServerVersion = result.daemonVersions.appServerVersion,
+                        routeDiagnostics = result.routeDiagnostics,
                     )
                 }
             } catch (failure: CancellationException) {
-                mutableState.update { it.copy(status = "Interrupted") }
+                mutableState.update {
+                    it.copy(status = DealerRunState.CANCELLED, route = null, error = null)
+                }
                 throw failure
             } catch (failure: Throwable) {
-                mutableState.update {
-                    it.copy(
-                        status = "Error",
+                mutableState.update { state ->
+                    state.copy(
+                        status = DealerRunState.ERROR,
+                        route = null,
+                        routeDiagnostics = failure.routeDiagnostics().ifEmpty { state.routeDiagnostics },
                         error = failure.message ?: failure::class.java.simpleName,
                     )
                 }
@@ -133,9 +162,15 @@ class DealerConnectionService : Service() {
                 synchronized(this@DealerConnectionService) {
                     runJob = null
                 }
-                mutableState.update { it.copy(running = false) }
             }
         }
+        return true
+    }
+
+    @Synchronized
+    fun cancelRun(): Boolean {
+        val activeRun = runJob ?: return false
+        activeRun.cancel(CancellationException("Cancelled by user"))
         return true
     }
 
@@ -158,6 +193,18 @@ class DealerConnectionService : Service() {
             .setContentTitle("Dealer")
             .setContentText("u4090 turn in progress")
             .setOngoing(true)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, R.drawable.ic_dealer_connection),
+                    "Cancel",
+                    PendingIntent.getService(
+                        this,
+                        0,
+                        Intent(this, DealerConnectionService::class.java).setAction(ACTION_CANCEL),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                ).build(),
+            )
             .build()
         startForeground(NOTIFICATION_ID, notification)
     }
@@ -165,18 +212,81 @@ class DealerConnectionService : Service() {
     private companion object {
         const val NOTIFICATION_CHANNEL = "dealer-host-connection"
         const val NOTIFICATION_ID = 4090
+        const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
     }
 }
 
+enum class DealerRunState(
+    val label: String,
+    val active: Boolean = false,
+) {
+    DISCONNECTED("Disconnected"),
+    CONNECTING("Connecting", active = true),
+    RUNNING("Running", active = true),
+    RECONNECTING("Reconnecting", active = true),
+    COMPLETED("Completed"),
+    RECOVERED("Recovered"),
+    CANCELLED("Cancelled"),
+    ERROR("Error"),
+}
+
 data class DealerUiState(
-    val status: String = "Disconnected",
+    val status: DealerRunState = DealerRunState.DISCONNECTED,
     val route: HostConnectionRoute? = null,
     val threadId: String? = null,
     val appServerVersion: String? = null,
     val cards: List<Card> = emptyList(),
-    val running: Boolean = false,
+    val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
     val error: String? = null,
+) {
+    val running: Boolean
+        get() = status.active
+}
+
+internal object DealerServiceState {
+    val mutableState = MutableStateFlow(DealerUiState())
+    val state: StateFlow<DealerUiState> = mutableState.asStateFlow()
+}
+
+internal fun DealerUiState.afterRun(
+    recovered: Boolean,
+    threadId: String,
+    appServerVersion: String?,
+    routeDiagnostics: List<RouteDiagnostic>,
+): DealerUiState = copy(
+    status = if (recovered) DealerRunState.RECOVERED else DealerRunState.COMPLETED,
+    route = null,
+    threadId = threadId,
+    appServerVersion = appServerVersion,
+    routeDiagnostics = routeDiagnostics,
+    error = null,
 )
+
+internal fun DealerUiState.withPhase(phase: M1ConnectionPhase): DealerUiState = copy(
+    status = phase.toDealerRunState(),
+    route = if (phase == M1ConnectionPhase.RECONNECTING) null else route,
+)
+
+internal fun DealerUiState.withActiveRoute(
+    route: HostConnectionRoute,
+    diagnostics: List<RouteDiagnostic>,
+): DealerUiState = copy(
+    route = route,
+    routeDiagnostics = diagnostics,
+)
+
+private fun M1ConnectionPhase.toDealerRunState(): DealerRunState = when (this) {
+    M1ConnectionPhase.CONNECTING -> DealerRunState.CONNECTING
+    M1ConnectionPhase.RUNNING -> DealerRunState.RUNNING
+    M1ConnectionPhase.RECONNECTING -> DealerRunState.RECONNECTING
+}
+
+internal fun Throwable.routeDiagnostics(): List<RouteDiagnostic> =
+    when (this) {
+        is RouteConnectionException -> diagnostics
+        is HostIdentityException -> diagnostics
+        else -> emptyList()
+    } + suppressed.flatMap { it.routeDiagnostics() } + cause?.routeDiagnostics().orEmpty()
 
 data class DealerRunConfig(
     val lanHost: String,

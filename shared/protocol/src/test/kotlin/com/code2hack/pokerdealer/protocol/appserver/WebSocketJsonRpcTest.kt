@@ -1,7 +1,14 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
+import com.code2hack.pokerdealer.protocol.host.ConnectionPhaseTimeoutException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
+import kotlinx.serialization.json.JsonElement
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -64,6 +71,126 @@ class WebSocketJsonRpcTest {
         assertEquals("true", notification?.raw?.get("futureField").toString())
         assertTrue(stream.writtenBytes().containsClientText("Dealer cannot handle server request"))
     }
+
+    @Test
+    fun `websocket handshake timeout closes a blocked stream`() = runTest {
+        val stream = BlockingStream()
+        val socket = AppServerWebSocket(stream, handshakeTimeoutMs = 100)
+
+        val failure = runCatching { socket.open() }.exceptionOrNull()
+
+        assertTrue(failure is ConnectionPhaseTimeoutException)
+        assertTrue(failure?.message.orEmpty().contains("WebSocket HTTP upgrade"))
+        assertTrue(stream.closed)
+    }
+
+    @Test
+    fun `app-server response timeout closes the peer`() = runTest {
+        val peer = BlockingPeer()
+        val session = CodexAppServerSession(peer, requestTimeoutMs = 100)
+
+        val failure = runCatching { session.initialize() }.exceptionOrNull()
+
+        assertTrue(failure is ConnectionPhaseTimeoutException)
+        assertTrue(failure?.message.orEmpty().contains("initialize response"))
+        assertTrue(peer.closed)
+    }
+
+    @Test
+    fun `turn inactivity timeout closes the peer`() = runTest {
+        val peer = BlockingPeer(requestsBlock = false)
+        val session = CodexAppServerSession(peer, turnInactivityTimeoutMs = 100)
+        session.initialize()
+
+        val failure = runCatching {
+            session.streamAgentCards("thread", "turn", "u4090/thread", firstSequence = 1)
+        }.exceptionOrNull()
+
+        assertTrue(failure is ConnectionPhaseTimeoutException)
+        assertTrue(failure?.message.orEmpty().contains("turn notification"))
+        assertTrue(peer.closed)
+    }
+
+    @Test
+    fun `turn inactivity timer resets after each notification`() = runTest {
+        val peer = DelayedNotificationPeer()
+        val session = CodexAppServerSession(peer, turnInactivityTimeoutMs = 100)
+        session.initialize()
+
+        val cards = session.streamAgentCards("thread", "turn", "u4090/thread", firstSequence = 1)
+
+        assertEquals("still working", cards.single().fullText)
+    }
+
+    @Test
+    fun `cancelling a blocked WebSocket read closes the stream`() = runTest {
+        val stream = BlockingStream()
+        val socket = AppServerWebSocket(stream)
+        val readJob = launch { socket.readText() }
+        yield()
+
+        readJob.cancelAndJoin()
+
+        assertTrue(stream.closed)
+    }
+}
+
+private class BlockingStream : DuplexByteStream {
+    var closed = false
+
+    override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int = awaitCancellation()
+    override suspend fun write(buffer: ByteArray, offset: Int, length: Int) = Unit
+    override suspend fun close() {
+        closed = true
+    }
+}
+
+private class BlockingPeer(
+    private val requestsBlock: Boolean = true,
+) : JsonRpcPeer {
+    var closed = false
+
+    override suspend fun request(method: String, params: JsonElement): JsonElement {
+        if (requestsBlock) awaitCancellation()
+        return AppServerJson.parseToJsonElement("""{"serverInfo":{}}""")
+    }
+
+    override suspend fun notify(method: String, params: JsonElement?) = Unit
+    override suspend fun receiveNotification(): AppServerNotification? = awaitCancellation()
+    override suspend fun close() {
+        closed = true
+    }
+}
+
+private class DelayedNotificationPeer : JsonRpcPeer {
+    private val notifications = ArrayDeque(
+        listOf(
+            AppServerNotification(
+                "item/agentMessage/delta",
+                AppServerJson.parseToJsonElement(
+                    """{"threadId":"thread","turnId":"turn","itemId":"agent","delta":"still working"}""",
+                ),
+            ),
+            AppServerNotification(
+                "turn/completed",
+                AppServerJson.parseToJsonElement(
+                    """{"threadId":"thread","turn":{"id":"turn","status":"completed","items":[]}}""",
+                ),
+            ),
+        ),
+    )
+
+    override suspend fun request(method: String, params: JsonElement): JsonElement =
+        AppServerJson.parseToJsonElement("""{"serverInfo":{}}""")
+
+    override suspend fun notify(method: String, params: JsonElement?) = Unit
+
+    override suspend fun receiveNotification(): AppServerNotification {
+        delay(75)
+        return notifications.removeFirst()
+    }
+
+    override suspend fun close() = Unit
 }
 
 private class MemoryStream(

@@ -153,9 +153,11 @@ The phone-local host is useful for developing and debugging Poker/Dealer and oth
 
 The repository uses Codex host/thread terminology throughout. The old Rust tmux bridge and scratch planning tree were removed. The previous SSH-supervised WebRTC/tmux proposal is closed as superseded.
 
-M1 is complete on u4090 through trusted-LAN SSH. The recorded proof is in `docs/evidence/u4090-m1-2026-07-27.md`.
+M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`.
 
-Dealer's M1 screen accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn.
+Dealer's M1 screen accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn. The UI and notification can cancel the run, one-shot completion reports `Completed` or `Recovered`, and the submitted user card shows pending, accepted, delivered, or unknown delivery state.
+
+The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
 The next implementation sequence is:
 

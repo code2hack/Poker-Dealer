@@ -5,6 +5,7 @@ import com.code2hack.pokerdealer.domain.CardRole
 import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexHost
+import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.host.CommandResult
@@ -13,6 +14,10 @@ import com.code2hack.pokerdealer.protocol.host.HostSshClient
 import com.code2hack.pokerdealer.protocol.host.HostSshSession
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
+import com.code2hack.pokerdealer.protocol.host.RouteCapability
+import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
+import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
+import com.code2hack.pokerdealer.protocol.host.withConnectionPhaseTimeout
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -89,12 +94,19 @@ class UpstreamCodexDaemon(
 class CodexAppServerSession(
     private val peer: JsonRpcPeer,
     private val nowMs: () -> Long = System::currentTimeMillis,
+    private val requestTimeoutMs: Long = 30_000,
+    private val turnInactivityTimeoutMs: Long = 5 * 60_000,
 ) {
     private var initialized = false
 
+    init {
+        require(requestTimeoutMs > 0) { "App-server request timeout must be positive" }
+        require(turnInactivityTimeoutMs > 0) { "Turn inactivity timeout must be positive" }
+    }
+
     suspend fun initialize(): JsonObject {
         check(!initialized) { "app-server connection is already initialized" }
-        val result = peer.request(
+        val result = request(
             "initialize",
             buildJsonObject {
                 put(
@@ -108,14 +120,14 @@ class CodexAppServerSession(
                 put("capabilities", buildJsonObject { put("experimentalApi", JsonPrimitive(false)) })
             },
         ).jsonObject
-        peer.notify("initialized")
+        notify("initialized")
         initialized = true
         return result
     }
 
     suspend fun threadList(limit: Int = 20): JsonObject {
         checkInitialized()
-        return peer.request(
+        return request(
             "thread/list",
             buildJsonObject {
                 put("limit", JsonPrimitive(limit))
@@ -126,7 +138,7 @@ class CodexAppServerSession(
 
     suspend fun threadResume(threadId: String): JsonObject {
         checkInitialized()
-        return peer.request(
+        return request(
             "thread/resume",
             buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
         ).jsonObject
@@ -134,7 +146,7 @@ class CodexAppServerSession(
 
     suspend fun threadRead(threadId: String): JsonObject {
         checkInitialized()
-        return peer.request(
+        return request(
             "thread/read",
             buildJsonObject {
                 put("threadId", JsonPrimitive(threadId))
@@ -149,7 +161,7 @@ class CodexAppServerSession(
         clientUserMessageId: String,
     ): JsonObject {
         checkInitialized()
-        return peer.request(
+        return request(
             "turn/start",
             buildJsonObject {
                 put("threadId", JsonPrimitive(threadId))
@@ -183,7 +195,13 @@ class CodexAppServerSession(
         val revisions = linkedMapOf<String, Long>()
         var nextSequence = firstSequence
         loop@ while (true) {
-            val notification = peer.receiveNotification()
+            val notification = try {
+                withConnectionPhaseTimeout("turn notification", turnInactivityTimeoutMs) {
+                    peer.receiveNotification()
+                }
+            } catch (failure: Throwable) {
+                closeAfterFailure(failure)
+            }
                 ?: error("app-server connection closed before turn $turnId completed")
             val params = notification.params as? JsonObject ?: continue
             when (notification.method) {
@@ -252,6 +270,35 @@ class CodexAppServerSession(
         peer.close()
     }
 
+    private suspend fun request(method: String, params: JsonElement): JsonElement = try {
+        withConnectionPhaseTimeout("$method response", requestTimeoutMs) {
+            peer.request(method, params)
+        }
+    } catch (failure: Throwable) {
+        closeAfterFailure(failure)
+    }
+
+    private suspend fun notify(method: String, params: JsonElement? = null) {
+        try {
+            withConnectionPhaseTimeout("$method notification", requestTimeoutMs) {
+                peer.notify(method, params)
+            }
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+        }
+    }
+
+    private suspend fun closeAfterFailure(failure: Throwable): Nothing {
+        withContext(NonCancellable) {
+            try {
+                peer.close()
+            } catch (closeFailure: Throwable) {
+                failure.addSuppressed(closeFailure)
+            }
+        }
+        throw failure
+    }
+
     private fun checkInitialized() {
         check(initialized) { "app-server connection must be initialized first" }
     }
@@ -282,7 +329,55 @@ data class M1TurnInput(
     val text: String,
     val threadId: String? = null,
     val clientUserMessageId: String,
-)
+) {
+    fun pendingUserCard(
+        conversationId: String,
+        sequence: Long,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Card = Card(
+        id = clientUserMessageId,
+        conversationId = conversationId,
+        sequence = sequence,
+        revision = 1,
+        role = CardRole.USER,
+        state = CardState.OPEN,
+        fullText = text,
+        createdAtMs = nowMs,
+        updatedAtMs = nowMs,
+        delivery = DeliveryState.LOCAL_PENDING,
+        source = CardSource.DEALER_INPUT,
+    )
+}
+
+data class M1Timeouts(
+    val tcpConnectMs: Long = 10_000,
+    val sshConnectMs: Long = 15_000,
+    val daemonCommandMs: Long = 30_000,
+    val proxyStartMs: Long = 15_000,
+    val webSocketUpgradeMs: Long = 10_000,
+    val appServerRequestMs: Long = 30_000,
+    val turnInactivityMs: Long = 5 * 60_000,
+    val reconnectInspectionMs: Long = 60_000,
+) {
+    init {
+        listOf(
+            tcpConnectMs,
+            sshConnectMs,
+            daemonCommandMs,
+            proxyStartMs,
+            webSocketUpgradeMs,
+            appServerRequestMs,
+            turnInactivityMs,
+            reconnectInspectionMs,
+        ).forEach { require(it > 0) { "M1 phase timeouts must be positive" } }
+    }
+}
+
+enum class M1ConnectionPhase {
+    CONNECTING,
+    RUNNING,
+    RECONNECTING,
+}
 
 data class M1RunResult(
     val host: CodexHost,
@@ -293,9 +388,11 @@ data class M1RunResult(
     val threadId: String,
     val conversationId: String,
     val historyCards: List<Card>,
+    val userCard: Card,
     val streamedCards: List<Card>,
     val matchingUserMessagesAfterReconnect: Int,
     val recoveredAfterDisconnect: Boolean,
+    val routeDiagnostics: List<RouteDiagnostic>,
 )
 
 class M1OneHostDealerSlice(
@@ -303,18 +400,27 @@ class M1OneHostDealerSlice(
     private val dialer: HostTcpDialer,
     private val sshClient: HostSshClient,
     private val daemon: UpstreamCodexDaemon = UpstreamCodexDaemon(),
+    private val nowMs: () -> Long = System::currentTimeMillis,
+    private val timeouts: M1Timeouts = M1Timeouts(),
     private val appServerFactory: suspend (DuplexByteStream) -> CodexAppServerSession = { proxy ->
-        val socket = AppServerWebSocket(proxy)
+        val socket = AppServerWebSocket(proxy, handshakeTimeoutMs = timeouts.webSocketUpgradeMs)
         socket.open()
-        CodexAppServerSession(WebSocketJsonRpcPeer(socket))
+        CodexAppServerSession(
+            WebSocketJsonRpcPeer(socket),
+            requestTimeoutMs = timeouts.appServerRequestMs,
+            turnInactivityTimeoutMs = timeouts.turnInactivityMs,
+        )
     },
 ) {
     suspend fun run(
         input: M1TurnInput,
         onCard: suspend (Card) -> Unit = {},
+        onPhase: suspend (M1ConnectionPhase) -> Unit = {},
+        onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit = { _, _ -> },
     ): M1RunResult {
         require(input.text.isNotBlank()) { "Turn text must not be blank" }
         require(input.clientUserMessageId.isNotBlank()) { "Client user-message ID must not be blank" }
+        onPhase(M1ConnectionPhase.CONNECTING)
 
         val emittedRevisions = mutableMapOf<String, Long>()
         val emitCard: suspend (Card) -> Unit = { card ->
@@ -322,9 +428,18 @@ class M1OneHostDealerSlice(
             onCard(card)
         }
         var recoveryContext: RecoveryContext? = null
+        var latestUserCard: Card? = null
         var turnAttempted = false
+        suspend fun markAcceptanceUnknownIfPending() {
+            val current = latestUserCard
+            if (turnAttempted && current?.delivery == DeliveryState.LOCAL_PENDING) {
+                val unknown = current.withDelivery(DeliveryState.UNKNOWN, emittedRevisions)
+                latestUserCard = unknown
+                emitCard(unknown)
+            }
+        }
         val firstPass = try {
-            connect().useConnected { first ->
+            connect(onRoute).useConnected { first ->
                 val initializeResult = first.appServer.initialize()
                 val listedThreads = first.appServer.threadList()
                 val threadId = input.threadId ?: listedThreads.firstThreadId()
@@ -335,6 +450,12 @@ class M1OneHostDealerSlice(
                     first.appServer.threadRead(threadId),
                     conversationId = conversationId,
                 )
+                val pendingUserCard = input.pendingUserCard(
+                    conversationId = conversationId,
+                    sequence = (historyCards.maxOfOrNull(Card::sequence) ?: 0L) + 1,
+                    nowMs = nowMs(),
+                )
+                latestUserCard = pendingUserCard
                 recoveryContext = RecoveryContext(
                     host = host,
                     route = first.route,
@@ -343,16 +464,23 @@ class M1OneHostDealerSlice(
                     threadId = threadId,
                     conversationId = conversationId,
                     historyCards = historyCards,
+                    routeDiagnostics = first.routeDiagnostics,
                 )
                 historyCards.forEach { emitCard(it) }
+                emitCard(pendingUserCard)
                 turnAttempted = true
-                val turnId = first.appServer.turnStart(threadId, input.text, input.clientUserMessageId).turnId()
+                val turnStart = first.appServer.turnStart(threadId, input.text, input.clientUserMessageId)
+                val acceptedUserCard = pendingUserCard.withDelivery(DeliveryState.ACCEPTED, emittedRevisions)
+                latestUserCard = acceptedUserCard
+                emitCard(acceptedUserCard)
+                onPhase(M1ConnectionPhase.RUNNING)
+                val turnId = turnStart.turnId()
                     ?: error("turn/start response did not include a turn ID")
                 val streamedCards = first.appServer.streamAgentCards(
                     threadId = threadId,
                     turnId = turnId,
                     conversationId = conversationId,
-                    firstSequence = historyCards.size + 1L,
+                    firstSequence = acceptedUserCard.sequence + 1,
                     onCard = emitCard,
                 )
                 FirstPass(
@@ -362,25 +490,50 @@ class M1OneHostDealerSlice(
                     threadId = threadId,
                     conversationId = conversationId,
                     historyCards = historyCards,
+                    userCard = acceptedUserCard,
                     streamedCards = streamedCards,
+                    routeDiagnostics = first.routeDiagnostics,
                 )
             }
         } catch (failure: Throwable) {
-            if (failure is CancellationException) throw failure
+            if (failure is CancellationException) {
+                withContext(NonCancellable) {
+                    markAcceptanceUnknownIfPending()
+                }
+                throw failure
+            }
             val context = recoveryContext
             if (turnAttempted && context != null) {
+                onPhase(M1ConnectionPhase.RECONNECTING)
                 val inspection = try {
-                    inspectAfterReconnect(context.threadId, input.clientUserMessageId)
+                    inspectAfterReconnect(context.threadId, input.clientUserMessageId, onRoute)
                 } catch (recoveryFailure: Throwable) {
+                    if (recoveryFailure is CancellationException) {
+                        withContext(NonCancellable) {
+                            markAcceptanceUnknownIfPending()
+                        }
+                        throw recoveryFailure
+                    }
+                    markAcceptanceUnknownIfPending()
                     failure.addSuppressed(recoveryFailure)
                     throw failure
                 }
+                val currentUserCard = latestUserCard ?: error("Missing local user card")
+                val reconciledUserCard = when {
+                    inspection.matchingUserMessages == 1 ->
+                        currentUserCard.withDelivery(DeliveryState.DELIVERED, emittedRevisions)
+                    currentUserCard.delivery == DeliveryState.LOCAL_PENDING ->
+                        currentUserCard.withDelivery(DeliveryState.UNKNOWN, emittedRevisions)
+                    else -> currentUserCard
+                }
+                latestUserCard = reconciledUserCard
+                if (reconciledUserCard != currentUserCard) emitCard(reconciledUserCard)
                 if (inspection.matchingUserMessages == 1) {
                     val turn = AppServerThreadProjection.turnForClientId(
                         inspection.threadRead,
                         input.clientUserMessageId,
                         context.conversationId,
-                        context.historyCards.size + 1L,
+                        reconciledUserCard.sequence + 1,
                     )
                     if (turn?.status == "completed") {
                         val recoveredCards = turn.agentCards.map { card ->
@@ -389,8 +542,10 @@ class M1OneHostDealerSlice(
                         recoveredCards.forEach { emitCard(it) }
                         return context.result(
                             reconnectRoute = inspection.route,
+                            userCard = reconciledUserCard,
                             streamedCards = recoveredCards,
                             matchingUserMessages = 1,
+                            reconnectDiagnostics = inspection.diagnostics,
                         )
                     }
                 }
@@ -403,9 +558,17 @@ class M1OneHostDealerSlice(
             throw failure
         }
 
-        val inspection = inspectAfterReconnect(firstPass.threadId, input.clientUserMessageId)
+        onPhase(M1ConnectionPhase.RECONNECTING)
+        val inspection = inspectAfterReconnect(firstPass.threadId, input.clientUserMessageId, onRoute)
+        val reconciledUserCard = if (inspection.matchingUserMessages == 1) {
+            firstPass.userCard.withDelivery(DeliveryState.DELIVERED, emittedRevisions)
+        } else {
+            firstPass.userCard
+        }
+        if (reconciledUserCard != firstPass.userCard) emitCard(reconciledUserCard)
         require(inspection.matchingUserMessages == 1) {
-            "Reconnect expected one ${input.clientUserMessageId} user message, found ${inspection.matchingUserMessages}"
+            "Reconnect expected one ${input.clientUserMessageId} user message, found ${inspection.matchingUserMessages}; " +
+                "turn/start was not replayed"
         }
         return M1RunResult(
             host = host,
@@ -416,38 +579,52 @@ class M1OneHostDealerSlice(
             threadId = firstPass.threadId,
             conversationId = firstPass.conversationId,
             historyCards = firstPass.historyCards,
+            userCard = reconciledUserCard,
             streamedCards = firstPass.streamedCards,
             matchingUserMessagesAfterReconnect = inspection.matchingUserMessages,
             recoveredAfterDisconnect = false,
+            routeDiagnostics = firstPass.routeDiagnostics + inspection.diagnostics,
         )
     }
 
     private suspend fun inspectAfterReconnect(
         threadId: String,
         clientUserMessageId: String,
-    ): ReconnectInspection = connect().useConnected { connection ->
-        connection.appServer.initialize()
-        connection.appServer.threadResume(threadId)
-        val threadRead = connection.appServer.threadRead(threadId)
-        ReconnectInspection(
-            route = connection.route,
-            threadRead = threadRead,
-            matchingUserMessages = AppServerThreadProjection.countUserClientId(threadRead, clientUserMessageId),
-        )
+        onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit,
+    ): ReconnectInspection = withConnectionPhaseTimeout("reconnect inspection", timeouts.reconnectInspectionMs) {
+        connect(onRoute).useConnected { connection ->
+            connection.appServer.initialize()
+            connection.appServer.threadResume(threadId)
+            val threadRead = connection.appServer.threadRead(threadId)
+            ReconnectInspection(
+                route = connection.route,
+                threadRead = threadRead,
+                matchingUserMessages = AppServerThreadProjection.countUserClientId(threadRead, clientUserMessageId),
+                diagnostics = connection.routeDiagnostics,
+            )
+        }
     }
 
-    private suspend fun connect(): ConnectedM1 {
+    private suspend fun connect(
+        onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit,
+    ): ConnectedM1 {
         val routed = connectSsh()
         var proxy: DuplexByteStream? = null
         try {
-            val versions = daemon.ensureRunning(routed.ssh)
-            proxy = routed.ssh.execStream(daemon.appServerProxyCommand)
+            onRoute(routed.route, routed.diagnostics)
+            val versions = withConnectionPhaseTimeout("daemon status/start", timeouts.daemonCommandMs) {
+                daemon.ensureRunning(routed.ssh)
+            }
+            proxy = withConnectionPhaseTimeout("app-server proxy start", timeouts.proxyStartMs) {
+                routed.ssh.execStream(daemon.appServerProxyCommand)
+            }
             return ConnectedM1(
                 routed.route,
                 routed.tcp,
                 routed.ssh,
                 versions,
                 appServerFactory(proxy),
+                routed.diagnostics,
             )
         } catch (failure: Throwable) {
             withContext(NonCancellable) {
@@ -455,34 +632,66 @@ class M1OneHostDealerSlice(
                 routed.ssh.closeSuppressing(failure)
                 routed.tcp.closeSuppressing(failure)
             }
-            throw failure
+            if (failure is CancellationException) throw failure
+            throw RouteConnectionException(
+                host.id,
+                routed.diagnostics.map { diagnostic ->
+                    if (diagnostic.route == routed.route) {
+                        diagnostic.copy(failure = failure.message ?: failure::class.java.simpleName)
+                    } else {
+                        diagnostic
+                    }
+                },
+                failure,
+            )
         }
     }
 
     private suspend fun connectSsh(): RoutedSsh {
         require(host.connectionRoutes.isNotEmpty()) { "No routes configured for ${host.id}" }
-        val failures = mutableListOf<Throwable>()
-        host.connectionRoutes.forEach { route ->
+        val diagnostics = host.connectionRoutes.map { route ->
+            RouteDiagnostic(route, dialer.capability(host, route), attempted = false)
+        }.toMutableList()
+        var actionableFailure: Throwable? = null
+        host.connectionRoutes.forEachIndexed { index, route ->
+            if (diagnostics[index].capability != RouteCapability.SUPPORTED_CONFIGURED) return@forEachIndexed
             try {
-                return connectSsh(route)
+                val connected = connectSsh(route)
+                diagnostics[index] = diagnostics[index].copy(attempted = true)
+                return connected.copy(diagnostics = diagnostics)
             } catch (failure: HostIdentityException) {
-                throw failure
+                diagnostics[index] = diagnostics[index].copy(
+                    attempted = true,
+                    failure = failure.message ?: failure::class.java.simpleName,
+                )
+                throw HostIdentityException(
+                    failure.message ?: "SSH host identity verification failed",
+                    failure,
+                    diagnostics,
+                )
             } catch (failure: CancellationException) {
                 throw failure
             } catch (failure: Throwable) {
-                failures += failure
+                actionableFailure = failure
+                diagnostics[index] = diagnostics[index].copy(
+                    attempted = true,
+                    failure = failure.message ?: failure::class.java.simpleName,
+                )
             }
         }
-        throw IllegalStateException("Unable to connect to ${host.id} through any configured route", failures.last()).also {
-            failures.dropLast(1).forEach(it::addSuppressed)
-        }
+        throw RouteConnectionException(host.id, diagnostics, actionableFailure)
     }
 
     private suspend fun connectSsh(route: HostConnectionRoute): RoutedSsh {
         var tcp: DuplexByteStream? = null
         try {
-            tcp = dialer.connect(host, route, port = 22)
-            return RoutedSsh(route, tcp, sshClient.connect(host, tcp))
+            tcp = withConnectionPhaseTimeout("TCP connect ${host.id} via $route", timeouts.tcpConnectMs) {
+                dialer.connect(host, route, port = 22)
+            }
+            val ssh = withConnectionPhaseTimeout("SSH connect ${host.id} via $route", timeouts.sshConnectMs) {
+                sshClient.connect(host, tcp)
+            }
+            return RoutedSsh(route, tcp, ssh)
         } catch (failure: Throwable) {
             withContext(NonCancellable) {
                 tcp?.closeSuppressing(failure)
@@ -495,6 +704,7 @@ class M1OneHostDealerSlice(
         val route: HostConnectionRoute,
         val tcp: DuplexByteStream,
         val ssh: HostSshSession,
+        val diagnostics: List<RouteDiagnostic> = emptyList(),
     )
 
     private suspend fun <T> ConnectedM1.useConnected(block: suspend (ConnectedM1) -> T): T {
@@ -522,6 +732,7 @@ class M1OneHostDealerSlice(
         val ssh: HostSshSession,
         val daemonVersions: DaemonVersions,
         val appServer: CodexAppServerSession,
+        val routeDiagnostics: List<RouteDiagnostic>,
     ) {
         suspend fun close() {
             var failure: Throwable? = null
@@ -551,13 +762,16 @@ class M1OneHostDealerSlice(
         val threadId: String,
         val conversationId: String,
         val historyCards: List<Card>,
+        val userCard: Card,
         val streamedCards: List<Card>,
+        val routeDiagnostics: List<RouteDiagnostic>,
     )
 
     private data class ReconnectInspection(
         val route: HostConnectionRoute,
         val threadRead: JsonObject,
         val matchingUserMessages: Int,
+        val diagnostics: List<RouteDiagnostic>,
     ) {
         fun turnStatus(clientUserMessageId: String): String =
             AppServerThreadProjection.turnForClientId(
@@ -576,11 +790,14 @@ class M1OneHostDealerSlice(
         val threadId: String,
         val conversationId: String,
         val historyCards: List<Card>,
+        val routeDiagnostics: List<RouteDiagnostic>,
     ) {
         fun result(
             reconnectRoute: HostConnectionRoute,
+            userCard: Card,
             streamedCards: List<Card>,
             matchingUserMessages: Int,
+            reconnectDiagnostics: List<RouteDiagnostic>,
         ) = M1RunResult(
             host = host,
             route = route,
@@ -590,9 +807,33 @@ class M1OneHostDealerSlice(
             threadId = threadId,
             conversationId = conversationId,
             historyCards = historyCards,
+            userCard = userCard,
             streamedCards = streamedCards,
             matchingUserMessagesAfterReconnect = matchingUserMessages,
             recoveredAfterDisconnect = true,
+            routeDiagnostics = routeDiagnostics + reconnectDiagnostics,
+        )
+    }
+
+    private fun Card.withDelivery(
+        delivery: DeliveryState,
+        emittedRevisions: Map<String, Long>,
+    ): Card {
+        check(
+            this.delivery != DeliveryState.ACCEPTED ||
+                delivery == DeliveryState.ACCEPTED ||
+                delivery == DeliveryState.DELIVERED,
+        ) {
+            "Accepted delivery cannot regress to $delivery"
+        }
+        check(this.delivery != DeliveryState.DELIVERED || delivery == DeliveryState.DELIVERED) {
+            "Delivered delivery cannot regress to $delivery"
+        }
+        return copy(
+            revision = (emittedRevisions[id] ?: revision) + 1,
+            state = if (delivery == DeliveryState.DELIVERED) CardState.COMMITTED else CardState.OPEN,
+            updatedAtMs = nowMs(),
+            delivery = delivery,
         )
     }
 }

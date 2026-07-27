@@ -2,6 +2,7 @@ package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardState
+import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
 import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 
 class U4090LiveM1Test {
     @Test
@@ -60,10 +62,99 @@ class U4090LiveM1Test {
         assertTrue(result.historyCards.isNotEmpty())
         assertTrue(result.streamedCards.all { it.state == CardState.COMMITTED })
         assertTrue(result.streamedCards.isNotEmpty())
+        assertEquals(clientId, result.userCard.id)
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
+        assertEquals(result.userCard, rendered[clientId])
         assertEquals(1, result.matchingUserMessagesAfterReconnect)
         assertTrue(rendered.values.containsAll(result.streamedCards))
+        assertTrue(
+            result.routeDiagnostics
+                .filter { it.attempted }
+                .all { it.route == HostConnectionRoute.SSH_LAN },
+        )
     }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_U4090_INTERRUPT", matches = "true")
+    fun `u4090 reconciles one user message after a controlled post-accept disconnect`() = runBlocking {
+        val threadId = requireEnv("POKER_DEALER_LIVE_THREAD_ID")
+        val clientId = "dealer-u4090-interrupt-${System.currentTimeMillis()}"
+        val rendered = linkedMapOf<String, Card>()
+        var connectionCount = 0
+        val turnStartRequests = AtomicInteger()
+        val slice = M1OneHostDealerSlice(
+            dialer = liveDialer(),
+            sshClient = liveSshClient(),
+            appServerFactory = { proxy ->
+                val socket = AppServerWebSocket(proxy)
+                socket.open()
+                val peer = WebSocketJsonRpcPeer(socket)
+                CodexAppServerSession(
+                    TrackedTurnStartPeer(
+                        delegate = peer,
+                        requests = turnStartRequests,
+                        disconnectAfterResponse = connectionCount++ == 0,
+                    ),
+                )
+            },
+        )
+
+        val outcome = runCatching {
+            withTimeout(300_000) {
+                slice.run(
+                    M1TurnInput(
+                        text = "Reply with exactly DEALER_INTERRUPT_OK.",
+                        threadId = threadId,
+                        clientUserMessageId = clientId,
+                    ),
+                    onCard = { rendered[it.id] = it },
+                )
+            }
+        }
+
+        outcome.getOrNull()?.let {
+            assertTrue(it.recoveredAfterDisconnect)
+            assertEquals(1, it.matchingUserMessagesAfterReconnect)
+        } ?: assertTrue(outcome.exceptionOrNull()?.message.orEmpty().contains("reconnect found 1 matching user message"))
+        assertEquals(1, turnStartRequests.get())
+        assertEquals(DeliveryState.DELIVERED, rendered[clientId]?.delivery)
+    }
+
+    private fun liveDialer() = SocketHostTcpDialer(
+        mapOf(
+            ("u4090" to HostConnectionRoute.SSH_LAN) to
+                RouteEndpoint(requireEnv("POKER_DEALER_LIVE_LAN_HOST")),
+        ),
+    )
+
+    private fun liveSshClient() = JschHostSshClient(
+        mapOf(
+            "u4090" to SshHostAuthentication(
+                username = requireEnv("POKER_DEALER_LIVE_SSH_USER"),
+                privateKey = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_SSH_PRIVATE_KEY"))),
+                knownHosts = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_KNOWN_HOSTS"))),
+            ),
+        ),
+    )
 
     private fun requireEnv(name: String): String =
         System.getenv(name)?.takeIf(String::isNotBlank) ?: error("$name is required")
+}
+
+private class TrackedTurnStartPeer(
+    private val delegate: JsonRpcPeer,
+    private val requests: AtomicInteger,
+    private val disconnectAfterResponse: Boolean,
+) : JsonRpcPeer by delegate {
+    override suspend fun request(
+        method: String,
+        params: kotlinx.serialization.json.JsonElement,
+    ): kotlinx.serialization.json.JsonElement {
+        if (method == "turn/start") requests.incrementAndGet()
+        val result = delegate.request(method, params)
+        if (method == "turn/start" && disconnectAfterResponse) {
+            delegate.close()
+        }
+        return result
+    }
 }
