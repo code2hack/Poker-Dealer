@@ -269,7 +269,7 @@ private fun DealerApp(
                 style = MaterialTheme.typography.labelMedium,
             )
             Text(
-                "SSH_EMBEDDED_TSNET: ${state.tailnet.state.label}",
+                "SSH_EMBEDDED_TSNET: ${state.tailnet.connectionLabel}",
                 color = if (state.tailnet.state == EmbeddedTailnetState.ERROR) {
                     Color(0xFFFFA8A8)
                 } else {

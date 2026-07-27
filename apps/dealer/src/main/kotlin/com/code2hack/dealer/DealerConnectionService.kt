@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.IBinder
 import com.code2hack.tailnet.embeddedtailnet.Engine
@@ -41,6 +42,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -222,12 +225,14 @@ class DealerConnectionService : Service() {
         }
         tailnetJob = scope.launch(Dispatchers.IO) {
             try {
+                updateEmbeddedTailnetNetwork()
                 var nativeStatus = tailnetEngine.start(
                     filesDir.resolve("embedded-tailnet").absolutePath,
                 )
                 while (true) {
                     mutableState.update { it.copy(tailnet = nativeStatus.toEmbeddedTailnetUiState()) }
                     delay(TAILNET_STATUS_INTERVAL_MILLIS)
+                    updateEmbeddedTailnetNetwork()
                     nativeStatus = tailnetEngine.status()
                 }
             } catch (failure: CancellationException) {
@@ -253,6 +258,25 @@ class DealerConnectionService : Service() {
             }
         }
         return true
+    }
+
+    private fun updateEmbeddedTailnetNetwork() {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        val properties = manager.getLinkProperties(manager.activeNetwork)
+        val interfaceName = properties?.interfaceName.orEmpty()
+        val addresses = buildJsonArray {
+            properties?.linkAddresses.orEmpty().forEach {
+                val address = it.address.hostAddress?.substringBefore('%') ?: return@forEach
+                add(JsonPrimitive("$address/${it.prefixLength}"))
+            }
+        }
+        val gateway = properties?.routes
+            ?.firstOrNull { it.isDefaultRoute }
+            ?.gateway
+            ?.hostAddress
+            ?.substringBefore('%')
+            .orEmpty()
+        tailnetEngine.setNetwork(interfaceName, addresses.toString(), gateway)
     }
 
     @Synchronized
@@ -444,11 +468,20 @@ data class EmbeddedTailnetUiState(
     val state: EmbeddedTailnetState = EmbeddedTailnetState.STOPPED,
     val loginUrl: String? = null,
     val nodeName: String? = null,
+    val path: String? = null,
+    val relay: String? = null,
     val health: List<String> = emptyList(),
     val error: String? = null,
 ) {
     val active: Boolean
         get() = state.active
+
+    val connectionLabel: String
+        get() = when (path) {
+            "direct" -> "${state.label} (direct)"
+            "relayed" -> "${state.label} (DERP${relay?.let { " $it" }.orEmpty()})"
+            else -> state.label
+        }
 }
 
 internal fun String.toEmbeddedTailnetUiState(): EmbeddedTailnetUiState {
@@ -466,6 +499,8 @@ internal fun String.toEmbeddedTailnetUiState(): EmbeddedTailnetUiState {
         state = state,
         loginUrl = status["loginUrl"]?.jsonPrimitive?.content,
         nodeName = status["nodeName"]?.jsonPrimitive?.content,
+        path = status["path"]?.jsonPrimitive?.content,
+        relay = status["relay"]?.jsonPrimitive?.content,
         health = status["health"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty(),
     )
 }

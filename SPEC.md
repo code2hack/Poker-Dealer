@@ -425,7 +425,7 @@ Any loopback listener created by the embedded module MUST:
 
 The embedded node MUST NOT request Android `VpnService` ownership.
 
-Hiddify, Clash, or another application may continue owning the phone's system VPN slot.
+Karing or another third-party application may continue owning the phone's system VPN slot.
 
 This avoids the VPN-slot conflict but does not guarantee perfect underlay behavior. The other VPN may still affect:
 
@@ -791,7 +791,7 @@ Complete when:
 - node state survives Dealer restart;
 - logout/reset works;
 - logs and storage pass secret review;
-- Hiddify/Clash coexistence is tested on Fold6;
+- Karing or the user's current third-party VPN is tested on Fold6;
 - direct and DERP-relayed behavior is recorded;
 - foreground-service, battery, reconnect, and route-fallback behavior is recorded.
 

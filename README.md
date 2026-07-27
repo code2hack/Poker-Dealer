@@ -39,7 +39,7 @@ Dealer uses the same SSH, proxy, WebSocket, and app-server protocol stack for al
 Dealer embeds a userspace Tailscale node based on `tsnet`. It is not an Android system VPN and does not request the `VpnService` slot.
 
 ```text
-Hiddify / Clash
+Karing / third-party VPN
 └── Android VpnService
 
 Dealer
@@ -110,7 +110,7 @@ Multiple clients may observe one thread. Poker–Dealer follows a **one active h
 - Tailscale node state belongs only in Dealer-private storage.
 - Auth keys, state keys, proxy credentials, and SSH private keys must never appear in logs or plaintext Room/DataStore columns.
 - Any loopback proxy or tunnel exposed by the Go module must bind only to loopback and be authenticated or otherwise process-confined.
-- Hiddify/Clash coexistence, direct UDP, DERP fallback, battery behavior, and foreground-service behavior require real Fold6 acceptance tests.
+- Karing or other third-party-VPN coexistence, direct UDP, DERP fallback, battery behavior, and foreground-service behavior require real Fold6 acceptance tests.
 
 ## Compatibility policy
 
@@ -153,7 +153,7 @@ The phone-local host is useful for developing and debugging Poker/Dealer and oth
 
 The repository uses Codex host/thread terminology throughout. The old Rust tmux bridge and scratch planning tree were removed. The previous SSH-supervised WebRTC/tmux proposal is closed as superseded.
 
-M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`.
+M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`. Fold6 embedded-tsnet direct routing and Karing coexistence are recorded in `docs/evidence/fold6-m1t-routing-2026-07-28.md`; a real DERP-relayed run remains unproven.
 
 Dealer's M1 screen accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn. The UI and notification can cancel the run, one-shot completion reports `Completed` or `Recovered`, and the submitted user card shows pending, accepted, delivered, or unknown delivery state.
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/types/key"
 )
 
 func TestEngineRejectsMissingPrivateStateDirectory(t *testing.T) {
@@ -32,7 +33,7 @@ func TestStatusReportsOnlyEstablishedConnectivityAsConnected(t *testing.T) {
 			Online:   true,
 		},
 	}
-	got, err := encodeStatus(status)
+	got, err := encodeStatus(status, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestStatusReportsOnlyEstablishedConnectivityAsConnected(t *testing.T) {
 	}
 
 	status.Health = []string{"relay-only"}
-	got, err = encodeStatus(status)
+	got, err = encodeStatus(status, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,12 +52,117 @@ func TestStatusReportsOnlyEstablishedConnectivityAsConnected(t *testing.T) {
 
 	status.Health = nil
 	status.Self.Online = false
-	got, err = encodeStatus(status)
+	got, err = encodeStatus(status, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"state":"unavailable","nodeName":"dealer-fold6"}`; got != want {
+	if want := `{"state":"unavailable","nodeName":"dealer-fold6","health":["Tailnet node is offline; check the active network and retry"]}`; got != want {
 		t.Fatalf("status = %s, want %s", got, want)
+	}
+
+	status.Health = []string{"control connection unavailable"}
+	got, err = encodeStatus(status, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"state":"unavailable","nodeName":"dealer-fold6","health":["control connection unavailable","Tailnet node is offline; check the active network and retry"]}`; got != want {
+		t.Fatalf("offline status = %s, want %s", got, want)
+	}
+
+	status.BackendState = "NeedsMachineAuth"
+	status.Health = nil
+	got, err = encodeStatus(status, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"state":"unavailable","nodeName":"dealer-fold6","health":["Tailnet node requires administrator approval; approve it in the tailnet admin console"]}`; got != want {
+		t.Fatalf("machine approval status = %s, want %s", got, want)
+	}
+}
+
+func TestStatusReportsDirectAndRelayedPeerPaths(t *testing.T) {
+	status := &ipnstate.Status{
+		BackendState: "Running",
+		Self:         &ipnstate.PeerStatus{HostName: "dealer-fold6", Online: true},
+		Peer: map[key.NodePublic]*ipnstate.PeerStatus{
+			{}: {
+				DNSName: "u4090.example.ts.net.",
+				Active:  true,
+				CurAddr: "192.0.2.1:41641",
+				Relay:   "hkg",
+			},
+		},
+	}
+	got, err := encodeStatus(status, "u4090.example.ts.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"state":"connected","nodeName":"dealer-fold6","path":"direct"}`; got != want {
+		t.Fatalf("direct status = %s, want %s", got, want)
+	}
+
+	for _, peer := range status.Peer {
+		peer.CurAddr = ""
+	}
+	got, err = encodeStatus(status, "u4090.example.ts.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"state":"degraded","nodeName":"dealer-fold6","path":"relayed","relay":"hkg","health":["Workstation path uses DERP; direct connectivity is unavailable"]}`; got != want {
+		t.Fatalf("relayed status = %s, want %s", got, want)
+	}
+
+	for _, peer := range status.Peer {
+		peer.Relay = ""
+		peer.PeerRelay = "192.0.2.20:1234:1"
+	}
+	got, err = encodeStatus(status, "u4090.example.ts.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"state":"connected","nodeName":"dealer-fold6"}`; got != want {
+		t.Fatalf("peer-relay status = %s, want %s", got, want)
+	}
+}
+
+func TestAndroidNetworkSnapshotSuppliesInterfacesWithoutNetlink(t *testing.T) {
+	var engine Engine
+	if err := engine.SetNetwork(
+		"rmnet_data0",
+		`["192.0.2.10/24","2001:db8::1/64"]`,
+		"192.0.2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	interfaces, err := engine.networkInterfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(interfaces) != 1 || interfaces[0].Name != "rmnet_data0" {
+		t.Fatalf("interfaces = %#v", interfaces)
+	}
+	if got := len(interfaces[0].AltAddrs); got != 2 {
+		t.Fatalf("addresses = %d, want 2", got)
+	}
+	if err := engine.SetNetwork("rmnet_data0", `["not-a-prefix"]`, ""); err == nil {
+		t.Fatal("SetNetwork accepted an invalid prefix")
+	}
+	networkKey := engine.networkKey
+	if err := engine.SetNetwork(
+		"rmnet_data0",
+		`["192.0.2.10/24","2001:db8::1/64"]`,
+		"192.0.2.1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if engine.networkKey != networkKey {
+		t.Fatal("unchanged network snapshot was treated as a transition")
+	}
+	if err := engine.SetNetwork("tun0", `["192.0.2.20/24"]`, "192.0.2.1"); err != nil {
+		t.Fatal(err)
+	}
+	if engine.networkKey == networkKey {
+		t.Fatal("network transition was not detected")
 	}
 }
 

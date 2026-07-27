@@ -112,7 +112,7 @@ Git history may contain these designs. History is evidence only, not current gui
 - The embedded node MUST NOT request `VpnService`, install a default route, act as an exit node, or carry unrelated app traffic.
 - Tailnet identity state belongs in Dealer-private storage. Never store auth keys or node secrets in plaintext Room/DataStore fields or logs.
 - SSH host-key verification remains mandatory even over the tailnet.
-- Hiddify/Clash coexistence, direct UDP, DERP fallback, foreground-service behavior, and battery behavior require real Fold6 testing.
+- Karing or other third-party-VPN coexistence, direct UDP, DERP fallback, foreground-service behavior, and battery behavior require real Fold6 testing.
 
 ## Host-specific rules
 
