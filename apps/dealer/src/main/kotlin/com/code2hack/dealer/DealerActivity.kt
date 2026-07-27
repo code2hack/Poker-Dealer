@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -93,6 +94,7 @@ class DealerActivity : ComponentActivity() {
                         onCancel = { service?.cancelRun() },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
+                        onResetTailnet = ::resetEmbeddedTailnet,
                         onLoginTailnet = ::openEmbeddedTailnetLogin,
                     )
                 }
@@ -193,6 +195,13 @@ class DealerActivity : ComponentActivity() {
             setupState.update { it.copy(error = failure.message ?: failure::class.java.simpleName) }
         }
     }
+
+    private fun resetEmbeddedTailnet() {
+        startForegroundService(
+            Intent(this, DealerConnectionService::class.java)
+                .setAction(DealerConnectionService.ACTION_RESET_TAILNET),
+        )
+    }
 }
 
 private enum class CredentialKind {
@@ -217,12 +226,15 @@ private fun DealerApp(
     onCancel: () -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
+    onResetTailnet: () -> Unit,
     onLoginTailnet: (String) -> Unit,
 ) {
     var lanHost by remember { mutableStateOf("") }
+    var tailnetHost by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
     var threadId by remember { mutableStateOf("") }
     var turnText by remember { mutableStateOf("") }
+    var confirmTailnetReset by remember { mutableStateOf(false) }
     val privateKeyPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(onPrivateKey)
     }
@@ -231,7 +243,7 @@ private fun DealerApp(
     }
     val canRun = setup.serviceReady &&
         !state.running &&
-        lanHost.isNotBlank() &&
+        (lanHost.isNotBlank() || tailnetHost.isNotBlank()) &&
         sshUser.isNotBlank() &&
         threadId.isNotBlank() &&
         turnText.isNotBlank() &&
@@ -252,12 +264,12 @@ private fun DealerApp(
                 color = if (state.error == null && setup.error == null) Color(0xFF8EE7B2) else Color(0xFFFFA8A8),
             )
             Text(
-                "Route order: LAN > embedded tsnet > external Tailscale | provider: LAN",
+                "Route order: LAN > embedded tsnet > external Tailscale",
                 color = Color(0xFFBBC8D6),
                 style = MaterialTheme.typography.labelMedium,
             )
             Text(
-                "Embedded tailnet: ${state.tailnet.state.label}",
+                "SSH_EMBEDDED_TSNET: ${state.tailnet.state.label}",
                 color = if (state.tailnet.state == EmbeddedTailnetState.ERROR) {
                     Color(0xFFFFA8A8)
                 } else {
@@ -283,9 +295,22 @@ private fun DealerApp(
                 }
                 OutlinedButton(
                     onClick = onStopTailnet,
-                    enabled = state.tailnet.active && state.tailnet.state != EmbeddedTailnetState.STOPPING,
+                    enabled = state.tailnet.active &&
+                        state.tailnet.state !in setOf(
+                            EmbeddedTailnetState.STOPPING,
+                            EmbeddedTailnetState.RESETTING,
+                        ),
                 ) {
                     Text("Stop tailnet")
+                }
+                OutlinedButton(
+                    onClick = { confirmTailnetReset = true },
+                    enabled = state.tailnet.state !in setOf(
+                        EmbeddedTailnetState.STOPPING,
+                        EmbeddedTailnetState.RESETTING,
+                    ),
+                ) {
+                    Text("Reset identity")
                 }
                 state.tailnet.loginUrl?.let { loginUrl ->
                     OutlinedButton(onClick = { onLoginTailnet(loginUrl) }) {
@@ -294,12 +319,11 @@ private fun DealerApp(
                 }
             }
             state.routeDiagnostics
-                .filter { it.failure != null }
-                .distinctBy { it.route to it.failure }
+                .distinctBy { it.route to it.failure to it.capability }
                 .forEach {
                     Text(
-                        "${it.route}: ${it.failure}",
-                        color = Color(0xFFFFC38B),
+                        "${it.route}: ${it.failure ?: if (it.attempted) "selected" else it.capability.name}",
+                        color = if (it.failure == null) Color(0xFFBBC8D6) else Color(0xFFFFC38B),
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
@@ -322,6 +346,14 @@ private fun DealerApp(
                 onValueChange = { lanHost = it },
                 enabled = !state.running,
                 label = { Text("LAN host") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = tailnetHost,
+                onValueChange = { tailnetHost = it },
+                enabled = !state.running,
+                label = { Text("Tailnet host") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -371,10 +403,11 @@ private fun DealerApp(
                 Button(
                     onClick = {
                         val config = DealerRunConfig(
-                            lanHost.trim(),
-                            sshUser.trim(),
-                            threadId.trim(),
-                            turnText,
+                            lanHost = lanHost.trim(),
+                            tailnetHost = tailnetHost.trim(),
+                            sshUser = sshUser.trim(),
+                            threadId = threadId.trim(),
+                            turnText = turnText,
                         )
                         onRun(config)
                     },
@@ -393,6 +426,30 @@ private fun DealerApp(
 
         HorizontalDivider()
         DealerCards(state.cards, Modifier.weight(1f))
+    }
+    if (confirmTailnetReset) {
+        AlertDialog(
+            onDismissRequest = { confirmTailnetReset = false },
+            title = { Text("Reset tailnet identity?") },
+            text = {
+                Text("Dealer will close its tailnet connections and require a new login. Hosts and threads stay configured.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmTailnetReset = false
+                        onResetTailnet()
+                    },
+                ) {
+                    Text("Reset")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmTailnetReset = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

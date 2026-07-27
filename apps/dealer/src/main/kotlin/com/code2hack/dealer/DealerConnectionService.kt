@@ -12,6 +12,7 @@ import android.os.IBinder
 import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
+import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -19,9 +20,11 @@ import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
+import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
 import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
 import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
+import com.code2hack.pokerdealer.protocol.host.RouteCapability
 import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
 import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
@@ -69,6 +72,7 @@ class DealerConnectionService : Service() {
                 stopEmbeddedTailnet()
             }
             ACTION_START_TAILNET -> startEmbeddedTailnet()
+            ACTION_RESET_TAILNET -> resetEmbeddedTailnet()
             else -> ensureForeground()
         }
         return START_NOT_STICKY
@@ -114,9 +118,31 @@ class DealerConnectionService : Service() {
             try {
                 val slice = M1OneHostDealerSlice(
                     host = host,
-                    dialer = SocketHostTcpDialer(
-                        mapOf(
-                            (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
+                    dialer = routeDialer(
+                        lan = SocketHostTcpDialer(
+                            endpoints = if (config.lanHost.isBlank()) {
+                                emptyMap()
+                            } else {
+                                mapOf(
+                                    (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
+                                )
+                            },
+                            capabilities = mapOf(
+                                (host.id to HostConnectionRoute.SSH_LAN) to if (config.lanHost.isBlank()) {
+                                    RouteCapability.DISABLED
+                                } else {
+                                    RouteCapability.SUPPORTED_CONFIGURED
+                                },
+                            ),
+                        ),
+                        embedded = EmbeddedTailnetHostTcpDialer(
+                            engine = tailnetEngine,
+                            destinations = if (config.tailnetHost.isBlank()) {
+                                emptyMap()
+                            } else {
+                                mapOf(host.id to config.tailnetHost)
+                            },
+                            state = { mutableState.value.tailnet.state },
                         ),
                     ),
                     sshClient = JschHostSshClient(
@@ -231,7 +257,13 @@ class DealerConnectionService : Service() {
 
     @Synchronized
     fun stopEmbeddedTailnet(): Boolean {
-        if (mutableState.value.tailnet.state == EmbeddedTailnetState.STOPPING) return false
+        if (mutableState.value.tailnet.state in setOf(
+                EmbeddedTailnetState.STOPPING,
+                EmbeddedTailnetState.RESETTING,
+            )
+        ) {
+            return false
+        }
         tailnetJob?.cancel()
         mutableState.update {
             it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPING))
@@ -239,6 +271,45 @@ class DealerConnectionService : Service() {
         scope.launch(Dispatchers.IO) {
             try {
                 tailnetEngine.stop()
+                mutableState.update {
+                    it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPED))
+                }
+                if (runJob == null) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        tailnet = EmbeddedTailnetUiState(
+                            state = EmbeddedTailnetState.ERROR,
+                            error = failure.message ?: failure::class.java.simpleName,
+                        ),
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    @Synchronized
+    fun resetEmbeddedTailnet(): Boolean {
+        if (mutableState.value.tailnet.state in setOf(
+                EmbeddedTailnetState.STOPPING,
+                EmbeddedTailnetState.RESETTING,
+            )
+        ) {
+            return false
+        }
+        cancelRun()
+        tailnetJob?.cancel()
+        ensureForeground()
+        mutableState.update {
+            it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.RESETTING))
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                tailnetEngine.reset(filesDir.resolve("embedded-tailnet").absolutePath)
                 mutableState.update {
                     it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPED))
                 }
@@ -298,6 +369,7 @@ class DealerConnectionService : Service() {
 
     companion object {
         internal const val ACTION_START_TAILNET = "com.code2hack.dealer.action.START_TAILNET"
+        internal const val ACTION_RESET_TAILNET = "com.code2hack.dealer.action.RESET_TAILNET"
 
         const val NOTIFICATION_CHANNEL = "dealer-host-connection"
         const val NOTIFICATION_ID = 4090
@@ -360,6 +432,7 @@ enum class EmbeddedTailnetState(
     STOPPED("Stopped"),
     STARTING("Starting", active = true),
     STOPPING("Stopping", active = true),
+    RESETTING("Resetting", active = true),
     LOGIN_REQUIRED("Login required", active = true),
     CONNECTED("Connected", active = true),
     DEGRADED("Degraded", active = true),
@@ -425,7 +498,32 @@ internal fun Throwable.routeDiagnostics(): List<RouteDiagnostic> =
 
 data class DealerRunConfig(
     val lanHost: String,
+    val tailnetHost: String,
     val sshUser: String,
     val threadId: String,
     val turnText: String,
 )
+
+private fun routeDialer(
+    lan: HostTcpDialer,
+    embedded: HostTcpDialer,
+): HostTcpDialer = object : HostTcpDialer {
+    override fun capability(
+        host: CodexHost,
+        route: HostConnectionRoute,
+    ) = when (route) {
+        HostConnectionRoute.SSH_LAN -> lan.capability(host, route)
+        HostConnectionRoute.SSH_EMBEDDED_TSNET -> embedded.capability(host, route)
+        else -> RouteCapability.DISABLED
+    }
+
+    override suspend fun connect(
+        host: CodexHost,
+        route: HostConnectionRoute,
+        port: Int,
+    ) = when (route) {
+        HostConnectionRoute.SSH_LAN -> lan.connect(host, route, port)
+        HostConnectionRoute.SSH_EMBEDDED_TSNET -> embedded.connect(host, route, port)
+        else -> error("Route $route is disabled")
+    }
+}

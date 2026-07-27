@@ -1,7 +1,15 @@
 package embeddedtailnet
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"tailscale.com/ipn/ipnstate"
 )
@@ -49,5 +57,117 @@ func TestStatusReportsOnlyEstablishedConnectivityAsConnected(t *testing.T) {
 	}
 	if want := `{"state":"unavailable","nodeName":"dealer-fold6"}`; got != want {
 		t.Fatalf("status = %s, want %s", got, want)
+	}
+}
+
+func TestTunnelRequiresTokenAndForwardsOnlyToItsDestination(t *testing.T) {
+	var dialed string
+	current, err := newTunnel("u4090.example.ts.net:22", func(
+		_ context.Context,
+		_ string,
+		address string,
+	) (net.Conn, error) {
+		dialed = address
+		local, remote := net.Pipe()
+		go func() {
+			defer remote.Close()
+			_, _ = io.Copy(remote, remote)
+		}()
+		return local, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go current.serve()
+	t.Cleanup(current.close)
+
+	address := current.listener.Addr().String()
+	unauthorized, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(unauthorized, "wrong\n")
+	_ = unauthorized.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := bufio.NewReader(unauthorized).ReadString('\n'); err == nil {
+		t.Fatal("unauthenticated tunnel connection remained open")
+	}
+	_ = unauthorized.Close()
+
+	client, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, _ = io.WriteString(client, current.token+"\n")
+	reader := bufio.NewReader(client)
+	if line, err := reader.ReadString('\n'); err != nil || line != "OK\n" {
+		t.Fatalf("tunnel handshake = %q, %v", line, err)
+	}
+	if dialed != "u4090.example.ts.net:22" {
+		t.Fatalf("dialed %q", dialed)
+	}
+	_, _ = io.WriteString(client, "ssh")
+	payload := make([]byte, 3)
+	if _, err := io.ReadFull(reader, payload); err != nil || string(payload) != "ssh" {
+		t.Fatalf("forwarded payload = %q, %v", payload, err)
+	}
+}
+
+func TestResetClosesTunnelsAndRemovesIdentityState(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "embedded-tailnet")
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "identity"), []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	current, err := newTunnel("u4090.example.ts.net:22", func(
+		context.Context,
+		string,
+		string,
+	) (net.Conn, error) {
+		return nil, errors.New("unexpected dial")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go current.serve()
+	engine := Engine{tunnels: map[string]*tunnel{current.id: current}}
+
+	if err := engine.Reset(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state directory still exists: %v", err)
+	}
+	if _, err := net.DialTimeout("tcp", current.listener.Addr().String(), 50*time.Millisecond); err == nil {
+		t.Fatal("reset left tunnel listener open")
+	}
+	if err := engine.Reset(stateDir); err != nil {
+		t.Fatalf("repeated reset failed: %v", err)
+	}
+}
+
+func TestResetPreservesIdentityWhenStopFailsOrIsCancelled(t *testing.T) {
+	for _, failure := range []error{errors.New("stop failed"), context.Canceled} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			stateDir := filepath.Join(t.TempDir(), "embedded-tailnet")
+			removed := false
+			err := resetState(
+				stateDir,
+				func() error { return failure },
+				func(string) error {
+					removed = true
+					return nil
+				},
+			)
+
+			if !errors.Is(err, failure) {
+				t.Fatalf("reset error = %v, want %v", err, failure)
+			}
+			if removed {
+				t.Fatal("reset removed identity before the node stopped")
+			}
+		})
 	}
 }
