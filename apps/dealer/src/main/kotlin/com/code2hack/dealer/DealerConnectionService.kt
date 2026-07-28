@@ -20,6 +20,7 @@ import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
+import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
@@ -59,9 +60,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -77,6 +82,9 @@ class DealerConnectionService : Service() {
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
     private lateinit var hostSessions: HostSessionManager
     private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
+    private lateinit var threadAttachmentStore: DealerThreadAttachmentStore
+    private val attachmentMutex = Mutex()
+    private val notificationJobs = mutableMapOf<String, Job>()
     private var connectedHostIds = emptySet<String>()
 
     private val mutableState: MutableStateFlow<DealerUiState>
@@ -94,6 +102,7 @@ class DealerConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
+        threadAttachmentStore = DealerThreadAttachmentStore(this)
         hostSessions = HostSessionManager(
             hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
             intentStore = HostConnectionIntentDataStore(this),
@@ -104,13 +113,35 @@ class DealerConnectionService : Service() {
             scope = scope,
         )
         scope.launch {
+            val restoredAttachments = try {
+                threadAttachmentStore.read()
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(error = "Unable to restore thread attachments: ${failure.message}")
+                }
+                emptySet()
+            }
+            mutableState.update {
+                it.copy(
+                    threadAttachments = ThreadAttachmentState(
+                        attached = restoredAttachments,
+                        dealerClaims = it.threadAttachments.dealerClaims.intersect(restoredAttachments),
+                    ),
+                )
+            }
             hostSessions.start()
             hostSessions.state.collect { sessions ->
                 mutableState.update { it.copy(hostSessions = sessions) }
                 val connected = sessions.filterValues {
                     it.status == HostSessionStatus.CONNECTED
                 }.keys
-                (connected - connectedHostIds).forEach(::refreshThreads)
+                (connectedHostIds - connected).forEach { hostId ->
+                    notificationJobs.remove(hostId)?.cancel()
+                }
+                (connected - connectedHostIds).forEach { hostId ->
+                    observeNotifications(hostId)
+                    restoreAttachments(hostId)
+                }
                 connectedHostIds = connected
                 if (sessions.values.any(HostSessionState::enabled)) {
                     ensureForeground()
@@ -313,7 +344,16 @@ class DealerConnectionService : Service() {
                 }
             }
             mutableState.update {
-                it.copy(control = it.control?.takeUnless { control -> control.locator.hostId == hostId })
+                it.copy(
+                    threadAttachments = it.threadAttachments.releaseHost(hostId),
+                    threads = it.threads.mapValues { (locator, thread) ->
+                        if (locator.hostId == hostId) {
+                            thread.copy(intendedControlSurface = ControlSurface.NONE)
+                        } else {
+                            thread
+                        }
+                    },
+                )
             }
         }
     }
@@ -333,12 +373,13 @@ class DealerConnectionService : Service() {
                     val state = mutableState.value
                     val existing = state.threads[locator]
                     ThreadDiscoveryLocalState(
-                        attached = existing?.attached == true,
+                        attached = locator in state.threadAttachments.attached,
                         unreadCount = existing?.unreadCount ?: 0,
-                        intendedControlSurface = state.control
-                            ?.takeIf { it.locator == locator }
-                            ?.surface
-                            ?: ControlSurface.NONE,
+                        intendedControlSurface = if (state.threadAttachments.hasDealerClaim(locator)) {
+                            ControlSurface.DEALER
+                        } else {
+                            ControlSurface.NONE
+                        },
                     )
                 }
                 mutableState.update { state ->
@@ -361,6 +402,153 @@ class DealerConnectionService : Service() {
                     it.copy(refreshingThreadHosts = it.refreshingThreadHosts - hostId)
                 }
             }
+        }
+    }
+
+    fun attachThread(locator: CodexThreadLocator) {
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before attaching") }
+            return
+        }
+        scope.launch {
+            attachmentMutex.withLock {
+                if (locator in mutableState.value.threadAttachments.attached) return@withLock
+                try {
+                    appServer.threadResume(locator.threadId)
+                    try {
+                        threadAttachmentStore.attach(locator)
+                    } catch (failure: Throwable) {
+                        runCatching { appServer.threadUnsubscribe(locator.threadId) }
+                        throw failure
+                    }
+                    mutableState.update { state ->
+                        val attached = state.threadAttachments.attach(locator)
+                        state.copy(
+                            threadAttachments = attached,
+                            threads = state.threads[locator]?.let { thread ->
+                                state.threads + (
+                                    locator to thread.copy(
+                                        attached = true,
+                                        intendedControlSurface = ControlSurface.NONE,
+                                    )
+                                )
+                            } ?: state.threads,
+                            error = null,
+                        )
+                    }
+                    browseThread(locator)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    mutableState.update {
+                        it.copy(error = failure.message ?: failure::class.java.simpleName)
+                    }
+                }
+            }
+        }
+    }
+
+    fun detachThread(locator: CodexThreadLocator) {
+        scope.launch {
+            attachmentMutex.withLock {
+                val state = mutableState.value
+                if (locator !in state.threadAttachments.attached) return@withLock
+                if (locator in state.knownBlockingRequestThreads) {
+                    mutableState.update {
+                        it.copy(error = "Resolve, cancel, or interrupt the pending request before detaching")
+                    }
+                    return@withLock
+                }
+                try {
+                    val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
+                    appServer?.threadUnsubscribe(locator.threadId)
+                    try {
+                        threadAttachmentStore.detach(locator)
+                    } catch (failure: Throwable) {
+                        runCatching { appServer?.threadResume(locator.threadId) }
+                        throw failure
+                    }
+                    mutableState.update {
+                        val detached = it.threadAttachments.detach(locator)
+                        it.copy(
+                            threadAttachments = detached,
+                            threads = it.threads[locator]?.let { thread ->
+                                it.threads + (
+                                    locator to thread.copy(
+                                        attached = false,
+                                        intendedControlSurface = ControlSurface.NONE,
+                                    )
+                                )
+                            } ?: it.threads,
+                            browsedThread = it.browsedThread?.takeUnless { browsed -> browsed == locator },
+                            error = null,
+                        )
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    mutableState.update {
+                        it.copy(error = failure.message ?: failure::class.java.simpleName)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun restoreAttachments(hostId: String) {
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        scope.launch {
+            mutableState.value.threadAttachments.attached
+                .filter { it.hostId == hostId }
+                .forEach { locator ->
+                    runCatching { appServer.threadResume(locator.threadId) }
+                        .onFailure { failure ->
+                            mutableState.update {
+                                it.copy(
+                                    threadDiscoveryErrors = it.threadDiscoveryErrors +
+                                        (hostId to (failure.message ?: failure::class.java.simpleName)),
+                                )
+                            }
+                        }
+                }
+            refreshThreads(hostId)
+        }
+    }
+
+    private fun observeNotifications(hostId: String) {
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        notificationJobs.remove(hostId)?.cancel()
+        notificationJobs[hostId] = scope.launch {
+            while (true) {
+                val notification = appServer.receiveNotification() ?: return@launch
+                if (notification.method != "turn/started") continue
+                val params = notification.params as? JsonObject ?: continue
+                val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull ?: continue
+                externalTurnStarted(CodexThreadLocator(hostId, threadId))
+            }
+        }
+    }
+
+    internal fun externalTurnStarted(
+        locator: CodexThreadLocator,
+        dealerOriginated: Boolean = false,
+    ) {
+        mutableState.update { state ->
+            val attachments = state.threadAttachments.externalTurnStarted(locator, dealerOriginated)
+            state.copy(
+                threadAttachments = attachments,
+                threads = state.threads[locator]?.let { thread ->
+                    state.threads + (
+                        locator to thread.copy(
+                            intendedControlSurface = if (attachments.hasDealerClaim(locator)) {
+                                ControlSurface.DEALER
+                            } else {
+                                ControlSurface.NONE
+                            },
+                        )
+                    )
+                } ?: state.threads,
+            )
         }
     }
 
@@ -459,21 +647,17 @@ class DealerConnectionService : Service() {
         if (runJob != null || threadId.isBlank() || InitialCodexHosts.all.none { it.id == hostId }) {
             return false
         }
-        mutableState.update {
-            it.copy(
-                control = DealerControlState(
-                    CodexThreadLocator(hostId, threadId),
-                    ControlSurface.DEALER,
-                ),
-                threads = it.threads.mapValues { (locator, thread) ->
-                    thread.copy(
-                        intendedControlSurface = when {
-                            locator == CodexThreadLocator(hostId, threadId) -> ControlSurface.DEALER
-                            thread.intendedControlSurface == ControlSurface.DEALER -> ControlSurface.NONE
-                            else -> thread.intendedControlSurface
-                        },
+        val locator = CodexThreadLocator(hostId, threadId)
+        if (locator !in mutableState.value.threadAttachments.attached) return false
+        mutableState.update { state ->
+            val attachments = state.threadAttachments.claim(locator)
+            state.copy(
+                threadAttachments = attachments,
+                threads = state.threads[locator]?.let { thread ->
+                    state.threads + (
+                        locator to thread.copy(intendedControlSurface = ControlSurface.DEALER)
                     )
-                },
+                } ?: state.threads,
                 error = null,
             )
         }
@@ -483,16 +667,15 @@ class DealerConnectionService : Service() {
     @Synchronized
     fun yieldControl(hostId: String, threadId: String): Boolean {
         val locator = CodexThreadLocator(hostId, threadId)
-        if (runJob != null || mutableState.value.control?.locator != locator) return false
-        mutableState.update {
-            val discovered = it.threads[locator]
-            it.copy(
-                control = DealerControlState(locator, ControlSurface.LOCAL_TUI),
-                threads = if (discovered == null) {
-                    it.threads
-                } else {
-                    it.threads + (locator to discovered.copy(intendedControlSurface = ControlSurface.LOCAL_TUI))
-                },
+        if (runJob != null || !mutableState.value.threadAttachments.hasDealerClaim(locator)) return false
+        mutableState.update { state ->
+            state.copy(
+                threadAttachments = state.threadAttachments.release(locator),
+                threads = state.threads[locator]?.let { thread ->
+                    state.threads + (
+                        locator to thread.copy(intendedControlSurface = ControlSurface.NONE)
+                    )
+                } ?: state.threads,
             )
         }
         return true
@@ -639,6 +822,7 @@ class DealerConnectionService : Service() {
             hostSessionConfigs.clear()
         }
         scope.cancel()
+        threadAttachmentStore.close()
         super.onDestroy()
     }
 
@@ -729,8 +913,8 @@ data class DealerUiState(
     val cards: List<Card> = emptyList(),
     val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
     val recovery: DealerRecoveryUiState? = null,
-    // ponytail: process-local soft control; persist it when host/thread Room storage lands.
-    val control: DealerControlState? = null,
+    val threadAttachments: ThreadAttachmentState = ThreadAttachmentState(),
+    val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),
     val threads: Map<CodexThreadLocator, DiscoveredThread> = emptyMap(),
@@ -742,11 +926,6 @@ data class DealerUiState(
     val running: Boolean
         get() = status.active
 }
-
-data class DealerControlState(
-    val locator: CodexThreadLocator,
-    val surface: ControlSurface,
-)
 
 data class DealerRecoveryUiState(
     val phase: M1FailurePhase,
@@ -921,10 +1100,7 @@ data class DealerHostConnectionConfig(
 )
 
 internal fun DealerUiState.hasDealerControl(config: DealerRunConfig): Boolean =
-    control == DealerControlState(
-        CodexThreadLocator(config.hostId, config.threadId),
-        ControlSurface.DEALER,
-    )
+    threadAttachments.hasDealerClaim(CodexThreadLocator(config.hostId, config.threadId))
 
 private fun routeDialer(
     lan: HostTcpDialer,

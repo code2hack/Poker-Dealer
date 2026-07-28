@@ -57,6 +57,7 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
     implementation(libs.datastore.preferences)
+    implementation(libs.room.runtime)
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
@@ -66,6 +67,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.test.runner)
+    annotationProcessor(libs.room.compiler)
 }
 
 tasks.named("preBuild").configure {

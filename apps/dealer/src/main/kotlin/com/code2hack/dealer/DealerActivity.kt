@@ -109,6 +109,8 @@ class DealerActivity : ComponentActivity() {
                         onDisableHost = { service?.disableHost(it) },
                         onRefreshThreads = { service?.refreshThreads(it) },
                         onBrowseThread = { service?.browseThread(it) },
+                        onAttachThread = { service?.attachThread(it) },
+                        onDetachThread = { service?.detachThread(it) },
                         onTakeControl = { hostId, threadId -> service?.takeControl(hostId, threadId) },
                         onYieldControl = { hostId, threadId -> service?.yieldControl(hostId, threadId) },
                         onStartTailnet = ::startEmbeddedTailnet,
@@ -269,6 +271,8 @@ private fun DealerApp(
     onDisableHost: (String) -> Unit,
     onRefreshThreads: (String) -> Unit,
     onBrowseThread: (CodexThreadLocator) -> Unit,
+    onAttachThread: (CodexThreadLocator) -> Unit,
+    onDetachThread: (CodexThreadLocator) -> Unit,
     onTakeControl: (String, String) -> Unit,
     onYieldControl: (String, String) -> Unit,
     onStartTailnet: () -> Unit,
@@ -298,10 +302,11 @@ private fun DealerApp(
     } else {
         lanHost.isNotBlank() || tailnetHost.isNotBlank()
     }
-    val currentControlSurface = state.control
-        ?.takeIf { it.locator == locator }
-        ?.surface
-        ?: ControlSurface.NONE
+    val currentControlSurface = if (state.threadAttachments.hasDealerClaim(locator)) {
+        ControlSurface.DEALER
+    } else {
+        ControlSurface.NONE
+    }
     val hasDealerControl = currentControlSurface == ControlSurface.DEALER
     val hasUnsettledAction = state.hasUnsettledAction(locator)
     val hostSession = state.hostSessions[selectedHostId]
@@ -513,7 +518,14 @@ private fun DealerApp(
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
             discoveredThreads.forEach { thread ->
-                ThreadRow(thread, onBrowseThread)
+                ThreadRow(
+                    thread = thread,
+                    onBrowseThread = onBrowseThread,
+                    onAttachThread = onAttachThread,
+                    onDetachThread = onDetachThread,
+                    onTakeControl = onTakeControl,
+                    onYieldControl = onYieldControl,
+                )
             }
             if (isTermux) {
                 OutlinedTextField(
@@ -569,7 +581,7 @@ private fun DealerApp(
                 } else {
                     Button(
                         onClick = { onTakeControl(locator.hostId, locator.threadId) },
-                        enabled = !state.running && locator.threadId.isNotBlank(),
+                        enabled = !state.running && locator in state.threadAttachments.attached,
                     ) {
                         Text("Take control")
                     }
@@ -687,6 +699,10 @@ private fun DealerApp(
 private fun ThreadRow(
     thread: DiscoveredThread,
     onBrowseThread: (CodexThreadLocator) -> Unit,
+    onAttachThread: (CodexThreadLocator) -> Unit,
+    onDetachThread: (CodexThreadLocator) -> Unit,
+    onTakeControl: (String, String) -> Unit,
+    onYieldControl: (String, String) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -721,8 +737,36 @@ private fun ThreadRow(
                 style = MaterialTheme.typography.labelSmall,
             )
         }
-        OutlinedButton(onClick = { onBrowseThread(thread.locator) }) {
-            Text("Browse history")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { onBrowseThread(thread.locator) }) {
+                Text("Browse history")
+            }
+            if (thread.attached) {
+                OutlinedButton(onClick = { onDetachThread(thread.locator) }) {
+                    Text("Detach")
+                }
+                if (thread.intendedControlSurface == ControlSurface.DEALER) {
+                    OutlinedButton(
+                        onClick = {
+                            onYieldControl(thread.locator.hostId, thread.locator.threadId)
+                        },
+                    ) {
+                        Text("Release control")
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            onTakeControl(thread.locator.hostId, thread.locator.threadId)
+                        },
+                    ) {
+                        Text("Take control")
+                    }
+                }
+            } else if (!thread.archived) {
+                Button(onClick = { onAttachThread(thread.locator) }) {
+                    Text("Attach")
+                }
+            }
         }
     }
 }
