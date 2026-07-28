@@ -14,6 +14,8 @@ import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
 import com.code2hack.pokerdealer.domain.CodexHost
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -87,15 +89,19 @@ class DealerConnectionService : Service() {
         privateKey: ByteArray,
         knownHosts: ByteArray,
     ): Boolean {
-        if (runJob != null) {
+        if (runJob != null || !mutableState.value.hasDealerControl(config)) {
             privateKey.fill(0)
             knownHosts.fill(0)
+            if (runJob == null) {
+                mutableState.update { it.copy(error = "Take control of this host thread before sending") }
+            }
             return false
         }
         ensureForeground()
         runJob = scope.launch {
             val cards = CardRevisionStore()
-            val host = InitialCodexHosts.u4090
+            val host = InitialCodexHosts.workstations.firstOrNull { it.id == config.hostId }
+                ?: error("Unsupported workstation ${config.hostId}")
             val input = M1TurnInput(
                 text = config.turnText,
                 threadId = config.threadId,
@@ -110,6 +116,7 @@ class DealerConnectionService : Service() {
             mutableState.update {
                 it.copy(
                     status = DealerRunState.CONNECTING,
+                    hostId = host.id,
                     route = null,
                     threadId = null,
                     appServerVersion = null,
@@ -213,6 +220,33 @@ class DealerConnectionService : Service() {
     fun cancelRun(): Boolean {
         val activeRun = runJob ?: return false
         activeRun.cancel(CancellationException("Cancelled by user"))
+        return true
+    }
+
+    @Synchronized
+    fun takeControl(hostId: String, threadId: String): Boolean {
+        if (runJob != null || threadId.isBlank() || InitialCodexHosts.workstations.none { it.id == hostId }) {
+            return false
+        }
+        mutableState.update {
+            it.copy(
+                control = DealerControlState(
+                    CodexThreadLocator(hostId, threadId),
+                    ControlSurface.DEALER,
+                ),
+                error = null,
+            )
+        }
+        return true
+    }
+
+    @Synchronized
+    fun yieldControl(hostId: String, threadId: String): Boolean {
+        val locator = CodexThreadLocator(hostId, threadId)
+        if (runJob != null || mutableState.value.control?.locator != locator) return false
+        mutableState.update {
+            it.copy(control = DealerControlState(locator, ControlSurface.LOCAL_TUI))
+        }
         return true
     }
 
@@ -418,17 +452,25 @@ enum class DealerRunState(
 
 data class DealerUiState(
     val status: DealerRunState = DealerRunState.DISCONNECTED,
+    val hostId: String? = null,
     val route: HostConnectionRoute? = null,
     val threadId: String? = null,
     val appServerVersion: String? = null,
     val cards: List<Card> = emptyList(),
     val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
+    // ponytail: process-local soft control; persist it when host/thread Room storage lands.
+    val control: DealerControlState? = null,
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val error: String? = null,
 ) {
     val running: Boolean
         get() = status.active
 }
+
+data class DealerControlState(
+    val locator: CodexThreadLocator,
+    val surface: ControlSurface,
+)
 
 internal object DealerServiceState {
     val mutableState = MutableStateFlow(DealerUiState())
@@ -532,12 +574,19 @@ internal fun Throwable.routeDiagnostics(): List<RouteDiagnostic> =
     } + suppressed.flatMap { it.routeDiagnostics() } + cause?.routeDiagnostics().orEmpty()
 
 data class DealerRunConfig(
+    val hostId: String,
     val lanHost: String,
     val tailnetHost: String,
     val sshUser: String,
     val threadId: String,
     val turnText: String,
 )
+
+internal fun DealerUiState.hasDealerControl(config: DealerRunConfig): Boolean =
+    control == DealerControlState(
+        CodexThreadLocator(config.hostId, config.threadId),
+        ControlSurface.DEALER,
+    )
 
 private fun routeDialer(
     lan: HostTcpDialer,

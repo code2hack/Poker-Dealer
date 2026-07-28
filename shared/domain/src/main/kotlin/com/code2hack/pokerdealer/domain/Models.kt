@@ -88,6 +88,21 @@ data class CodexThreadLocator(
 )
 
 object InitialCodexHosts {
+    val spark = CodexHost(
+        id = "spark",
+        displayName = "DGX Spark",
+        kind = CodexHostKind.LINUX_WORKSTATION,
+        architecture = HostArchitecture.LINUX_ARM64,
+        distribution = CodexDistribution.OPENAI_UPSTREAM,
+        connectionRoutes = listOf(
+            HostConnectionRoute.SSH_LAN,
+            HostConnectionRoute.SSH_EMBEDDED_TSNET,
+            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+        ),
+        availabilityClass = HostAvailabilityClass.PERSISTENT,
+        connectionState = HostConnectionState.DISCONNECTED,
+    )
+
     val u4090 = CodexHost(
         id = "u4090",
         displayName = "u4090",
@@ -102,6 +117,8 @@ object InitialCodexHosts {
         availabilityClass = HostAvailabilityClass.PERSISTENT,
         connectionState = HostConnectionState.DISCONNECTED,
     )
+
+    val workstations = listOf(spark, u4090)
 }
 
 @Serializable
