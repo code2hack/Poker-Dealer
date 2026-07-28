@@ -117,7 +117,7 @@ Multiple clients may observe one thread. Poker–Dealer follows a **one active h
 - Dealer talks directly to daemon lifecycle commands through SSH.
 - Dealer reaches each daemon's Unix socket using `codex app-server proxy` over the SSH stream.
 - Production behavior uses the stable app-server API surface by default.
-- The wire adapter ignores unknown fields and notifications, preserves unknown payloads for diagnostics, and safely rejects unknown server-initiated requests.
+- The wire adapter ignores unknown fields and notifications, preserves unknown non-secret payloads for diagnostics, redacts or discards credential-bearing payloads, and safely rejects unknown server-initiated requests.
 - Hosts may run different Codex versions and distributions as long as each satisfies Dealer's tested stable API subset.
 - The daemon is experimental by deliberate product decision; daemon churn is isolated in a small lifecycle adapter.
 - Termux support is capability-based. Dealer must not infer daemon/proxy compatibility solely from a package version.
@@ -155,7 +155,7 @@ The repository uses Codex host/thread terminology throughout. The old Rust tmux 
 
 M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`. M1T completed on the real Fold6 with direct and genuine DERP-relayed turns, Karing coexistence, lifecycle and cancellation recovery, route fallback, and unplugged battery observations; see `docs/evidence/fold6-m1t-routing-2026-07-28.md` and `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`.
 
-The shared LAN live test also passes against daemon-backed host-local TUI threads on Spark and u4090; see `docs/evidence/workstations-m2-2026-07-28.md`. Dealer can select either workstation and requires an explicit host/thread-specific soft control claim before sending. A Fold6 run also preserved a VPN-routed LAN failure, fell through to embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Live mixed-version proof remains outstanding.
+The shared LAN live test also passes against daemon-backed host-local TUI threads on Spark and u4090; see `docs/evidence/workstations-m2-2026-07-28.md`. Dealer can select either workstation and requires an explicit host/thread-specific soft control claim before sending. A Fold6 run also preserved a VPN-routed LAN failure, fell through to embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts used Codex `0.145.0`; live mixed-version proof is deferred and broad compatibility is not claimed.
 
 Fold6 Termux now passes M2T through loopback SSH, its community-distribution daemon lifecycle, the shared app-server stack, the same daemon-backed local TUI, and bounded interruption recovery without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
@@ -163,7 +163,7 @@ Dealer selects Spark, u4090, or Fold6 Termux and accepts only the routes valid f
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-The next implementation slice is the remaining M2 mixed-version workstation proof. Spark and u4090 have passed the shared stack on the same Codex version; broad mixed-version compatibility is not yet proven.
+The next implementation slice is M3: long-lived simultaneous host sessions, configured-host thread discovery, manual attachments and control, Dealer-only thread lifecycle actions, deterministic work-state projection, command/file presentation, the three accepted server-request families, steering/interruption, settings, notifications, and recovery without duplicate actions. Poker networking begins in M4; Morse/ASR and Poker actions begin in M5.
 
 ## Build and test
 

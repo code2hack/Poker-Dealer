@@ -1,6 +1,6 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 8
+**Status:** Normative implementation contract, revision 9
 **Date:** 2026-07-28
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
@@ -178,13 +178,18 @@ data class CodexThreadLocator(
 
 `threadId` MUST NOT be treated as globally unique across hosts.
 
-### 2.4 Turn, item, connection, and card
+### 2.4 Turn, item, request, connection, and card
 
 - A **turn** is one user request and the associated Codex execution/response lifecycle.
-- An **item** is structured user input or Codex output within a turn, including agent messages, plans, reasoning summaries, commands, command output, file changes, approvals, user-input requests, and errors.
+- An **item** is structured user input or Codex output within a turn, including agent messages, plans, reasoning summaries, commands, command output, file changes, and errors.
+- A **server request** is a server-initiated blocking request that requires a client response or safe rejection and may reference one or more turn items.
+- A **server-request locator** is the JSON-RPC `requestId` qualified by `hostId` and the observed app-server generation. `itemId` and command `approvalId` are request context, not request identity.
+- A **request resolution state** advances monotonically from `PENDING` to `RESPONDING` to `RESOLVED`, or to `UNKNOWN` when Dealer cannot establish whether the response was accepted.
 - A **client connection** is one initialized app-server JSON-RPC connection. It is disposable and MUST NOT be used as durable identity.
 - A **Dealer projection** is Dealer's UI-oriented host/thread/turn/item state.
 - A **card** is a Dealer/Poker presentation unit derived from that projection. Cards are not authoritative Codex records and MUST be rebuildable.
+- A **card pile** is the ordered card history for one attached host-qualified thread.
+- A **thread work state** is `BUSY`, `ATTENTION_REQUIRED`, or `READY`; host availability is a separate dimension.
 
 ### 2.5 Embedded tailnet
 
@@ -262,7 +267,7 @@ For any supported host, this workflow MUST be supported:
 5. Dealer locates and resumes or rejoins the same host-qualified thread.
 6. Dealer reconstructs existing history and current status.
 7. The user continues through Dealer.
-8. Poker may attach to Dealer's projection of that same thread.
+8. Dealer may project that manually attached thread to Poker.
 
 ### 4.2 Host-bound execution
 
@@ -285,6 +290,10 @@ Poker–Dealer adopts this coordination rule:
 The first implementation MAY use a soft control indicator rather than a distributed lock.
 
 Dealer MUST still handle server rejection and races correctly; the control indicator is UX coordination, not a security primitive.
+
+Thread attachment and soft-control claims are separate and scoped by `(hostId, threadId)`. Attachment starts in observer state. Dealer MAY hold control claims for several different threads concurrently, but starting a turn (`turn/start`), steering, interruption, and user-initiated request resolution for a thread require that thread's Dealer claim. Protocol-required fail-closed rejection, timer-driven no-answer, and user-confirmed Disconnect cancellation are safety responses that do not acquire a control claim. Attach, Detach, and every thread-management action are Dealer-only; Poker only receives the resulting projection.
+
+If Dealer holds a soft-control claim and observes a newly started turn that it cannot correlate to a Dealer-originated action, it MUST revoke its claim, identify the thread as active from another client, and remain an observer. Steering, interruption, and user-initiated request resolution then require an explicit new Dealer control claim.
 
 ---
 
@@ -493,6 +502,17 @@ The proxy stream MUST NOT be treated as newline-delimited JSON.
 
 Immediately after WebSocket establishment, Dealer MUST send one `initialize`, wait for its response, send `initialized`, and block other product requests until initialization completes.
 
+### 6.9 Multi-host session manager
+
+Host connection and disconnection are explicit Dealer user actions represented by a durable per-host connection intent.
+
+- **Enabled:** Dealer maintains one initialized app-server connection for that host, multiplexes every attached thread over it, and retries accidental loss indefinitely with capped backoff and phase-specific failure reporting.
+- **Disabled:** Dealer closes that host's resources and MUST NOT reconnect until the user enables it again.
+
+Dealer MUST support enabled sessions for Spark, u4090, and Fold6 Termux concurrently. It MUST NOT open one SSH, proxy, or app-server connection per thread.
+
+Connection intent survives Dealer process death and is restored when Dealer or its service is next started. M3 MUST NOT add phone-boot autostart. Automatic reconnect MUST initialize once, then reconcile and resubscribe every attachment without blindly replaying a turn or request response.
+
 ---
 
 ## 7. App-server compatibility strategy
@@ -508,11 +528,13 @@ Dealer's wire layer MUST:
 - parse the outer JSON-RPC shape generically;
 - dispatch by method string;
 - ignore unknown optional fields;
-- preserve raw payloads for diagnostics;
+- preserve unknown non-secret payloads for diagnostics;
 - tolerate unknown notifications and item types;
 - use string-backed values where exhaustive enums would be brittle;
 - safely reject unknown server-initiated requests;
 - avoid sending optional fields it does not need.
+
+Secret-bearing payloads are an exception to diagnostic retention. Dealer MUST redact or discard raw `config/read` responses and any other payload that may expose provider configuration, headers, tokens, or credentials. Only the provider identifiers and display labels required by the UI may persist.
 
 Dealer MUST record per host:
 
@@ -527,7 +549,15 @@ Hosts MAY run different versions and distributions.
 
 Dealer SHOULD expose `SUPPORTED`, `DEGRADED`, `UNSUPPORTED`, and `UNKNOWN` compatibility states.
 
-The MVP stable subset includes initialize/initialized, thread list/read/start/resume/fork/archive, loaded-list when available, turn start/steer/interrupt, thread/turn/item notifications, and supported server-initiated approvals or user-input requests.
+The M3 production subset includes initialize/initialized; `thread/list`, `thread/loaded/list`, `thread/read`, `thread/start`, `thread/resume`, `thread/fork`, `thread/name/set`, `thread/archive`, `thread/unarchive`, `thread/delete`, and `thread/unsubscribe`; `turn/start`, `turn/steer`, and `turn/interrupt`; `model/list`, `config/read`, and `configRequirements/read`; required thread/turn/item notifications; and only the accepted server-request families.
+
+`item/tool/requestUserInput` is M3's only explicitly accepted unstable request-family exception. Dealer MUST gate it with a per-host/version compatibility fixture and live qualification evidence. Supporting it MUST NOT enable broad experimental mode or authorize any other experimental method.
+
+M3 also accepts the unstable `thread/list.ancestorThreadId` filter solely for safe Archive/Delete cascade preflight. Dealer MUST gate that field with a per-host/version compatibility fixture and live qualification evidence. This exception does not authorize any other experimental `thread/list` field or method.
+
+M3 exposes Start, Fork, Rename, Archive, Restore, and Delete as Dealer lifecycle actions. Listing, reading, loaded-list inspection, resume, and unsubscribe are internal integration behavior. Goals, general metadata editing, manual compaction, deprecated rollback, shell/process surfaces, experimental paginated item/turn APIs, and broad experimental app-server methods are deferred.
+
+Dealer MUST NOT implement a generic slash-command parser or intercept `/model`. Slash-equivalent product behavior exists only where this specification defines a native Dealer action.
 
 Method availability MUST be verified against the installed server rather than inferred solely from version numbers.
 
@@ -548,15 +578,29 @@ Dealer MUST show every configured host independently with:
 - active thread count when known;
 - compatibility state.
 
-Dealer MUST support paginated thread listing and SHOULD display host, thread name/preview, details-view ID, working directory, recency, loaded/idle/active/error state, unread state, Poker attachment, and intended control surface.
+Dealer discovers threads on configured, enabled, reachable hosts; it does not discover machines. For each such host, Dealer MUST exhaust cursor pagination for the relevant active or archived `thread/list` view and inspect `thread/loaded/list` when supported. It MUST include the host's supported user-facing `cli`, `vscode`, and `appServer` source kinds rather than relying on server defaults that can omit Dealer-created threads; non-user exec and subagent threads are excluded by default. Discovery runs on connection, explicit refresh, and reconciliation events; M3 MUST NOT continuously poll every host globally.
+
+Archive/Delete preflight is a separate internal query. It MUST exhaust both active and archived `thread/list` pages filtered by `ancestorThreadId`, include all supported source kinds, and use no working-directory, model-provider, or search filter. Dealer MUST NOT infer a complete cascade from the user-facing discovery list. If the qualified filter is unavailable, Archive and Delete are disabled with an explanation.
+
+Dealer SHOULD display host, thread name/preview, details-view ID, working directory, recency, loaded/idle/active/error state, unread state, Poker attachment, and intended control surface.
 
 Dealer SHOULD use read-only thread APIs for browsing when possible and MUST resume/rejoin before sending turns or subscribing to full live activity when required by app-server semantics.
+
+Thread attachment and detachment are explicit Dealer actions. Poker Hide/Wake changes presentation only and MUST NOT attach, detach, subscribe, unsubscribe, connect, or disconnect anything. A host disconnection preserves attachment metadata and cached piles while marking availability separately; unavailable piles remain manually viewable but are excluded from automatic focus.
+
+Detach is allowed while a thread is `BUSY`; its remote turn continues. Detach is blocked while the thread is `ATTENTION_REQUIRED` until every known blocking request is answered, declined, cancelled, or interrupted. Detach removes the active pile and unsubscribes that thread from Dealer's host connection, but does not delete, archive, or interrupt the host thread.
+
+New Thread MUST use either a working directory previously observed in that host's thread metadata or a manually entered absolute path in the host's native syntax. Fork defaults to the source thread's working directory and Resume defaults to the stored thread's working directory; both expose the same observed-path or manual-absolute-path choices. If the user changes the path, Dealer MUST reread effective configuration for that path before confirmation. M3 MUST NOT include a remote filesystem browser.
+
+Start and Fork MUST auto-attach their result and grant initial Dealer control. Permanent Delete MUST show a phone confirmation containing host, name or preview, thread ID, working directory, descendant-cascade warning, and irreversibility warning.
 
 Names and aliases MUST NOT be treated as unique identifiers. `(hostId, threadId)` remains authoritative.
 
 ---
 
 ## 9. Turn and item projection
+
+### 9.1 Structured cards
 
 Dealer MUST project structured app-server events rather than infer messages from terminal pixels.
 
@@ -571,8 +615,8 @@ Typical mappings are:
 | reasoning summary | optional reasoning card |
 | command execution/output | command card with expandable output |
 | file change | file-change card |
-| approval request | approval card |
-| user-input request | question/input card |
+| command/file server request | approval card |
+| structured user-input server request | question/input card |
 | turn completed | status and usage |
 | error | system/error card |
 
@@ -584,11 +628,51 @@ A growing card MUST update without forcing the viewport to the bottom while the 
 
 Dealer MUST treat transcript deltas, authoritative item completion, turn completion, and unresolved server requests as lossless. Cosmetic progress MAY be coalesced only when final authoritative state remains reconstructable.
 
+Command and file-change cards are collapsed by default. A collapsed command card shows command, working directory, status, and exit code; a collapsed file-change card shows affected paths and count. Expansion MUST expose the complete app-server-provided retained output or diff.
+
+`item/started` opens the corresponding live card. Command output deltas append in wire order without changing the reader's viewport. `turn/diff/updated` refreshes the aggregate diff when supported. `item/completed` is authoritative for final item content and status, and turn completion records whether the containing work completed, was interrupted, or failed. Dealer MUST NOT enable approval when the relevant command, path scope, output, or diff is incomplete.
+
+### 9.2 Thread work state and Poker pile metadata
+
+Dealer derives exactly one work state for each discovered or attached host-qualified thread whose authoritative state it can read:
+
+- `BUSY` while an active turn is progressing without a known user block;
+- `ATTENTION_REQUIRED` while an active turn has one or more unresolved user requests;
+- `READY` when no active turn prevents a new prompt.
+
+Host availability is orthogonal. A failed or interrupted turn transitions to `READY` with a prominent outcome card rather than inventing a fourth work state.
+
+If current work state cannot be established for a discovered thread, Dealer shows that limitation separately and disables any action that requires `READY` until reconciliation; it does not invent a fourth work state.
+
+M3 MUST produce deterministic pile ordering and focus metadata; M4 renders it on Poker. Attached piles are ordered left-to-right as:
+
+```text
+BUSY | ATTENTION_REQUIRED | READY
+```
+
+Busy piles retain stable attachment order. Within `ATTENTION_REQUIRED` and `READY`, the oldest transition into that state comes first; equal transition times use stable attachment order. Automatic focus priority is the first Attention pile, then the first Ready pile. Busy piles remain reachable through manual navigation.
+
+When the HUD is already visible, a newly Attention or Ready pile MUST NOT steal focus; Poker indicates the state change in place. When the HUD is hidden, a new transition into Attention or Ready wakes it and selects the highest-priority eligible pile. Existing eligible piles MUST NOT immediately undo a user's manual Hide.
+
+Poker MUST offer Manual Hide in every thread work state. Manual Wake selects the oldest Attention pile, then the oldest Ready pile. If every available pile is Busy, it restores the last viewed attached pile when possible, otherwise the first attached Busy pile.
+
+After the focused pile accepts a prompt or steer, it is or remains Busy and focus advances to the first Attention pile, otherwise the first Ready pile. If neither exists, the HUD hides until a later eligible transition or Manual Wake. Failed and interrupted outcomes wake and focus like Ready. Unavailable piles retain cached history for manual viewing but are excluded from automatic focus.
+
 ---
 
 ## 10. Input and semantic actions
 
 Dealer MUST support reviewed turn start, turn steering when accepted, interruption, supported user-input answers, approval resolution, and taking control on phone.
+
+Dealer's composer is state-sensitive and requires the thread's Dealer control claim:
+
+- `READY` labels Send as a new turn and calls `turn/start`.
+- `BUSY` labels Send as **Steer active turn** and calls `turn/steer`.
+- `ATTENTION_REQUIRED` disables ordinary prompt submission until the blocking request is resolved or the turn is interrupted.
+
+A steer MUST include the currently observed active `turnId` as `expectedTurnId`. A rejected, unsupported, or precondition-mismatched steer MUST be reported visibly, trigger authoritative reconciliation, and MUST NOT fall back to `turn/start`.
+
+Interrupt is an explicit one-tap action bound to the currently observed `turnId`. The first tap locks the action until its outcome is known. Dealer MUST NOT queue, retarget, or replay Interrupt across reconnect; without a confirmed matching live turn it reports unavailable and reconciles authoritative state.
 
 Poker MUST use semantic actions rather than terminal key emulation. MVP actions are reviewed new-turn text, steer, interrupt, safe approve/deny, thread switching, navigation, and scrolling.
 
@@ -600,17 +684,51 @@ Dealer SHOULD send a client-generated user-message identifier when supported. On
 
 Dealer MUST project a submitted prompt immediately as one user card keyed by that client identifier. Its delivery state advances monotonically from `LOCAL_PENDING` to `ACCEPTED` after a successful `turn/start`, then to `DELIVERED` when authoritative `thread/read` contains the matching `userMessage.clientId`. If acceptance cannot be established, the same card becomes `UNKNOWN`. Authoritative reconciliation MUST update that card rather than adding a duplicate.
 
+Dealer MUST maintain one durable unsent draft per `(hostId, threadId)`. Thread switching, automatic focus changes, HUD visibility, route or host disconnection, Dealer restart, Detach, and Archive MUST preserve that draft. Dealer MUST clear it only after app-server accepts the exact outbound action; uncertain acceptance MUST lock the draft against duplicate submission until authoritative reconciliation. Confirmed thread deletion permanently removes its draft.
+
 ---
 
 ## 11. Approvals and safety
 
 Dealer MUST treat server-initiated requests as structured blocking requests requiring a response or explicit rejection.
 
-Poker MAY resolve an approval only when the complete action and relevant scope can be displayed, the request type is understood, the decision is limited and unambiguous, the user intentionally decides, and Dealer still has the matching unresolved request.
+M3 supports only:
+
+1. command-execution approval;
+2. file-change approval;
+3. structured user-input questions.
+
+An unsupported, unknown, or malformed server request MUST be safely rejected. A temporarily incomplete request keeps its controls disabled while Dealer performs bounded authoritative reread or reassembly; if complete review material still cannot be obtained, Dealer safely rejects it so Codex cannot wait forever for a response Dealer cannot provide.
+
+Requests render as inline cards in their host-qualified thread pile, never as one global blocking modal. Several threads and several requests within a thread may require attention concurrently, and the user may resolve them in any order.
+
+Dealer MUST key each pending card and response action by the server-request locator, never by `itemId`. A command `approvalId` remains part of its request fingerprint because one item may produce multiple approval callbacks. Dealer advances its local app-server generation whenever daemon status proves replacement or continuity cannot be established. Across a reconnect, it reconciles a reissued request only when the same-ID behavior is proven for that host/version and the request method and normalized scope fingerprint also match.
+
+Dealer's safe semantic approval set is:
+
+- accept once;
+- accept for the current session;
+- decline;
+- cancel;
+- accept a server-proposed execpolicy amendment after rendering the complete amendment.
+
+For command approval, Dealer MUST intersect this set with `availableDecisions` when the connected server supplies that optional field. When it is absent, Dealer MAY expose only response choices proven for that host protocol by compatibility fixtures; an execpolicy amendment is offered only when the request contains the exact proposal. The current file-change request has no runtime `availableDecisions` field, so its adapter uses only the proven `accept`, `acceptForSession`, `decline`, and `cancel` response union. M3 MUST NOT include an amendment editor. If no safe response is known, Dealer rejects the request.
+
+Command-approval `command` and `cwd` fields are nullable. A request may instead carry an authoritative network scope, in which case Dealer MUST completely render its network destination host and protocol before offering only the proven `accept`, `acceptForSession`, `decline`, or `cancel` choices allowed by `availableDecisions` when present. A complete network-only request MUST NOT be rejected merely because command or working directory is absent; a request with neither completely renderable command scope nor network scope fails closed. M3 does not offer network-policy amendments.
+
+Every request card follows the monotonic resolution state defined in section 2.4. The first local action wins and moves `PENDING` to `RESPONDING`; other controls lock immediately. The card remains visible until authoritative `serverRequest/resolved` moves it to `RESOLVED`. A lost or ambiguous response becomes `UNKNOWN`, is never replayed, and is settled only by authoritative thread, turn, or request reconciliation. Dealer MAY rely on a reissued request only for a host/version where capability checks and live evidence prove that behavior.
+
+Dealer MUST render every structured question in wire order and support multiple questions, option lists, free-text questions with null options, and `isOther` free-text answers. An `isSecret` answer uses masked, non-durable input and MUST NOT enter projection history, drafts, cache, diagnostics, logs, notifications, or a request fingerprint; Dealer retains only its resolved status. A valid shape that cannot be displayed or answered completely is safely rejected.
+
+For a structured question with non-null `autoResolutionMs`, Dealer shows a countdown and responds with the current no-answer payload `{ "answers": {} }` when it expires; it MUST NOT invent a choice or free-text answer. This unstable request behavior requires a compatibility fixture and live qualification proof for the host/version. A null timeout waits until the user answers, sends no answer, interrupts the turn, or the server clears the request. Resolved question cards remain in history with answered, no-answer, or auto-resolved status.
+
+Resolved command and file approval cards remain in history with the known decision. If another client resolved a request and app-server does not reveal the decision, Dealer shows **resolved elsewhere** rather than guessing.
+
+M3 resolves requests only in Dealer. Beginning in M5, Poker MAY resolve an approval only when the complete action and relevant scope can be displayed, the request type is understood, the decision is limited and unambiguous, the user intentionally decides, and Dealer still has the matching unresolved request.
 
 Broad filesystem or network access, persistent grants, destructive commands, large diffs, unknown request types, and incomplete displays SHOULD require Dealer phone review.
 
-Dealer MUST prevent duplicate resolution by Poker and Dealer. Late responses MUST be rejected locally when the request is no longer pending.
+Dealer MUST prevent duplicate resolution by every surface. Late responses MUST be rejected locally when the request is no longer pending.
 
 ---
 
@@ -643,6 +761,12 @@ After host transport failure, Dealer SHOULD:
 9. compare authoritative state with local projection;
 10. settle pending actions without blind replay;
 11. resynchronize Poker.
+
+Automatic route or transport recovery preserves the same-process Dealer control claim. Dealer process death and explicit host Disconnect reset every claim on that host to observer while preserving durable connection intent, attachments, drafts, cached piles, and unread state as applicable.
+
+Explicit Disconnect is different from accidental loss. If known requests are pending, Dealer MUST show the affected host and request scope and obtain confirmation. For each command or file request it sends `cancel` at most once when that response is proven valid for the host protocol; for each structured question it sends the current no-answer response `{ "answers": {} }` at most once. If no safe response exists, Dealer MUST interrupt each distinct confirmed matching turn at most once. Dealer waits for a short bounded resolution window, then closes the host connection regardless. An unconfirmed response or interrupt becomes `UNKNOWN` and MUST NOT be replayed; the next Enable reconciles it. Busy turns that are not blocked on those requests continue on the host.
+
+While a host is disconnected, attachment and work-state cache remain intact and availability is shown separately. Re-enabling the host creates one new initialized connection, rereads/resumes all attachments, and reconciles request and turn state from authoritative state and `serverRequest/resolved` notifications. It MAY consume reissued requests with the same request IDs only where compatibility fixtures and live evidence prove that behavior. It never blindly replays `turn/start`, `turn/steer`, Interrupt, or a request response.
 
 When Termux is unavailable, Dealer SHOULD distinguish open/start Termux, restore `sshd`, start daemon, repair/update distribution, and retry after Android suspension.
 
@@ -734,15 +858,25 @@ Dealer MUST persist:
 
 - host IDs and display names;
 - host kind, architecture, distribution, ordered routes, active-route observations, and availability class;
+- durable enabled/disabled host connection intent;
 - LAN and tailnet endpoint configuration;
 - SSH endpoint configuration and approved host-key pins;
 - daemon/app-server capability observations;
 - attached thread locators;
+- per-thread unsent drafts;
 - local aliases and presentation policy;
 - recent projection and unread state;
 - pending actions with idempotency metadata;
 - Poker pairing and synchronization state;
 - embedded-tailnet non-secret preferences and diagnostics.
+
+Dealer MUST retain all app-server-provided command output and file-change text for attached threads in durable, Dealer-private, file-backed storage rather than depending on process memory. This retained projection MUST survive route loss, host disconnection, and Dealer process restart. Cache belonging only to detached or archived threads MAY be evicted because app-server remains authoritative and can be reread; unresolved server requests and outbound actions whose acceptance is unknown MUST NOT be evicted.
+
+Dealer MUST NOT silently truncate retained content. If storage or reassembly fails, the affected card MUST be marked incomplete and any approval that requires the missing content MUST fail closed until complete review material is restored.
+
+Transcript projections, output, diffs, drafts, and pending-action records MUST remain in Dealer-private storage excluded from Android backup and MUST NOT be written to logs. M3 MUST demonstrate recovery after Dealer process death and, once the user next starts Dealer, after a same-phone Android reboot. Corrupt or incomplete cache derived from app-server SHOULD be discarded and rebuilt from authoritative host state when possible.
+
+M3 does not guarantee recovery after app uninstall, Clear data, factory reset, unrecoverable device storage failure, or loss of the phone. Host-retained thread state remains rediscoverable; Dealer-only drafts and uncertain local actions are unrecoverable after loss of Dealer-private storage. Device migration, cloud backup, and a separate Dealer content-encryption/passcode layer are outside M3.
 
 Dealer MUST NOT persist plaintext private keys, passwords, bearer tokens, ChatGPT credentials, Tailscale auth keys, node/state keys, OAuth tokens, or local proxy credentials in Room or DataStore.
 
@@ -797,7 +931,7 @@ Complete when:
 
 M1T completed on the real Fold6 on 2026-07-28. Direct routing and third-party-VPN coexistence are recorded in `docs/evidence/fold6-m1t-routing-2026-07-28.md`; lifecycle, fallback, cancellation, genuine DERP relay, and unplugged idle/direct/relayed battery observations are recorded in `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`. The evidence retains its documented single-device and short-duration limits.
 
-### M2 — remaining workstation and route continuity
+### M2 — workstation and route continuity
 
 Complete when:
 
@@ -808,7 +942,7 @@ Complete when:
 - Dealer exposes safe take-control behavior;
 - host versions may differ without breaking core use.
 
-The shared workstation slice now works against daemon-backed local-TUI threads on Spark and u4090, including LAN-to-embedded-tailnet fallback and host-qualified soft control. See `docs/evidence/workstations-m2-2026-07-28.md`. Both hosts used Codex `0.145.0`, so mixed-version proof remains outstanding M2 work and does not block the independent M2T host slice.
+The shared workstation slice works against daemon-backed local-TUI threads on Spark and u4090, including LAN-to-embedded-tailnet fallback and host-qualified soft control. See `docs/evidence/workstations-m2-2026-07-28.md`. Both hosts used Codex `0.145.0`. On 2026-07-28 the user explicitly accepted progression to M3 without the separate live mixed-version proof. That proof remains deferred compatibility evidence; broad mixed-version compatibility is not claimed.
 
 ### M2T — Fold6 Termux host
 
@@ -821,15 +955,72 @@ bounded proxy, `sshd`, daemon, and Termux-process recovery without replay is rec
 
 ### M3 — Structured actions and approvals
 
-Complete when Dealer supports command/file-change presentation, approvals/user input, steering/interruption, lossless request handling, and duplicate-resolution prevention.
+Complete when Dealer supports the multi-host session manager; configured-host thread discovery; manual attachment and control; Dealer-only lifecycle actions; deterministic work-state projection; complete command/file presentation; the three accepted request families; steering/interruption; Start/Fork/Resume settings; phone notifications; recovery; and duplicate prevention.
+
+Dealer's Start, Fork, and Resume flows MUST expose working directory, provider, model, and permission settings, plus reasoning effort when the selected catalog model advertises choices. Provider, model, permission, and reasoning-effort values inherit app-server state unless explicitly overridden; working-directory behavior follows the selected action and section 8.
+
+For `thread/start`, `thread/fork`, and `thread/resume`, Dealer MUST inherit app-server provider, model, and permission settings by default and omit each override unless the user explicitly changes it. An invalid or unavailable explicit override MUST fail visibly; Dealer MUST NOT silently substitute another provider, model, or permission mode.
+
+A successful `thread/resume` response does not prove that explicit overrides took effect. Dealer MUST verify that every explicitly requested override is present or otherwise authoritatively observable and equals the effective setting. A missing, unverifiable, or mismatched value is unavailable: Dealer reports it, unsubscribes that thread from the Dealer connection, leaves it detached, and does not grant control. It MUST NOT evict another subscriber; the user may unload the thread from other clients and retry.
+
+For provider selection in each flow, Dealer MUST call `config/read` for the action's effective host and working directory. The picker MUST show the effective host default and each configured `model_providers` entry using its `name` as the label and table key as the protocol ID; a missing name falls back to the ID. Dealer MUST retain or log neither provider configuration nor credentials beyond the identifiers and labels required by the picker. Dealer MUST allow exact provider-ID entry when discovery is unavailable or incomplete.
+
+The model control MUST remain editable and inherit the effective model unless the user supplies an override. Dealer MAY offer `model/list` results, including a host-configured model catalog, as suggestions, but it MUST exhaust `nextCursor`, submit and persist each entry's exact `model` wire value, and MUST NOT treat that non-provider-scoped catalog as proof that a model is supported by the selected provider. Dealer MUST NOT query a provider's model endpoint directly; it submits the exact selected combination to app-server and surfaces any rejection without fallback.
+
+When the selected catalog model advertises reasoning-effort choices, Dealer MUST expose them and MUST allow only those choices. An explicit selection is retained as a pending per-thread choice and applied to the next `turn/start`; it is not sent through thread Start/Fork/Resume or `turn/steer`. An unlisted custom model inherits host reasoning settings.
+
+The host owns provider definitions, credentials, model runtimes, and provider egress routing. M3 MUST NOT include a provider/credential/runtime editor, a per-thread provider proxy setting, or UI for service tier, personality, reasoning summary, instructions, or other inherited host configuration.
+
+Browsing a discovered stored thread MUST remain non-subscribing through `thread/read`. Choosing **Attach** opens that thread's Resume settings, and confirmation calls `thread/resume` before adding the host-qualified thread to Dealer's attachment set. Recovery after an accidental connection loss MUST resume existing attachments silently with inherited settings and MUST NOT reopen the Resume settings.
+
+Confirming New Thread MUST immediately call `thread/start` with the selected host, working directory, and explicit overrides, then auto-attach the returned empty `READY` thread, grant initial Dealer control, and open its composer. The first prompt remains a separate reviewed `turn/start`; M3 MUST NOT present thread creation and first-turn acceptance as one atomic operation.
+
+Attaching with inherited settings is an observer action and MAY occur in any thread work state. Supplying a provider, model, or permission override during Resume is a control-bearing action: it MUST require an explicit Dealer control claim and a `READY` thread. Resume settings MUST be read-only for `BUSY` and `ATTENTION_REQUIRED` threads.
+
+Rename MAY be used in any work state. Fork MUST be disabled unless the source thread is `READY`; Restore applies only to archived threads. Before Archive or Delete, Dealer MUST establish the complete cascade scope and current state from authoritative metadata. The action is disabled if any affected thread is not `READY`, any affected thread is marked ephemeral, or the cascade scope or state is unknown. M3 MUST NOT fork a partial active turn or archive/delete active or user-blocked work.
+
+Because app-server Archive may also archive spawned descendants, Dealer MUST require confirmation when descendants exist and MUST show the host, selected thread, descendant count, and cascade warning. Dealer MUST reconcile the actual archived set from server notifications. Restore operates on only the selected archived thread; archived descendants remain separately restorable.
+
+After server-confirmed Archive, Dealer MUST remove every actually archived thread from its attachment set while keeping its history available through the Archived view. Restore MUST leave a thread detached until the user explicitly attaches it again. After server-confirmed Delete, Dealer MUST remove the deleted thread and descendants from attachments and permanently remove their Dealer-local cached projections.
+
+M3 permission selection MUST offer only these presets:
+
+- **Host default:** omit permission overrides.
+- **Ask on phone:** `sandbox = workspace-write`, `approvalPolicy = on-request`, and `approvalsReviewer = user`.
+- **Auto review:** `sandbox = workspace-write`, `approvalPolicy = on-request`, and `approvalsReviewer = auto_review`.
+- **Read-only:** `sandbox = read-only` and `approvalPolicy = never`.
+- **YOLO:** `sandbox = danger-full-access` and `approvalPolicy = never`.
+
+M3 MUST NOT expose a granular permission-policy editor. Dealer MUST use stable `configRequirements/read` to disable with an explanation any preset whose sandbox mode or approval policy is known to be disallowed. A null or unadvertised constraint is unknown, not unsupported. Because stable M3 does not consume experimental reviewer constraints, Dealer submits the exact selected reviewer value when reviewer support is unadvertised and surfaces any rejection without fallback or remapping.
+
+While any host connection intent is enabled, M3 MUST keep the shared multi-host session manager active through Dealer's Android foreground service when the UI is backgrounded or the screen is off. It MUST use one silent ongoing notification that opens Dealer.
+
+When Dealer is backgrounded or the screen is off, a genuine new transition to `ATTENTION_REQUIRED` MUST produce a high-priority Android notification and a genuine new transition to `READY` MUST produce a normal-priority Android notification. Initial baseline and reconnect reconciliation MUST NOT notify. Notifications MUST be keyed by `(hostId, threadId)`, update rather than duplicate, and open the exact thread or pending request. M3 MUST NOT expose inline approval, denial, reply, or interrupt actions in Android notifications; those actions require Dealer's complete in-app presentation.
+
+An unlocked notification MAY show only the host label, thread name, and work state. It MUST NOT include response text, commands, diffs, question content, or approval details. Its public lock-screen form MUST reveal only that Poker–Dealer needs attention.
+
+#### M3 acceptance evidence
+
+M3 is complete only when:
+
+- compatibility fixtures and focused unit tests cover every introduced method, request family, item, notification, request-state transition, work-state transition, and no-replay boundary;
+- an opt-in JVM live protocol test passes against u4090;
+- an isolated disposable u4090 thread, using explicit interactive permissions only for that test, proves harmless command and file-change approvals without changing host defaults or existing YOLO work;
+- a real Fold6 Dealer run against u4090 proves thread discovery and lifecycle, Start/Fork/Resume settings, all three request families, complete command/file presentation, steer, interrupt, phone notifications, process-death/same-phone-reboot/transport recovery, and duplicate prevention;
+- a narrow real-Fold6 smoke keeps u4090 and Spark connected simultaneously and demonstrates independent concurrent thread states and focus metadata;
+- recorded evidence omits secrets, provider configuration, private endpoints, and thread IDs.
+
+This evidence MUST NOT claim mixed-version compatibility. Spark and u4090 have not yet been proven concurrently on different supported Codex versions.
 
 ### M4 — Dealer↔Poker synchronization
 
-Complete when Poker pairs, lists attached host-qualified threads, switches conversations, reads retained/live output, reconnects deterministically, and preserves scroll position during live growth.
+Complete when Poker pairs, lists attached host-qualified threads, switches conversations, reads retained/live output, receives work-state transitions that drive the accepted HUD wake/focus behavior, offers Manual Hide in every work state and Manual Wake, reconnects deterministically, and preserves scroll position during live growth.
 
 ### M5 — Wearable input
 
 Complete when Poker supports reviewed Morse/ASR, start/steer/interrupt, safe limited approvals, and escalation to Dealer.
+
+M5 design note: consider host-skill name completion while composing Morse input to reduce keystrokes. Until that design is reviewed, earlier milestones pass `$...` mentions as ordinary prompt text and rely on Codex's model-driven skill activation; Dealer does not add structured skill input or skill completion in M3.
 
 ### M6 — Production hardening
 
@@ -845,10 +1036,15 @@ Complete when:
 
 ## 17. Immediate next job
 
-A fresh Codex worker SHOULD complete the remaining M2 mixed-version workstation proof. Spark and
-u4090 MUST use the same daemon-backed app-server stack while running different supported Codex
-versions, and core initialize, thread, turn, projection, control, reconnect, and no-replay behavior
-MUST remain compatible.
+A fresh Codex worker SHOULD implement M3 through the existing shared Android/app-server stack:
 
-Do not broaden that proof into experimental APIs, Poker networking, Morse, ASR, a terminal,
-cross-host migration, or changes to the completed Fold6 Termux route.
+1. replace the one-shot host run with the multi-host session manager and durable connection intent;
+2. add configured-host thread discovery, manual attachments, soft control, and lifecycle actions;
+3. derive the accepted thread work states, pile ordering, focus metadata, and phone notifications;
+4. implement complete command/file projection, the three accepted server-request families, steering, interruption, and monotonic reconciliation;
+5. add the accepted Start/Fork/Resume settings and permission presets;
+6. satisfy the M3 acceptance evidence gate.
+
+Do not add Poker networking or HUD rendering before M4; Morse, ASR, and Poker actions before M5; a terminal; generic slash-command parsing; per-thread provider proxying; broad experimental app-server APIs; cross-host migration; or changes to the completed Fold6 Termux route.
+
+The deferred Spark/u4090 mixed-version proof MAY be performed independently, but it is not an M3 prerequisite and no broad version-compatibility claim may be made without it.

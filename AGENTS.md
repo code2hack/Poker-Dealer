@@ -94,7 +94,7 @@ Git history may contain these designs. History is evidence only, not current gui
 - Remember that the proxied stream carries a WebSocket HTTP upgrade and WebSocket frames, not JSONL.
 - Initialize once per app-server connection before any other request.
 - Prefer stable app-server methods and fields by default.
-- Keep parsing tolerant: ignore unknown optional fields, preserve unknown payloads for diagnostics, and do not crash on new notifications or item types.
+- Keep parsing tolerant: ignore unknown optional fields, preserve unknown non-secret payloads for diagnostics, and do not crash on new notifications or item types. Redact or discard raw `config/read` and other credential-bearing payloads.
 - Safely reject unknown server-initiated requests so Codex cannot wait forever for an answer Dealer cannot render.
 - Treat disconnects and daemon restarts as normal. Reconnect, reinitialize, inspect thread state, and never blindly replay `turn/start`.
 - Do not require hosts to run identical Codex versions or distributions.
@@ -155,13 +155,13 @@ Git history may contain these designs. History is evidence only, not current gui
 
 M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`. M1T completed on the real Fold6 on 2026-07-28 with direct and genuine DERP-relayed turns, third-party-VPN coexistence, lifecycle and cancellation recovery, route fallback, and unplugged battery observations; see `docs/evidence/fold6-m1t-routing-2026-07-28.md` and `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`.
 
-The current M2 workstation slice proves Spark and u4090 through the same daemon-backed app-server stack, including explicit soft control and LAN-to-embedded-tailnet fallback. Mixed-version proof remains separate M2 work; see `docs/evidence/workstations-m2-2026-07-28.md`.
+The M2 workstation slice proves Spark and u4090 through the same daemon-backed app-server stack, including explicit soft control and LAN-to-embedded-tailnet fallback; see `docs/evidence/workstations-m2-2026-07-28.md`. Both hosts used Codex `0.145.0`. The user accepted progression to M3 on 2026-07-28 without making the separate mixed-version proof an M3 prerequisite. Broad mixed-version compatibility remains unproven and MUST NOT be claimed.
 
 M2T now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-The remaining M2 work is mixed-version workstation proof. Do not claim broad version compatibility until Spark and u4090 have been exercised with different supported Codex versions.
+The current slice is M3: multi-host long-lived Dealer sessions, configured-host thread discovery, manual attachments and soft control, Dealer-only thread lifecycle actions, deterministic `BUSY | ATTENTION_REQUIRED | READY` projection metadata, complete command/file cards, the three accepted server-request families, steering/interruption, settings, phone notifications, recovery, and duplicate prevention.
 
-Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, or start Poker networking, Morse, ASR, a terminal, or broad experimental app-server APIs during the remaining M2 work.
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, or start Poker networking/HUD rendering, Morse, ASR, Poker actions, a terminal, generic slash-command parsing, per-thread provider proxying, or broad experimental app-server APIs during M3.
 
 ## Completion discipline
 

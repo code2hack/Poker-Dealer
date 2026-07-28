@@ -69,9 +69,11 @@ M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundar
 
 For Fold6 development diagnostics, keep wireless ADB enabled and prefer it over USB ADB. USB remains a bootstrap/recovery fallback. ADB is diagnostic tooling only and is not a Dealer product transport.
 
-The same LAN app-server slice now passes against daemon-backed local-TUI threads on both Spark and u4090, and Dealer requires an explicit host-qualified soft control claim before sending; see `docs/evidence/workstations-m2-2026-07-28.md`. A Fold6 run retained a VPN-routed LAN failure, selected embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts ran Codex `0.145.0`, so live mixed-version behavior remains partial M2 evidence rather than M2 completion.
+The same LAN app-server slice passes against daemon-backed local-TUI threads on both Spark and u4090, and Dealer requires an explicit host-qualified soft control claim before sending; see `docs/evidence/workstations-m2-2026-07-28.md`. A Fold6 run retained a VPN-routed LAN failure, selected embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts ran Codex `0.145.0`. The user accepted progression to M3 on 2026-07-28 with the separate live mixed-version proof deferred; broad mixed-version compatibility remains unproven.
 
-M2T now qualifies the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and bounded recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`. The remaining M2 mixed-version proof stays separate.
+M2T qualifies the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and bounded recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
+
+M3 is now the active slice. It adds long-lived simultaneous host sessions, configured-host thread discovery, manual Dealer attachments and control, Dealer-only lifecycle actions, deterministic `BUSY | ATTENTION_REQUIRED | READY` projection metadata, phone notifications, complete command/file cards, command/file approvals, structured questions, steering/interruption, and monotonic recovery without starting Poker networking.
 
 ## Core identity
 
@@ -127,14 +129,23 @@ Termux installation and update behavior is distribution-specific. Dealer must ca
 - **Host kind:** Linux workstation or Android/Termux.
 - **Codex distribution:** upstream Linux or community Termux.
 - **Connection route:** LAN SSH, embedded-tsnet SSH, external-Tailscale SSH, or loopback SSH.
+- **Host connection intent:** Dealer's durable per-host choice to keep a host connected or disconnected. An enabled intent survives accidental loss and is automatically restored; a disabled intent never reconnects until the user enables it.
 - **Embedded tailnet:** Dealer-private userspace Tailscale node used only for Dealer sockets.
 - **Thread:** durable Codex conversation/work context stored on one host.
 - **Turn:** one user request and Codex execution/response cycle.
-- **Item:** structured user input or Codex output within a turn, such as an agent message, command execution, file change, plan, or approval request.
+- **Item:** structured user input or Codex output within a turn, such as an agent message, command execution, file change, or plan.
+- **Server request:** server-initiated blocking request that requires a client response or safe rejection and may reference turn items.
+- **Request resolution state:** monotonic request lifecycle `PENDING → RESPONDING → RESOLVED`, or `UNKNOWN` when response acceptance cannot be established.
 - **Client connection:** disposable initialized JSON-RPC connection to app-server.
 - **Dealer projection:** Dealer's local, UI-oriented representation of thread/turn/item events.
 - **Card:** a Poker-readable presentation unit derived from the Dealer projection. Cards are not the authoritative Codex record.
+- **Card pile:** Poker's ordered card history for one attached host-qualified thread.
+- **Thread work state:** Dealer's projection classifies a discovered or attached host-qualified thread as `BUSY` while its turn progresses, `ATTENTION_REQUIRED` while an active turn is blocked on the user, or `READY` when it can accept a new prompt. Host availability is separate.
 - **Control surface:** the client currently intended to accept human actions for a thread, usually local TUI, Dealer, or Poker-through-Dealer.
+- **Soft-control claim:** Dealer's per-thread, cooperative record that it is the intended human-control surface; it is not an app-server-enforced writer lease.
+- **Thread-management action:** A host-scoped action that changes a thread's identity or lifecycle, such as starting, forking, renaming, archiving, restoring, or deleting it. Dealer is the only Poker–Dealer surface that may initiate one; Poker only receives the resulting synchronized state.
+- **Thread attachment:** Dealer's managed set of host-qualified threads synchronized to Poker. Only Dealer may attach or detach a thread.
+- **Poker HUD visibility:** Poker's local visible or hidden presentation state. Hiding the HUD does not detach a thread, unsubscribe Dealer, or disconnect a host.
 
 ## Explicitly abandoned terminology
 
