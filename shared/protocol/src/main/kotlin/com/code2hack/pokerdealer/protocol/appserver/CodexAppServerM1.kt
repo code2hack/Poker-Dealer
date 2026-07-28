@@ -412,6 +412,21 @@ class CodexAppServerSession(
         return peer.receiveNotification()
     }
 
+    suspend fun receiveServerRequest(): AppServerRequest? {
+        checkInitialized()
+        return peer.receiveServerRequest()
+    }
+
+    suspend fun respond(request: AppServerRequest, result: JsonElement) {
+        checkInitialized()
+        peer.respond(request, result)
+    }
+
+    suspend fun reject(request: AppServerRequest, message: String) {
+        checkInitialized()
+        peer.reject(request, message)
+    }
+
     suspend fun close() {
         peer.close()
     }

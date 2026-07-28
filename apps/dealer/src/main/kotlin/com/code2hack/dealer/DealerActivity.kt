@@ -48,11 +48,15 @@ import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.CommandApprovalDecision
+import com.code2hack.pokerdealer.domain.CommandApprovalRequest
 import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.RequestResolutionState
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
@@ -119,6 +123,9 @@ class DealerActivity : ComponentActivity() {
                         onDraftChange = { locator, text -> service?.updateDraft(locator, text) },
                         onSubmit = { service?.submitDraft(it) },
                         onInterrupt = { service?.interrupt(it) },
+                        onCommandApproval = { locator, decision ->
+                            service?.resolveCommandApproval(locator, decision)
+                        },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
@@ -284,6 +291,7 @@ private fun DealerApp(
     onDraftChange: (CodexThreadLocator, String) -> Unit,
     onSubmit: (CodexThreadLocator) -> Unit,
     onInterrupt: (CodexThreadLocator) -> Unit,
+    onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
@@ -296,6 +304,7 @@ private fun DealerApp(
     var sshUser by remember { mutableStateOf("") }
     var threadId by remember { mutableStateOf("") }
     var confirmTailnetReset by remember { mutableStateOf(false) }
+    var confirmDisconnectHostId by remember { mutableStateOf<String?>(null) }
     val privateKeyPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(onPrivateKey)
     }
@@ -509,7 +518,15 @@ private fun DealerApp(
             }
             if (hostSession?.enabled == true) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { onDisableHost(selectedHostId) }) {
+                    Button(
+                        onClick = {
+                            if (state.commandApprovals.unresolved(selectedHostId).isEmpty()) {
+                                onDisableHost(selectedHostId)
+                            } else {
+                                confirmDisconnectHostId = selectedHostId
+                            }
+                        },
+                    ) {
                         Text("Disconnect host")
                     }
                     OutlinedButton(
@@ -726,7 +743,43 @@ private fun DealerApp(
                     it.conversationId == "${browsed.hostId}/${browsed.threadId}"
                 } ?: (it.conversationId.substringBefore('/') == selectedHostId)
             },
+            state.commandApprovals.requests.values.filter {
+                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
+                    it.thread == browsed
+                } ?: (it.thread.hostId == selectedHostId)
+            },
+            onCommandApproval,
             Modifier.weight(1f),
+        )
+    }
+    confirmDisconnectHostId?.let { hostId ->
+        val affected = state.commandApprovals.unresolved(hostId)
+        AlertDialog(
+            onDismissRequest = { confirmDisconnectHostId = null },
+            title = { Text("Disconnect $hostId?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Dealer will cancel each request at most once where supported, wait briefly, then disconnect.")
+                    affected.forEach { request ->
+                        Text(request.disconnectScope(), fontFamily = FontFamily.Monospace)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmDisconnectHostId = null
+                        onDisableHost(hostId)
+                    },
+                ) {
+                    Text("Cancel requests and disconnect")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { confirmDisconnectHostId = null }) {
+                    Text("Keep connected")
+                }
+            },
         )
     }
     if (confirmTailnetReset) {
@@ -837,7 +890,12 @@ internal fun DealerUiState.hasUnsettledAction(locator: CodexThreadLocator): Bool
 }
 
 @Composable
-private fun DealerCards(cards: List<Card>, modifier: Modifier = Modifier) {
+private fun DealerCards(
+    cards: List<Card>,
+    approvals: List<CommandApprovalRequest>,
+    onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     LazyColumn(modifier = modifier.fillMaxWidth()) {
         items(cards, key = Card::id) { card ->
             var expanded by remember(card.id) { mutableStateOf(false) }
@@ -911,5 +969,90 @@ private fun DealerCards(cards: List<Card>, modifier: Modifier = Modifier) {
             }
             HorizontalDivider()
         }
+        items(approvals, key = { "approval:${it.locator}" }) { request ->
+            CommandApprovalCard(request, onCommandApproval)
+            HorizontalDivider()
+        }
+    }
+}
+
+@Composable
+private fun CommandApprovalCard(
+    request: CommandApprovalRequest,
+    onDecision: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            "COMMAND APPROVAL | ${request.resolution}",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF56616D),
+        )
+        request.scope.command?.let {
+            Text(it, fontFamily = FontFamily.Monospace)
+        }
+        request.scope.workingDirectory?.let {
+            Text("cwd: $it", fontFamily = FontFamily.Monospace)
+        }
+        if (request.scope.networkHost != null && request.scope.networkProtocol != null) {
+            Text(
+                "network: ${request.scope.networkProtocol}://${request.scope.networkHost}",
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+        request.proposedExecpolicyAmendment?.let { amendment ->
+            Text("Proposed execpolicy amendment (exact tokens):")
+            amendment.forEachIndexed { index, token ->
+                Text("[$index] $token", fontFamily = FontFamily.Monospace)
+            }
+        }
+        Text(
+            "turn ${request.turnId} | item ${request.itemId}" +
+                request.approvalId?.let { " | approval $it" }.orEmpty(),
+            style = MaterialTheme.typography.labelSmall,
+        )
+        when (request.resolution) {
+            RequestResolutionState.PENDING -> request.offeredDecisions.forEach { decision ->
+                OutlinedButton(onClick = { onDecision(request.locator, decision) }) {
+                    Text(decision.label())
+                }
+            }
+            RequestResolutionState.RESPONDING ->
+                Text("Sending decision; controls are locked.")
+            RequestResolutionState.UNKNOWN ->
+                Text(
+                    "Decision acceptance is unknown; Dealer will not replay it.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            RequestResolutionState.RESOLVED ->
+                Text(
+                    if (request.resolvedElsewhere) {
+                        "Resolved elsewhere"
+                    } else {
+                        "Resolved: ${request.decision?.label() ?: "decision unavailable"}"
+                    },
+                )
+        }
+    }
+}
+
+private fun CommandApprovalDecision.label(): String = when (this) {
+    CommandApprovalDecision.ACCEPT -> "Accept once"
+    CommandApprovalDecision.ACCEPT_FOR_SESSION -> "Accept for session"
+    CommandApprovalDecision.ACCEPT_WITH_EXECPOLICY_AMENDMENT -> "Accept exact execpolicy amendment"
+    CommandApprovalDecision.DECLINE -> "Decline"
+    CommandApprovalDecision.CANCEL -> "Cancel turn"
+}
+
+private fun CommandApprovalRequest.disconnectScope(): String = buildString {
+    append(thread.threadId).append(": ")
+    append(scope.command ?: "network request")
+    scope.workingDirectory?.let { append(" | cwd ").append(it) }
+    if (scope.networkHost != null && scope.networkProtocol != null) {
+        append(" | ").append(scope.networkProtocol).append("://").append(scope.networkHost)
     }
 }

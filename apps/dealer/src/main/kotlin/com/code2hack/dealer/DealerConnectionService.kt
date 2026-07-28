@@ -17,6 +17,9 @@ import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.CommandApprovalDecision
+import com.code2hack.pokerdealer.domain.CommandApprovalRequest
+import com.code2hack.pokerdealer.domain.CommandApprovalState
 import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
@@ -27,6 +30,8 @@ import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.domain.ThreadActionState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.domain.RequestResolutionState
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
@@ -42,6 +47,9 @@ import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
 import com.code2hack.pokerdealer.protocol.appserver.AppServerStructuredCardProjection
+import com.code2hack.pokerdealer.protocol.appserver.AppServerRequest
+import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalParseResult
+import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalProtocol
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
 import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
@@ -96,6 +104,9 @@ class DealerConnectionService : Service() {
     private val attachmentMutex = Mutex()
     private val draftMutex = Mutex()
     private val notificationJobs = mutableMapOf<String, Job>()
+    private val requestJobs = mutableMapOf<String, Job>()
+    private val hostGenerations = mutableMapOf<String, Long>()
+    private val wireCommandApprovals = mutableMapOf<ServerRequestLocator, AppServerRequest>()
     private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
     private var connectedHostIds = emptySet<String>()
 
@@ -162,9 +173,22 @@ class DealerConnectionService : Service() {
                 }.keys
                 (connectedHostIds - connected).forEach { hostId ->
                     notificationJobs.remove(hostId)?.cancel()
+                    requestJobs.remove(hostId)?.cancel()
+                    val generation = hostGenerations[hostId] ?: 0
+                    wireCommandApprovals.keys.removeAll {
+                        it.hostId == hostId && it.appServerGeneration == generation
+                    }
+                    mutableState.update {
+                        it.withCommandApprovals(
+                            it.commandApprovals.connectionLost(hostId, generation),
+                        )
+                    }
                 }
                 (connected - connectedHostIds).forEach { hostId ->
-                    observeNotifications(hostId)
+                    val generation = hostGenerations.getOrDefault(hostId, 0) + 1
+                    hostGenerations[hostId] = generation
+                    observeNotifications(hostId, generation)
+                    observeServerRequests(hostId, generation)
                     restoreAttachments(hostId)
                 }
                 connectedHostIds = connected
@@ -360,6 +384,7 @@ class DealerConnectionService : Service() {
 
     fun disableHost(hostId: String) {
         scope.launch {
+            settleApprovalsForDisconnect(hostId)
             hostSessions.setEnabled(hostId, false)
             synchronized(hostSessionConfigs) {
                 hostSessionConfigs.remove(hostId)
@@ -380,6 +405,59 @@ class DealerConnectionService : Service() {
                     },
                 )
             }
+        }
+    }
+
+    private suspend fun settleApprovalsForDisconnect(hostId: String) {
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        val generation = hostGenerations[hostId] ?: return
+        val current = mutableState.value.commandApprovals.unresolved(hostId)
+            .filter { it.locator.appServerGeneration == generation }
+        val interruptedTurns = mutableSetOf<String>()
+        current.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
+            if (CommandApprovalDecision.CANCEL in request.offeredDecisions) {
+                mutableState.update {
+                    it.withCommandApprovals(
+                        it.commandApprovals.begin(request.locator, CommandApprovalDecision.CANCEL),
+                    )
+                }
+                val wire = wireCommandApprovals[request.locator]
+                if (wire == null) {
+                    mutableState.update {
+                        it.withCommandApprovals(it.commandApprovals.unknown(request.locator))
+                    }
+                } else {
+                    runCatching {
+                        appServer.respond(
+                            wire,
+                            CommandApprovalProtocol.response(request, CommandApprovalDecision.CANCEL),
+                        )
+                    }.onFailure {
+                        mutableState.update { state ->
+                            state.withCommandApprovals(
+                                state.commandApprovals.unknown(request.locator),
+                            )
+                        }
+                    }
+                }
+            } else if (interruptedTurns.add(request.turnId)) {
+                mutableState.update {
+                    it.withCommandApprovals(it.commandApprovals.unknown(request.locator))
+                }
+                runCatching { appServer.turnInterrupt(request.thread.threadId, request.turnId) }
+            }
+        }
+        if (current.any { it.resolution in DISCONNECT_WAIT_STATES }) {
+            delay(DISCONNECT_RESOLUTION_WAIT_MILLIS)
+        }
+        mutableState.update { state ->
+            var approvals = state.commandApprovals
+            current.forEach { request ->
+                if (approvals.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
+                    approvals = approvals.unknown(request.locator)
+                }
+            }
+            state.withCommandApprovals(approvals)
         }
     }
 
@@ -766,12 +844,105 @@ class DealerConnectionService : Service() {
         }
     }
 
-    private fun observeNotifications(hostId: String) {
+    private fun observeServerRequests(hostId: String, generation: Long) {
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        requestJobs.remove(hostId)?.cancel()
+        requestJobs[hostId] = scope.launch {
+            while (true) {
+                val wire = appServer.receiveServerRequest() ?: return@launch
+                when (val parsed = CommandApprovalProtocol.parse(hostId, generation, wire)) {
+                    is CommandApprovalParseResult.Accepted -> {
+                        try {
+                            mutableState.update {
+                                it.withCommandApprovals(
+                                    it.commandApprovals.receive(
+                                        parsed.request,
+                                        sameIdReissueQualified = false,
+                                    ),
+                                )
+                            }
+                            wireCommandApprovals[parsed.request.locator] = wire
+                        } catch (failure: IllegalArgumentException) {
+                            appServer.reject(wire, failure.message ?: "Command approval identity conflict")
+                        }
+                    }
+                    is CommandApprovalParseResult.Rejected ->
+                        appServer.reject(wire, parsed.reason)
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    fun resolveCommandApproval(
+        locator: ServerRequestLocator,
+        decision: CommandApprovalDecision,
+    ) {
+        val state = mutableState.value
+        val request = state.commandApprovals.requests[locator] ?: return
+        if (!state.threadAttachments.hasDealerClaim(request.thread)) {
+            mutableState.update { it.copy(error = "Take control before resolving this request") }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
+        val wire = wireCommandApprovals[locator]
+        if (appServer == null || hostGenerations[locator.hostId] != locator.appServerGeneration || wire == null) {
+            mutableState.update {
+                it.withCommandApprovals(it.commandApprovals.unknown(locator))
+                    .copy(error = "Command approval is no longer connected; no response was replayed")
+            }
+            return
+        }
+        val responding = try {
+            state.commandApprovals.begin(locator, decision)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        if (responding == state.commandApprovals) return
+        mutableState.update { it.withCommandApprovals(responding).copy(error = null) }
+        scope.launch {
+            try {
+                appServer.respond(wire, CommandApprovalProtocol.response(request, decision))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withCommandApprovals(it.commandApprovals.unknown(locator))
+                        .copy(
+                            error = "${failure.message ?: failure::class.java.simpleName}; " +
+                                "approval response was not replayed",
+                        )
+                }
+            }
+        }
+    }
+
+    private fun observeNotifications(hostId: String, generation: Long) {
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
         notificationJobs.remove(hostId)?.cancel()
         notificationJobs[hostId] = scope.launch {
             while (true) {
                 val notification = appServer.receiveNotification() ?: return@launch
+                val resolved = CommandApprovalProtocol.resolved(notification)
+                if (resolved != null) {
+                    wireCommandApprovals.keys.removeAll {
+                        it.hostId == hostId &&
+                            it.appServerGeneration == generation &&
+                            it.requestId == resolved.requestId
+                    }
+                    mutableState.update {
+                        it.withCommandApprovals(
+                            it.commandApprovals.resolved(
+                                hostId,
+                                generation,
+                                resolved.requestId,
+                                resolved.threadId,
+                            ),
+                        )
+                    }
+                    continue
+                }
                 val params = notification.params as? JsonObject ?: continue
                 val turn = params["turn"] as? JsonObject
                 val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull
@@ -817,7 +988,10 @@ class DealerConnectionService : Service() {
                     "turn/completed" -> {
                         turnId?.let { dealerOriginatedTurns.remove(locator to it) }
                         mutableState.update { state ->
-                            state.copy(
+                            state.withCommandApprovals(
+                                turnId?.let { state.commandApprovals.turnSettled(locator, it) }
+                                    ?: state.commandApprovals,
+                            ).copy(
                                 threadActions = state.threadActions.reconcileInterrupt(locator, null),
                                 threads = state.threads[locator]?.let { row ->
                                     state.threads + (
@@ -919,7 +1093,11 @@ class DealerConnectionService : Service() {
                                         ThreadWorkState.READY -> "idle"
                                         null -> row.status
                                     },
-                                    workState = authoritative.workState,
+                                    workState = if (locator in state.knownBlockingRequestThreads) {
+                                        ThreadWorkState.ATTENTION_REQUIRED
+                                    } else {
+                                        authoritative.workState
+                                    },
                                     activeTurnId = authoritative.activeTurnId,
                                 )
                             )
@@ -1287,6 +1465,11 @@ class DealerConnectionService : Service() {
         const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
         const val TAILNET_STATUS_INTERVAL_MILLIS = 1_000L
         const val INCOMPLETE_CARD_REREAD_DELAY_MILLIS = 500L
+        const val DISCONNECT_RESOLUTION_WAIT_MILLIS = 1_000L
+        val DISCONNECT_WAIT_STATES = setOf(
+            RequestResolutionState.PENDING,
+            RequestResolutionState.RESPONDING,
+        )
         val STRUCTURED_CARD_NOTIFICATIONS = setOf(
             "item/started",
             "item/completed",
@@ -1307,6 +1490,27 @@ private data class RetainedCards(
     val cards: List<Card>,
     val error: String? = null,
 )
+
+private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState): DealerUiState {
+    val blocking = approvals.unresolvedThreads()
+    return copy(
+        commandApprovals = approvals,
+        knownBlockingRequestThreads = blocking,
+        threads = threads.mapValues { (locator, thread) ->
+            when {
+                locator in blocking -> thread.copy(workState = ThreadWorkState.ATTENTION_REQUIRED)
+                locator in knownBlockingRequestThreads -> thread.copy(
+                    workState = if (thread.activeTurnId == null) {
+                        ThreadWorkState.READY
+                    } else {
+                        ThreadWorkState.BUSY
+                    },
+                )
+                else -> thread
+            }
+        },
+    )
+}
 
 private fun Card.reviewMaterialPresent(): Boolean = when (source) {
     CardSource.CODEX_COMMAND -> command != null && workingDirectory != null && status != null
@@ -1343,6 +1547,7 @@ data class DealerUiState(
     val recovery: DealerRecoveryUiState? = null,
     val threadAttachments: ThreadAttachmentState = ThreadAttachmentState(),
     val threadActions: ThreadActionState = ThreadActionState(),
+    val commandApprovals: CommandApprovalState = CommandApprovalState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),

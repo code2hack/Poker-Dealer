@@ -1,0 +1,12 @@
+{
+  "id": "approval-incomplete",
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "item-incomplete",
+    "command": null,
+    "cwd": "/work/repo",
+    "startedAtMs": 1005
+  }
+}
