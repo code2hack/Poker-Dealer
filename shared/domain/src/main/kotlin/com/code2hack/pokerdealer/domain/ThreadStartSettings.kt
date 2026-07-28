@@ -44,6 +44,10 @@ data class ThreadStartCatalog(
     val workingDirectory: String,
     val defaultProviderId: String? = null,
     val defaultModel: String? = null,
+    val defaultReasoningEffort: String? = null,
+    val defaultSandbox: String? = null,
+    val defaultApprovalPolicy: String? = null,
+    val defaultApprovalsReviewer: String? = null,
     val providers: List<ModelProviderOption> = emptyList(),
     val models: List<ModelOption> = emptyList(),
     val requirements: PermissionRequirements = PermissionRequirements(),
@@ -56,6 +60,11 @@ data class ThreadStartSelection(
     val reasoningEffort: String? = null,
     val permissionPreset: PermissionPreset = PermissionPreset.HOST_DEFAULT,
 ) {
+    fun hasControlOverrides(): Boolean =
+        providerOverride?.isNotBlank() == true ||
+            modelOverride?.isNotBlank() == true ||
+            permissionPreset != PermissionPreset.HOST_DEFAULT
+
     fun validated(catalog: ThreadStartCatalog): ThreadStartSelection {
         require(workingDirectory.startsWith('/') && '\u0000' !in workingDirectory) {
             "Working directory must be an absolute host path"

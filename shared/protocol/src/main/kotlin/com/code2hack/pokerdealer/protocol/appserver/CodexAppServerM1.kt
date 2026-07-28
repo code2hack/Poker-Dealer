@@ -231,12 +231,24 @@ class CodexAppServerSession(
         }
     }
 
-    suspend fun threadResume(threadId: String): JsonObject {
+    suspend fun threadResume(
+        threadId: String,
+        selection: ThreadStartSelection? = null,
+    ): JsonObject {
         checkInitialized()
-        return request(
+        val response = request(
             "thread/resume",
-            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
+            threadSettingsParams(selection, threadId),
         ).jsonObject
+        selection?.let {
+            try {
+                verifyThreadSettings(response, it, "thread/resume")
+            } catch (failure: IllegalArgumentException) {
+                runCatching { threadUnsubscribe(threadId) }
+                throw failure
+            }
+        }
+        return response
     }
 
     suspend fun threadUnsubscribe(threadId: String): JsonObject {
@@ -283,40 +295,57 @@ class CodexAppServerSession(
         checkInitialized()
         val response = actionRequest(
             "thread/start",
-            buildJsonObject {
-                put("cwd", JsonPrimitive(selection.workingDirectory))
-                selection.providerOverride?.let { put("modelProvider", JsonPrimitive(it)) }
-                selection.modelOverride?.let { put("model", JsonPrimitive(it)) }
-                selection.permissionPreset.sandbox?.let { put("sandbox", JsonPrimitive(it)) }
-                selection.permissionPreset.approvalPolicy?.let {
-                    put("approvalPolicy", JsonPrimitive(it))
-                }
-                selection.permissionPreset.approvalsReviewer?.let {
-                    put("approvalsReviewer", JsonPrimitive(it))
-                }
-            },
+            threadSettingsParams(selection),
         ).jsonObject
+        verifyThreadSettings(response, selection, "thread/start")
+        return response
+    }
+
+    private fun threadSettingsParams(
+        selection: ThreadStartSelection?,
+        threadId: String? = null,
+    ): JsonObject = buildJsonObject {
+        threadId?.let { put("threadId", JsonPrimitive(it)) }
+        selection?.let {
+            put("cwd", JsonPrimitive(it.workingDirectory))
+            it.providerOverride?.let { value -> put("modelProvider", JsonPrimitive(value)) }
+            it.modelOverride?.let { value -> put("model", JsonPrimitive(value)) }
+            it.permissionPreset.sandbox?.let { value -> put("sandbox", JsonPrimitive(value)) }
+            it.permissionPreset.approvalPolicy?.let { value ->
+                put("approvalPolicy", JsonPrimitive(value))
+            }
+            it.permissionPreset.approvalsReviewer?.let { value ->
+                put("approvalsReviewer", JsonPrimitive(value))
+            }
+        }
+    }
+
+    private fun verifyThreadSettings(
+        response: JsonObject,
+        selection: ThreadStartSelection,
+        method: String,
+    ) {
         require(response.string("cwd") == selection.workingDirectory) {
-            "thread/start did not apply the selected working directory"
+            "$method did not apply the selected working directory"
         }
         selection.providerOverride?.let {
             require(response.string("modelProvider") == it) {
-                "thread/start did not apply the selected provider"
+                "$method did not apply the selected provider"
             }
         }
         selection.modelOverride?.let {
             require(response.string("model") == it) {
-                "thread/start did not apply the selected model"
+                "$method did not apply the selected model"
             }
         }
         selection.permissionPreset.approvalPolicy?.let {
             require(response.string("approvalPolicy") == it) {
-                "thread/start did not apply the selected approval policy"
+                "$method did not apply the selected approval policy"
             }
         }
         selection.permissionPreset.approvalsReviewer?.let {
             require(response.string("approvalsReviewer") == it) {
-                "thread/start did not apply the selected approvals reviewer"
+                "$method did not apply the selected approvals reviewer"
             }
         }
         selection.permissionPreset.sandbox?.let { expected ->
@@ -327,10 +356,9 @@ class CodexAppServerSession(
                 else -> null
             }
             require(actual == expected || actual == expected.toCamelCase()) {
-                "thread/start did not apply the selected sandbox"
+                "$method did not apply the selected sandbox"
             }
         }
-        return response
     }
 
     suspend fun turnStart(

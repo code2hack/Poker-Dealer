@@ -53,7 +53,9 @@ import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.PermissionPreset
+import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
@@ -116,6 +118,13 @@ class DealerActivity : ComponentActivity() {
                         onReviewNewThread = { hostId, cwd -> service?.reviewNewThread(hostId, cwd) },
                         onCreateThread = { service?.createThread(it) },
                         onDismissNewThread = { service?.dismissNewThread() },
+                        onReviewResumeThread = { locator, cwd ->
+                            service?.reviewResumeThread(locator, cwd)
+                        },
+                        onResumeThread = { selection, takeControl ->
+                            service?.resumeThread(selection, takeControl)
+                        },
+                        onDismissResumeThread = { service?.dismissResumeThread() },
                         onBrowseThread = { service?.browseThread(it) },
                         onAttachThread = { service?.attachThread(it) },
                         onDetachThread = { service?.detachThread(it) },
@@ -285,6 +294,9 @@ private fun DealerApp(
     onReviewNewThread: (String, String) -> Unit,
     onCreateThread: (ThreadStartSelection) -> Unit,
     onDismissNewThread: () -> Unit,
+    onReviewResumeThread: (CodexThreadLocator, String) -> Unit,
+    onResumeThread: (ThreadStartSelection, Boolean) -> Unit,
+    onDismissResumeThread: () -> Unit,
     onBrowseThread: (CodexThreadLocator) -> Unit,
     onAttachThread: (CodexThreadLocator) -> Unit,
     onDetachThread: (CodexThreadLocator) -> Unit,
@@ -769,30 +781,68 @@ private fun DealerApp(
         )
     }
     state.newThread?.let { review ->
-        NewThreadDialog(
-            review = review,
-            onReview = onReviewNewThread,
-            onCreate = onCreateThread,
+        ThreadSettingsDialog(
+            hostId = review.hostId,
+            observedWorkingDirectories = review.observedWorkingDirectories,
+            initialWorkingDirectory = review.workingDirectory,
+            catalog = review.catalog,
+            loading = review.loading,
+            submitting = review.creating,
+            error = review.error,
+            title = "New thread on ${review.hostId}",
+            confirmText = "Create empty thread",
+            onReview = { onReviewNewThread(review.hostId, it) },
+            onConfirm = { selection, _ -> onCreateThread(selection) },
             onDismiss = onDismissNewThread,
+        )
+    }
+    state.resumeThread?.let { review ->
+        ThreadSettingsDialog(
+            hostId = review.locator.hostId,
+            observedWorkingDirectories = review.observedWorkingDirectories,
+            initialWorkingDirectory = review.workingDirectory,
+            catalog = review.catalog,
+            loading = review.loading,
+            submitting = review.resuming,
+            error = review.error,
+            title = "Resume ${review.locator.threadId}",
+            confirmText = "Attach",
+            workState = state.threads[review.locator]?.workState,
+            requireControlClaimForOverrides = true,
+            onReview = { onReviewResumeThread(review.locator, it) },
+            onConfirm = onResumeThread,
+            onDismiss = onDismissResumeThread,
         )
     }
 }
 
 @Composable
-private fun NewThreadDialog(
-    review: NewThreadUiState,
-    onReview: (String, String) -> Unit,
-    onCreate: (ThreadStartSelection) -> Unit,
+private fun ThreadSettingsDialog(
+    hostId: String,
+    observedWorkingDirectories: List<String>,
+    initialWorkingDirectory: String,
+    catalog: ThreadStartCatalog?,
+    loading: Boolean,
+    submitting: Boolean,
+    error: String?,
+    title: String,
+    confirmText: String,
+    workState: ThreadWorkState? = null,
+    requireControlClaimForOverrides: Boolean = false,
+    onReview: (String) -> Unit,
+    onConfirm: (ThreadStartSelection, Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var workingDirectory by remember(review.hostId, review.workingDirectory) {
-        mutableStateOf(review.workingDirectory)
+    var workingDirectory by remember(hostId, initialWorkingDirectory) {
+        mutableStateOf(initialWorkingDirectory)
     }
-    var providerOverride by remember(review.catalog) { mutableStateOf("") }
-    var modelOverride by remember(review.catalog) { mutableStateOf("") }
-    var reasoningEffort by remember(review.catalog) { mutableStateOf<String?>(null) }
-    var permissionPreset by remember(review.catalog) { mutableStateOf(PermissionPreset.HOST_DEFAULT) }
-    val catalog = review.catalog
+    var providerOverride by remember(catalog) { mutableStateOf("") }
+    var modelOverride by remember(catalog) { mutableStateOf("") }
+    var reasoningEffort by remember(catalog) { mutableStateOf<String?>(null) }
+    var permissionPreset by remember(catalog) { mutableStateOf(PermissionPreset.HOST_DEFAULT) }
+    var takeControl by remember(catalog) { mutableStateOf(false) }
+    val controlOverridesEnabled = !requireControlClaimForOverrides ||
+        (workState == ThreadWorkState.READY && takeControl)
     val selectedModel = modelOverride.ifBlank { catalog?.defaultModel.orEmpty() }
     val reasoningChoices = catalog?.models
         ?.singleOrNull { it.model == selectedModel }
@@ -801,17 +851,17 @@ private fun NewThreadDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New thread on ${review.hostId}") },
+        title = { Text(title) },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text("Working directory")
-                review.observedWorkingDirectories.forEach { path ->
+                observedWorkingDirectories.forEach { path ->
                     OutlinedButton(
                         onClick = { workingDirectory = path },
-                        enabled = !review.loading && !review.creating,
+                        enabled = !loading && !submitting,
                     ) {
                         Text(path, fontFamily = FontFamily.Monospace)
                     }
@@ -821,22 +871,47 @@ private fun NewThreadDialog(
                     onValueChange = { workingDirectory = it },
                     label = { Text("Absolute host path") },
                     singleLine = true,
-                    enabled = !review.loading && !review.creating,
+                    enabled = !loading && !submitting,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (catalog == null || catalog.workingDirectory != workingDirectory) {
                     Button(
-                        onClick = { onReview(review.hostId, workingDirectory) },
-                        enabled = !review.loading && !review.creating,
+                        onClick = { onReview(workingDirectory) },
+                        enabled = !loading && !submitting,
                     ) {
-                        Text(if (review.loading) "Loading…" else "Review host settings")
+                        Text(if (loading) "Loading…" else "Review host settings")
                     }
                 } else {
+                    if (requireControlClaimForOverrides) {
+                        OutlinedButton(
+                            onClick = {
+                                takeControl = !takeControl
+                                if (!takeControl) {
+                                    providerOverride = ""
+                                    modelOverride = ""
+                                    permissionPreset = PermissionPreset.HOST_DEFAULT
+                                }
+                            },
+                            enabled = workState == ThreadWorkState.READY &&
+                                !submitting,
+                        ) {
+                            Text(
+                                if (takeControl) {
+                                    "Dealer control selected"
+                                } else {
+                                    "Take Dealer control for overrides"
+                                },
+                            )
+                        }
+                        if (workState != ThreadWorkState.READY) {
+                            Text("Provider, model, and permission overrides are read-only until READY.")
+                        }
+                    }
                     Text("Provider: inherit ${catalog.defaultProviderId ?: "host default"}")
                     catalog.providers.forEach { provider ->
                         OutlinedButton(
                             onClick = { providerOverride = provider.id },
-                            enabled = !review.creating,
+                            enabled = !submitting && controlOverridesEnabled,
                         ) {
                             Text("${provider.label} (${provider.id})")
                         }
@@ -846,7 +921,7 @@ private fun NewThreadDialog(
                         onValueChange = { providerOverride = it },
                         label = { Text("Provider ID (blank inherits)") },
                         singleLine = true,
-                        enabled = !review.creating,
+                        enabled = !submitting && controlOverridesEnabled,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text("Model: inherit ${catalog.defaultModel ?: "host default"}")
@@ -860,7 +935,7 @@ private fun NewThreadDialog(
                                 modelOverride = model.model
                                 reasoningEffort = null
                             },
-                            enabled = !review.creating,
+                            enabled = !submitting && controlOverridesEnabled,
                         ) {
                             Text("${model.displayName} (${model.model})")
                         }
@@ -873,34 +948,45 @@ private fun NewThreadDialog(
                         },
                         label = { Text("Model wire value (blank inherits)") },
                         singleLine = true,
-                        enabled = !review.creating,
+                        enabled = !submitting && controlOverridesEnabled,
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    Text(
+                        "Reasoning effort: ${reasoningEffort ?: "inherit " +
+                            (catalog.defaultReasoningEffort ?: "host default")}",
+                    )
                     if (reasoningChoices.isNotEmpty()) {
-                        Text("Reasoning effort: ${reasoningEffort ?: "inherit"}")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
                                 onClick = { reasoningEffort = null },
-                                enabled = !review.creating,
+                                enabled = !submitting,
                             ) {
                                 Text("Inherit")
                             }
                             reasoningChoices.forEach { effort ->
                                 OutlinedButton(
                                     onClick = { reasoningEffort = effort },
-                                    enabled = !review.creating,
+                                    enabled = !submitting,
                                 ) {
                                     Text(effort)
                                 }
                             }
                         }
                     }
-                    Text("Permissions")
+                    Text(
+                        "Permissions: inherit " + listOfNotNull(
+                            catalog.defaultSandbox,
+                            catalog.defaultApprovalPolicy,
+                            catalog.defaultApprovalsReviewer,
+                        ).joinToString(" / ").ifEmpty { "host default" },
+                    )
                     PermissionPreset.entries.forEach { preset ->
                         val unavailable = preset.unavailableReason(catalog.requirements)
                         OutlinedButton(
                             onClick = { permissionPreset = preset },
-                            enabled = !review.creating && unavailable == null,
+                            enabled = !submitting &&
+                                unavailable == null &&
+                                (preset == PermissionPreset.HOST_DEFAULT || controlOverridesEnabled),
                         ) {
                             Text(
                                 buildString {
@@ -912,7 +998,7 @@ private fun NewThreadDialog(
                         }
                     }
                 }
-                review.error?.let {
+                error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
                 }
             }
@@ -920,7 +1006,7 @@ private fun NewThreadDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    onCreate(
+                    onConfirm(
                         ThreadStartSelection(
                             workingDirectory = workingDirectory,
                             providerOverride = providerOverride,
@@ -928,17 +1014,18 @@ private fun NewThreadDialog(
                             reasoningEffort = reasoningEffort,
                             permissionPreset = permissionPreset,
                         ),
+                        takeControl,
                     )
                 },
                 enabled = catalog?.workingDirectory == workingDirectory &&
-                    !review.loading &&
-                    !review.creating,
+                    !loading &&
+                    !submitting,
             ) {
-                Text(if (review.creating) "Creating…" else "Create empty thread")
+                Text(if (submitting) "Working…" else confirmText)
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onDismiss, enabled = !review.creating) {
+            OutlinedButton(onClick = onDismiss, enabled = !submitting) {
                 Text("Cancel")
             }
         },
