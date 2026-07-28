@@ -3,6 +3,7 @@ package com.code2hack.pokerdealer.protocol.appserver
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DiscoveredThread
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -43,6 +44,7 @@ class HostThreadDiscovery(
                 val threadId = thread.string("id") ?: return@forEach
                 val locator = CodexThreadLocator(hostId, threadId)
                 val local = localState(locator)
+                val status = thread.status()
                 add(
                     DiscoveredThread(
                         locator = locator,
@@ -50,9 +52,14 @@ class HostThreadDiscovery(
                         preview = thread.string("preview"),
                         workingDirectory = thread.string("cwd"),
                         updatedAtSeconds = thread.long("updatedAt"),
-                        status = thread.status(),
+                        status = status,
                         archived = archived,
                         loaded = threadId in loaded,
+                        workState = when (status) {
+                            "active" -> ThreadWorkState.BUSY
+                            "idle" -> ThreadWorkState.READY
+                            else -> null
+                        },
                         attached = local.attached,
                         unreadCount = local.unreadCount,
                         intendedControlSurface = local.intendedControlSurface,
