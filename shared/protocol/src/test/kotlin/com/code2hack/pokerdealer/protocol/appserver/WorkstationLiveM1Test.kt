@@ -4,6 +4,7 @@ import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
 import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
 import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
@@ -18,25 +19,27 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
-class U4090LiveM1Test {
+class WorkstationLiveM1Test {
     @Test
-    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_U4090", matches = "true")
-    fun `u4090 completes the live LAN app-server slice`() = runBlocking {
+    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_WORKSTATION", matches = "true")
+    fun `workstation completes the live LAN app-server slice`() = runBlocking {
+        val host = liveHost()
         val threadId = requireEnv("POKER_DEALER_LIVE_THREAD_ID")
         val privateKey = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_SSH_PRIVATE_KEY")))
         val knownHosts = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_KNOWN_HOSTS")))
         val rendered = linkedMapOf<String, Card>()
-        val clientId = "dealer-u4090-m1-${System.currentTimeMillis()}"
+        val clientId = "dealer-${host.id}-m2-${System.currentTimeMillis()}"
         val slice = M1OneHostDealerSlice(
+            host = host,
             dialer = SocketHostTcpDialer(
                 mapOf(
-                    ("u4090" to HostConnectionRoute.SSH_LAN) to
+                    (host.id to HostConnectionRoute.SSH_LAN) to
                         RouteEndpoint(requireEnv("POKER_DEALER_LIVE_LAN_HOST")),
                 ),
             ),
             sshClient = JschHostSshClient(
                 mapOf(
-                    "u4090" to SshHostAuthentication(
+                    host.id to SshHostAuthentication(
                         username = requireEnv("POKER_DEALER_LIVE_SSH_USER"),
                         privateKey = privateKey,
                         knownHosts = knownHosts,
@@ -58,7 +61,7 @@ class U4090LiveM1Test {
 
         assertEquals(HostConnectionRoute.SSH_LAN, result.route)
         assertEquals(HostConnectionRoute.SSH_LAN, result.reconnectRoute)
-        assertEquals("u4090/$threadId", result.conversationId)
+        assertEquals("${host.id}/$threadId", result.conversationId)
         assertTrue(result.historyCards.isNotEmpty())
         assertTrue(result.streamedCards.all { it.state == CardState.COMMITTED })
         assertTrue(result.streamedCards.isNotEmpty())
@@ -75,14 +78,16 @@ class U4090LiveM1Test {
     }
 
     @Test
-    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_U4090_INTERRUPT", matches = "true")
-    fun `u4090 reconciles one user message after a controlled post-accept disconnect`() = runBlocking {
+    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_WORKSTATION_INTERRUPT", matches = "true")
+    fun `workstation reconciles one user message after a controlled post-accept disconnect`() = runBlocking {
+        val host = liveHost()
         val threadId = requireEnv("POKER_DEALER_LIVE_THREAD_ID")
-        val clientId = "dealer-u4090-interrupt-${System.currentTimeMillis()}"
+        val clientId = "dealer-${host.id}-interrupt-${System.currentTimeMillis()}"
         val rendered = linkedMapOf<String, Card>()
         var connectionCount = 0
         val turnStartRequests = AtomicInteger()
         val slice = M1OneHostDealerSlice(
+            host = host,
             dialer = liveDialer(),
             sshClient = liveSshClient(),
             appServerFactory = { proxy ->
@@ -122,20 +127,24 @@ class U4090LiveM1Test {
 
     private fun liveDialer() = SocketHostTcpDialer(
         mapOf(
-            ("u4090" to HostConnectionRoute.SSH_LAN) to
+            (liveHost().id to HostConnectionRoute.SSH_LAN) to
                 RouteEndpoint(requireEnv("POKER_DEALER_LIVE_LAN_HOST")),
         ),
     )
 
     private fun liveSshClient() = JschHostSshClient(
         mapOf(
-            "u4090" to SshHostAuthentication(
+            liveHost().id to SshHostAuthentication(
                 username = requireEnv("POKER_DEALER_LIVE_SSH_USER"),
                 privateKey = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_SSH_PRIVATE_KEY"))),
                 knownHosts = Files.readAllBytes(Path.of(requireEnv("POKER_DEALER_LIVE_KNOWN_HOSTS"))),
             ),
         ),
     )
+
+    private fun liveHost() =
+        InitialCodexHosts.workstations.firstOrNull { it.id == requireEnv("POKER_DEALER_LIVE_HOST_ID") }
+            ?: error("POKER_DEALER_LIVE_HOST_ID must be spark or u4090")
 
     private fun requireEnv(name: String): String =
         System.getenv(name)?.takeIf(String::isNotBlank) ?: error("$name is required")

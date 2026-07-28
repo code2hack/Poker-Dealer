@@ -43,6 +43,27 @@ class CodexHostTest {
     }
 
     @Test
+    fun `initial workstation catalog supports both architectures through the same routes`() {
+        assertEquals(
+            mapOf(
+                "spark" to HostArchitecture.LINUX_ARM64,
+                "u4090" to HostArchitecture.LINUX_X86_64,
+            ),
+            InitialCodexHosts.workstations.associate { it.id to it.architecture },
+        )
+        InitialCodexHosts.workstations.forEach {
+            assertEquals(
+                listOf(
+                    HostConnectionRoute.SSH_LAN,
+                    HostConnectionRoute.SSH_EMBEDDED_TSNET,
+                    HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+                ),
+                it.connectionRoutes,
+            )
+        }
+    }
+
+    @Test
     fun `thread identity remains host qualified`() {
         val spark = CodexThreadLocator(hostId = "spark", threadId = "thr_same")
         val termux = CodexThreadLocator(hostId = "fold6-termux", threadId = "thr_same")

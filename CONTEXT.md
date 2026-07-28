@@ -69,6 +69,8 @@ M1 used trusted-LAN SSH to u4090 and introduced the route-neutral stream boundar
 
 For Fold6 development diagnostics, keep wireless ADB enabled and prefer it over USB ADB. USB remains a bootstrap/recovery fallback. ADB is diagnostic tooling only and is not a Dealer product transport.
 
+The same LAN app-server slice now passes against daemon-backed local-TUI threads on both Spark and u4090, and Dealer requires an explicit host-qualified soft control claim before sending; see `docs/evidence/workstations-m2-2026-07-28.md`. A Fold6 run retained a VPN-routed LAN failure, selected embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts ran Codex `0.145.0`, so live mixed-version behavior remains partial M2 evidence rather than M2 completion.
+
 ## Core identity
 
 A durable Poker–Dealer conversation reference is:

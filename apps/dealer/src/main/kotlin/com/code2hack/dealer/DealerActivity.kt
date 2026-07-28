@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -43,6 +45,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ControlSurface
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -95,6 +99,8 @@ class DealerActivity : ComponentActivity() {
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
                         onCancel = { service?.cancelRun() },
+                        onTakeControl = { hostId, threadId -> service?.takeControl(hostId, threadId) },
+                        onYieldControl = { hostId, threadId -> service?.yieldControl(hostId, threadId) },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
@@ -236,11 +242,14 @@ private fun DealerApp(
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
     onCancel: () -> Unit,
+    onTakeControl: (String, String) -> Unit,
+    onYieldControl: (String, String) -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
     onLoginTailnet: (String) -> Unit,
 ) {
+    var selectedHostId by remember(state.hostId) { mutableStateOf(state.hostId ?: "u4090") }
     var lanHost by remember { mutableStateOf("") }
     var tailnetHost by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
@@ -253,8 +262,15 @@ private fun DealerApp(
     val knownHostsPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(onKnownHosts)
     }
+    val locator = CodexThreadLocator(selectedHostId, threadId.trim())
+    val currentControlSurface = state.control
+        ?.takeIf { it.locator == locator }
+        ?.surface
+        ?: ControlSurface.NONE
+    val hasDealerControl = currentControlSurface == ControlSurface.DEALER
     val canRun = setup.serviceReady &&
         !state.running &&
+        hasDealerControl &&
         (lanHost.isNotBlank() || tailnetHost.isNotBlank()) &&
         sshUser.isNotBlank() &&
         threadId.isNotBlank() &&
@@ -270,7 +286,11 @@ private fun DealerApp(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Text("u4090", style = MaterialTheme.typography.headlineSmall, color = Color.White)
+            Text(
+                if (selectedHostId == "spark") "DGX Spark" else "u4090",
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color.White,
+            )
             Text(
                 "${state.status.label} | ${state.route ?: "no active route"}",
                 color = if (state.error == null && setup.error == null) Color(0xFF8EE7B2) else Color(0xFFFFA8A8),
@@ -350,9 +370,25 @@ private fun DealerApp(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { selectedHostId = "spark" },
+                    enabled = !state.running && selectedHostId != "spark",
+                ) {
+                    Text("DGX Spark")
+                }
+                OutlinedButton(
+                    onClick = { selectedHostId = "u4090" },
+                    enabled = !state.running && selectedHostId != "u4090",
+                ) {
+                    Text("u4090")
+                }
+            }
             OutlinedTextField(
                 value = lanHost,
                 onValueChange = { lanHost = it },
@@ -386,6 +422,27 @@ private fun DealerApp(
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (hasDealerControl) {
+                    OutlinedButton(
+                        onClick = { onYieldControl(locator.hostId, locator.threadId) },
+                        enabled = !state.running,
+                    ) {
+                        Text("Yield to local TUI")
+                    }
+                } else {
+                    Button(
+                        onClick = { onTakeControl(locator.hostId, locator.threadId) },
+                        enabled = !state.running && locator.threadId.isNotBlank(),
+                    ) {
+                        Text("Take control")
+                    }
+                }
+                Text(
+                    "Control: $currentControlSurface",
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { privateKeyPicker.launch(arrayOf("*/*")) },
                     enabled = !state.running,
@@ -415,6 +472,7 @@ private fun DealerApp(
                 Button(
                     onClick = {
                         val config = DealerRunConfig(
+                            hostId = selectedHostId,
                             lanHost = lanHost.trim(),
                             tailnetHost = tailnetHost.trim(),
                             sshUser = sshUser.trim(),

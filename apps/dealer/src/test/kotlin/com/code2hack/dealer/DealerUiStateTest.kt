@@ -1,6 +1,8 @@
 package com.code2hack.dealer
 
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.host.RouteCapability
 import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
@@ -95,5 +97,25 @@ class DealerUiStateTest {
         assertEquals(EmbeddedTailnetState.DEGRADED, connected.state)
         assertEquals("dealer-fold6", connected.nodeName)
         assertEquals("Degraded (DERP hkg)", connected.connectionLabel)
+    }
+
+    @Test
+    fun runRequiresDealerControlForTheExactHostQualifiedThread() {
+        val state = DealerUiState(
+            control = DealerControlState(
+                CodexThreadLocator("spark", "thread"),
+                ControlSurface.DEALER,
+            ),
+        )
+        val config = DealerRunConfig("spark", "", "spark", "user", "thread", "turn")
+
+        assertEquals(true, state.hasDealerControl(config))
+        assertEquals(false, state.hasDealerControl(config.copy(hostId = "u4090")))
+        assertEquals(false, state.hasDealerControl(config.copy(threadId = "other")))
+        assertEquals(
+            false,
+            state.copy(control = state.control?.copy(surface = ControlSurface.LOCAL_TUI))
+                .hasDealerControl(config),
+        )
     }
 }
