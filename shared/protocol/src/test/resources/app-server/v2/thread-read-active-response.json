@@ -1,0 +1,26 @@
+{
+  "id": 4,
+  "result": {
+    "thread": {
+      "id": "thr_u4090_m1",
+      "status": { "type": "active" },
+      "turns": [
+        {
+          "id": "turn_active",
+          "startedAt": 1784600400,
+          "status": "inProgress",
+          "items": [
+            {
+              "id": "item_user_steer",
+              "type": "userMessage",
+              "clientId": "dealer-steer-1",
+              "content": [
+                { "type": "text", "text": "Use the smaller fix" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

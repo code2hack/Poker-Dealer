@@ -8,6 +8,7 @@ import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
 import com.code2hack.pokerdealer.protocol.host.HostSshClient
@@ -281,6 +282,45 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun turnSteer(
+        threadId: String,
+        expectedTurnId: String,
+        text: String,
+        clientUserMessageId: String,
+    ): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "turn/steer",
+            buildJsonObject {
+                put("threadId", JsonPrimitive(threadId))
+                put("expectedTurnId", JsonPrimitive(expectedTurnId))
+                put("clientUserMessageId", JsonPrimitive(clientUserMessageId))
+                put(
+                    "input",
+                    buildJsonArray {
+                        add(
+                            buildJsonObject {
+                                put("type", JsonPrimitive("text"))
+                                put("text", JsonPrimitive(text))
+                            },
+                        )
+                    },
+                )
+            },
+        ).jsonObject
+    }
+
+    suspend fun turnInterrupt(threadId: String, turnId: String): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "turn/interrupt",
+            buildJsonObject {
+                put("threadId", JsonPrimitive(threadId))
+                put("turnId", JsonPrimitive(turnId))
+            },
+        ).jsonObject
+    }
+
     suspend fun streamAgentCards(
         threadId: String,
         turnId: String,
@@ -395,6 +435,14 @@ class CodexAppServerSession(
         } catch (failure: Throwable) {
             closeAfterFailure(failure)
         }
+    }
+
+    private suspend fun actionRequest(method: String, params: JsonElement): JsonElement = try {
+        request(method, params, closeOnFailure = false)
+    } catch (failure: JsonRpcRemoteException) {
+        throw failure
+    } catch (failure: Throwable) {
+        closeAfterFailure(failure)
     }
 
     private suspend fun closeAfterFailure(failure: Throwable): Nothing {
@@ -1115,6 +1163,11 @@ private suspend fun HostSshSession.closeSuppressing(failure: Throwable) {
 }
 
 object AppServerThreadProjection {
+    data class AuthoritativeState(
+        val workState: ThreadWorkState?,
+        val activeTurnId: String?,
+    )
+
     data class TurnProjection(
         val status: String?,
         val agentCards: List<Card>,
@@ -1132,7 +1185,9 @@ object AppServerThreadProjection {
                 val text = item?.projectedText(type) ?: itemElement.toString()
                 if (text.isBlank()) return@mapNotNull null
                 Card(
-                    id = item?.string("id") ?: "$conversationId-${sequence}",
+                    id = item?.string("clientId").takeIf { type == "userMessage" }
+                        ?: item?.string("id")
+                        ?: "$conversationId-${sequence}",
                     conversationId = conversationId,
                     sequence = sequence++,
                     revision = 1,
@@ -1141,10 +1196,33 @@ object AppServerThreadProjection {
                     fullText = text,
                     createdAtMs = createdAtMs,
                     updatedAtMs = createdAtMs,
+                    delivery = DeliveryState.DELIVERED.takeIf { type == "userMessage" },
                     source = sourceFor(type),
                 )
             }
         }
+    }
+
+    fun authoritativeState(threadReadResponse: JsonObject): AuthoritativeState {
+        val thread = threadReadResponse["thread"] as? JsonObject
+            ?: return AuthoritativeState(null, null)
+        val status = when (val value = thread["status"]) {
+            is JsonPrimitive -> value.contentOrNull
+            is JsonObject -> value.string("type")
+            else -> null
+        }
+        val activeTurnId = thread["turns"].orEmptyArray()
+            .mapNotNull { it as? JsonObject }
+            .lastOrNull { it.string("status") in ACTIVE_TURN_STATUSES }
+            ?.string("id")
+        return AuthoritativeState(
+            workState = when (status) {
+                "active" -> ThreadWorkState.BUSY
+                "idle" -> ThreadWorkState.READY
+                else -> null
+            },
+            activeTurnId = activeTurnId,
+        )
     }
 
     fun countUserClientId(threadReadResponse: JsonObject, clientUserMessageId: String): Int {
@@ -1228,6 +1306,8 @@ object AppServerThreadProjection {
         "fileChange" -> CardSource.CODEX_FILE_CHANGE
         else -> CardSource.SYSTEM
     }
+
+    private val ACTIVE_TURN_STATUSES = setOf("inProgress", "running")
 }
 
 private fun JsonObject.string(name: String): String? = (this[name] as? JsonPrimitive)?.contentOrNull

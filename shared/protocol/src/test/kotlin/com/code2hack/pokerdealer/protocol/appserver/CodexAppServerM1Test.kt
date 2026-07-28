@@ -4,6 +4,7 @@ import com.code2hack.pokerdealer.domain.CardRole
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.ConnectionPhaseTimeoutException
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
@@ -23,11 +24,52 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class CodexAppServerM1Test {
+    @Test
+    fun `steer carries the exact active turn precondition and interrupt stays bound to it`() = runTest {
+        val peer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("turn-steer-request.json", "turn-steer-response.json"),
+                fixture("turn-interrupt-request.json", "turn-interrupt-response.json"),
+            ),
+        )
+        val session = CodexAppServerSession(peer)
+        session.initialize()
+
+        assertEquals(
+            "turn_active",
+            session.turnSteer(
+                threadId = "thr_u4090_m1",
+                expectedTurnId = "turn_active",
+                text = "Use the smaller fix",
+                clientUserMessageId = "dealer-steer-1",
+            )["turnId"]?.jsonPrimitive?.content,
+        )
+        session.turnInterrupt("thr_u4090_m1", "turn_active")
+
+        assertEquals(listOf("initialize", "turn/steer", "turn/interrupt"), peer.requests)
+    }
+
+    @Test
+    fun `authoritative read recovers the active turn and reconciles one client keyed user card`() {
+        val response = loadFixture("thread-read-active-response.json").jsonObject
+            .getValue("result").jsonObject
+
+        val state = AppServerThreadProjection.authoritativeState(response)
+        val cards = AppServerThreadProjection.cards(response, "u4090/thr_u4090_m1")
+
+        assertEquals(ThreadWorkState.BUSY, state.workState)
+        assertEquals("turn_active", state.activeTurnId)
+        assertEquals(listOf("dealer-steer-1"), cards.map { it.id })
+        assertEquals(listOf(DeliveryState.DELIVERED), cards.map { it.delivery })
+    }
+
     @Test
     fun `u4090 M1 slice uses LAN route, app-server methods, streaming, and reconnect dedupe`() = runTest {
         val firstPeer = FixtureJsonRpcPeer(
