@@ -47,10 +47,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import kotlinx.coroutines.CancellationException
@@ -113,6 +115,9 @@ class DealerActivity : ComponentActivity() {
                         onDetachThread = { service?.detachThread(it) },
                         onTakeControl = { hostId, threadId -> service?.takeControl(hostId, threadId) },
                         onYieldControl = { hostId, threadId -> service?.yieldControl(hostId, threadId) },
+                        onDraftChange = { locator, text -> service?.updateDraft(locator, text) },
+                        onSubmit = { service?.submitDraft(it) },
+                        onInterrupt = { service?.interrupt(it) },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
@@ -275,6 +280,9 @@ private fun DealerApp(
     onDetachThread: (CodexThreadLocator) -> Unit,
     onTakeControl: (String, String) -> Unit,
     onYieldControl: (String, String) -> Unit,
+    onDraftChange: (CodexThreadLocator, String) -> Unit,
+    onSubmit: (CodexThreadLocator) -> Unit,
+    onInterrupt: (CodexThreadLocator) -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
@@ -286,7 +294,6 @@ private fun DealerApp(
     var loopbackSshPort by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
     var threadId by remember { mutableStateOf("") }
-    var turnText by remember { mutableStateOf("") }
     var confirmTailnetReset by remember { mutableStateOf(false) }
     val privateKeyPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(onPrivateKey)
@@ -294,7 +301,9 @@ private fun DealerApp(
     val knownHostsPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) {
         it?.let(onKnownHosts)
     }
-    val locator = CodexThreadLocator(selectedHostId, threadId.trim())
+    val locator = state.browsedThread
+        ?.takeIf { it.hostId == selectedHostId }
+        ?: CodexThreadLocator(selectedHostId, threadId.trim())
     val selectedHost = InitialCodexHosts.all.single { it.id == selectedHostId }
     val isTermux = selectedHost == InitialCodexHosts.fold6Termux
     val validRoute = if (isTermux) {
@@ -309,6 +318,10 @@ private fun DealerApp(
     }
     val hasDealerControl = currentControlSurface == ControlSurface.DEALER
     val hasUnsettledAction = state.hasUnsettledAction(locator)
+    val thread = state.threads[locator]
+    val composerAction = thread?.workState.composerAction()
+    val draft = state.threadActions.drafts[locator].orEmpty()
+    val pendingInput = state.threadActions.pendingInputs[locator]
     val hostSession = state.hostSessions[selectedHostId]
     val enabledHostSession = hostSession?.takeIf(HostSessionState::enabled)
     val selectedLegacyRun = state.hostId == selectedHostId
@@ -320,9 +333,22 @@ private fun DealerApp(
         validRoute &&
         sshUser.isNotBlank() &&
         threadId.isNotBlank() &&
-        turnText.isNotBlank() &&
+        draft.isNotBlank() &&
         setup.privateKeyLoaded &&
         setup.knownHostsLoaded
+    val canSubmit = setup.serviceReady &&
+        enabledHostSession?.status == HostSessionStatus.CONNECTED &&
+        hasDealerControl &&
+        locator in state.threadAttachments.attached &&
+        composerAction != ComposerAction.BLOCKED &&
+        (composerAction != ComposerAction.STEER || thread?.activeTurnId != null) &&
+        pendingInput == null &&
+        draft.isNotBlank()
+    val canInterrupt = setup.serviceReady &&
+        enabledHostSession?.status == HostSessionStatus.CONNECTED &&
+        hasDealerControl &&
+        thread?.activeTurnId != null &&
+        locator !in state.threadActions.pendingInterrupts
     val canEnableHost = setup.serviceReady &&
         hostSession?.enabled != true &&
         validRoute &&
@@ -614,16 +640,49 @@ private fun DealerApp(
                 }
             }
             OutlinedTextField(
-                value = turnText,
-                onValueChange = { turnText = it },
-                enabled = !state.running,
-                label = { Text("Turn") },
+                value = draft,
+                onValueChange = { onDraftChange(locator, it) },
+                enabled = !state.running && locator.threadId.isNotBlank(),
+                label = { Text("Draft") },
                 minLines = 2,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (state.running) {
                 Button(onClick = onCancel) {
                     Text("Cancel")
+                }
+            } else if (enabledHostSession != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onSubmit(locator) },
+                        enabled = canSubmit,
+                    ) {
+                        Text(composerAction.label)
+                    }
+                    OutlinedButton(
+                        onClick = { onInterrupt(locator) },
+                        enabled = canInterrupt,
+                    ) {
+                        Text(if (locator in state.threadActions.pendingInterrupts) "Interrupting…" else "Interrupt")
+                    }
+                }
+                if (composerAction == ComposerAction.BLOCKED) {
+                    Text(
+                        if (thread?.workState == null) {
+                            "Reconcile thread state before sending."
+                        } else {
+                            "Resolve the pending request or interrupt the turn before sending."
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (pendingInput?.uncertain == true) {
+                    Text(
+                        "Input acceptance is unknown; Dealer will not submit this draft again until reconciliation.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             } else {
                 Button(
@@ -634,7 +693,7 @@ private fun DealerApp(
                             tailnetHost = tailnetHost.trim(),
                             sshUser = sshUser.trim(),
                             threadId = threadId.trim(),
-                            turnText = turnText,
+                            turnText = draft,
                             loopbackSshPort = loopbackSshPort.toIntOrNull() ?: 0,
                         )
                         onRun(config)
@@ -647,7 +706,7 @@ private fun DealerApp(
             setup.error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
-            state.error?.takeIf { selectedLegacyRun }?.let {
+            state.error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             if (hasUnsettledAction) {

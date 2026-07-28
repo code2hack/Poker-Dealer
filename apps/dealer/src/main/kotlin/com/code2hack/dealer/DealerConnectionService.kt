@@ -13,14 +13,19 @@ import android.os.IBinder
 import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
+import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
+import com.code2hack.pokerdealer.domain.ThreadActionState
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
@@ -35,6 +40,7 @@ import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
+import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
 import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
@@ -84,7 +90,9 @@ class DealerConnectionService : Service() {
     private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
     private lateinit var threadAttachmentStore: DealerThreadAttachmentStore
     private val attachmentMutex = Mutex()
+    private val draftMutex = Mutex()
     private val notificationJobs = mutableMapOf<String, Job>()
+    private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
     private var connectedHostIds = emptySet<String>()
 
     private val mutableState: MutableStateFlow<DealerUiState>
@@ -113,13 +121,13 @@ class DealerConnectionService : Service() {
             scope = scope,
         )
         scope.launch {
-            val restoredAttachments = try {
-                threadAttachmentStore.read()
+            val (restoredAttachments, restoredActions) = try {
+                threadAttachmentStore.read() to threadAttachmentStore.readActions()
             } catch (failure: Throwable) {
                 mutableState.update {
-                    it.copy(error = "Unable to restore thread attachments: ${failure.message}")
+                    it.copy(error = "Unable to restore Dealer thread state: ${failure.message}")
                 }
-                emptySet()
+                emptySet<CodexThreadLocator>() to ThreadActionState()
             }
             mutableState.update {
                 it.copy(
@@ -127,6 +135,7 @@ class DealerConnectionService : Service() {
                         attached = restoredAttachments,
                         dealerClaims = it.threadAttachments.dealerClaims.intersect(restoredAttachments),
                     ),
+                    threadActions = restoredActions,
                 )
             }
             hostSessions.start()
@@ -358,6 +367,225 @@ class DealerConnectionService : Service() {
         }
     }
 
+    fun updateDraft(locator: CodexThreadLocator, text: String) {
+        mutableState.update { it.copy(threadActions = it.threadActions.editDraft(locator, text)) }
+        scope.launch {
+            draftMutex.withLock {
+                threadAttachmentStore.writeDraft(locator, text)
+            }
+        }
+    }
+
+    fun submitDraft(locator: CodexThreadLocator) {
+        val state = mutableState.value
+        val thread = state.threads[locator]
+        val clientId = UUID.randomUUID().toString()
+        val (actions, pending) = try {
+            state.threadActions.beginInput(
+                locator = locator,
+                workState = thread?.workState,
+                activeTurnId = thread?.activeTurnId,
+                hasDealerClaim = state.threadAttachments.hasDealerClaim(locator),
+                clientId = clientId,
+            )
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before sending") }
+            return
+        }
+        val text = actions.drafts.getValue(locator)
+        val conversationId = "${locator.hostId}/${locator.threadId}"
+        val sequence = state.cards
+            .filter { it.conversationId == conversationId }
+            .maxOfOrNull(Card::sequence)
+            ?.plus(1)
+            ?: 1
+        val pendingCard = M1TurnInput(text, locator.threadId, clientId)
+            .pendingUserCard(conversationId, sequence)
+        mutableState.update {
+            it.copy(
+                threadActions = actions,
+                cards = it.cards.filterNot { card -> card.id == clientId } + pendingCard,
+                error = null,
+            )
+        }
+        scope.launch {
+            try {
+                draftMutex.withLock { threadAttachmentStore.writePendingInput(locator, pending) }
+            } catch (failure: Throwable) {
+                mutableState.update { current ->
+                    val matching = current.threadActions.pendingInputs[locator]?.clientId == clientId
+                    current.copy(
+                        threadActions = if (matching) {
+                            current.threadActions.inputRejected(locator, clientId)
+                        } else {
+                            current.threadActions
+                        },
+                        cards = current.cards.updateDelivery(clientId, DeliveryState.REJECTED),
+                        error = "Unable to persist the pending input; nothing was sent: ${failure.message}",
+                    )
+                }
+                return@launch
+            }
+            try {
+                val response = when (pending.action) {
+                    ComposerAction.START -> appServer.turnStart(locator.threadId, text, clientId)
+                    ComposerAction.STEER -> appServer.turnSteer(
+                        locator.threadId,
+                        pending.expectedTurnId!!,
+                        text,
+                        clientId,
+                    )
+                    ComposerAction.BLOCKED -> error("Blocked input cannot be submitted")
+                }
+                val turnId = if (pending.action == ComposerAction.START) {
+                    ((response["turn"] as? JsonObject)?.get("id") as? JsonPrimitive)?.contentOrNull
+                } else {
+                    (response["turnId"] as? JsonPrimitive)?.contentOrNull
+                } ?: error("${pending.action.label} response did not include a turn ID")
+                require(pending.expectedTurnId == null || pending.expectedTurnId == turnId) {
+                    "Steer response did not match the expected active turn"
+                }
+                dealerOriginatedTurns += locator to turnId
+                var clearAcceptedDraft = false
+                mutableState.update { current ->
+                    val matching = current.threadActions.pendingInputs[locator]?.clientId == clientId
+                    clearAcceptedDraft = matching
+                    current.copy(
+                        threadActions = if (matching) {
+                            current.threadActions.inputAccepted(locator, clientId)
+                        } else {
+                            current.threadActions
+                        },
+                        cards = current.cards.updateDelivery(clientId, DeliveryState.ACCEPTED),
+                        threads = current.threads[locator]?.let { row ->
+                            current.threads + (
+                                locator to row.copy(
+                                    status = "active",
+                                    workState = ThreadWorkState.BUSY,
+                                    activeTurnId = turnId,
+                                )
+                            )
+                        } ?: current.threads,
+                        error = null,
+                    )
+                }
+                if (clearAcceptedDraft) {
+                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    runCatching {
+                        draftMutex.withLock {
+                            threadAttachmentStore.writeDraft(locator, retainedDraft)
+                            threadAttachmentStore.writePendingInput(locator, null)
+                        }
+                    }.onFailure { failure ->
+                        mutableState.update {
+                            it.copy(error = "Input was accepted, but local cleanup failed: ${failure.message}")
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (rejected: JsonRpcRemoteException) {
+                val cleanupFailure = runCatching {
+                    draftMutex.withLock { threadAttachmentStore.writePendingInput(locator, null) }
+                }.exceptionOrNull()
+                mutableState.update { current ->
+                    val matching = current.threadActions.pendingInputs[locator]?.clientId == clientId
+                    current.copy(
+                        threadActions = if (matching && cleanupFailure == null) {
+                            current.threadActions.inputRejected(locator, clientId)
+                        } else if (matching) {
+                            current.threadActions.inputUncertain(locator, clientId)
+                        } else {
+                            current.threadActions
+                        },
+                        cards = current.cards.updateDelivery(clientId, DeliveryState.REJECTED),
+                        error = cleanupFailure?.let {
+                            "${rejected.message}; local action lock cleanup failed: ${it.message}"
+                        } ?: rejected.message,
+                    )
+                }
+                browseThread(locator)
+            } catch (failure: Throwable) {
+                mutableState.update { current ->
+                    val matching = current.threadActions.pendingInputs[locator]?.clientId == clientId
+                    current.copy(
+                        threadActions = if (matching) {
+                            current.threadActions.inputUncertain(locator, clientId)
+                        } else {
+                            current.threadActions
+                        },
+                        cards = current.cards.updateDelivery(clientId, DeliveryState.UNKNOWN),
+                        error = "${failure.message ?: failure::class.java.simpleName}; input was not replayed",
+                    )
+                }
+                browseThread(locator)
+            }
+        }
+    }
+
+    fun interrupt(locator: CodexThreadLocator) {
+        val state = mutableState.value
+        val (actions, turnId) = try {
+            state.threadActions.beginInterrupt(
+                locator,
+                state.threads[locator]?.activeTurnId,
+                state.threadAttachments.hasDealerClaim(locator),
+            )
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before interrupting") }
+            return
+        }
+        mutableState.update { it.copy(threadActions = actions, error = null) }
+        scope.launch {
+            try {
+                draftMutex.withLock { threadAttachmentStore.writePendingInterrupt(locator, turnId) }
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        threadActions = it.threadActions.reconcileInterrupt(locator, null),
+                        error = "Unable to persist Interrupt; nothing was sent: ${failure.message}",
+                    )
+                }
+                return@launch
+            }
+            try {
+                appServer.turnInterrupt(locator.threadId, turnId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (rejected: JsonRpcRemoteException) {
+                val cleanupFailure = runCatching {
+                    draftMutex.withLock { threadAttachmentStore.writePendingInterrupt(locator, null) }
+                }.exceptionOrNull()
+                mutableState.update {
+                    it.copy(
+                        threadActions = if (cleanupFailure == null) {
+                            it.threadActions.reconcileInterrupt(locator, null)
+                        } else {
+                            it.threadActions
+                        },
+                        error = cleanupFailure?.let { failure ->
+                            "${rejected.message}; local Interrupt lock cleanup failed: ${failure.message}"
+                        } ?: rejected.message,
+                    )
+                }
+                browseThread(locator)
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(error = "${failure.message ?: failure::class.java.simpleName}; interrupt was not replayed")
+                }
+                browseThread(locator)
+            }
+        }
+    }
+
     fun refreshThreads(hostId: String) {
         if (mutableState.value.refreshingThreadHosts.contains(hostId)) return
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
@@ -383,9 +611,15 @@ class DealerConnectionService : Service() {
                     )
                 }
                 mutableState.update { state ->
+                    val rows = discovered.associateBy(DiscoveredThread::locator).mapValues { (locator, row) ->
+                        row.copy(
+                            activeTurnId = state.threads[locator]?.activeTurnId
+                                .takeIf { row.workState == ThreadWorkState.BUSY },
+                        )
+                    }
                     state.copy(
                         threads = state.threads.filterKeys { it.hostId != hostId } +
-                            discovered.associateBy(DiscoveredThread::locator),
+                            rows,
                     )
                 }
             } catch (cancelled: CancellationException) {
@@ -502,6 +736,7 @@ class DealerConnectionService : Service() {
                 .filter { it.hostId == hostId }
                 .forEach { locator ->
                     runCatching { appServer.threadResume(locator.threadId) }
+                        .onSuccess { browseThread(locator) }
                         .onFailure { failure ->
                             mutableState.update {
                                 it.copy(
@@ -521,10 +756,50 @@ class DealerConnectionService : Service() {
         notificationJobs[hostId] = scope.launch {
             while (true) {
                 val notification = appServer.receiveNotification() ?: return@launch
-                if (notification.method != "turn/started") continue
                 val params = notification.params as? JsonObject ?: continue
-                val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull ?: continue
-                externalTurnStarted(CodexThreadLocator(hostId, threadId))
+                val turn = params["turn"] as? JsonObject
+                val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull
+                    ?: (turn?.get("threadId") as? JsonPrimitive)?.contentOrNull
+                    ?: continue
+                val locator = CodexThreadLocator(hostId, threadId)
+                val turnId = (turn?.get("id") as? JsonPrimitive)?.contentOrNull
+                    ?: (params["turnId"] as? JsonPrimitive)?.contentOrNull
+                when (notification.method) {
+                    "turn/started" -> {
+                        val clientIds = (turn?.get("items") as? kotlinx.serialization.json.JsonArray)
+                            .orEmpty()
+                            .mapNotNull { item ->
+                                ((item as? JsonObject)?.get("clientId") as? JsonPrimitive)?.contentOrNull
+                            }
+                        val pendingClient = mutableState.value.threadActions.pendingInputs[locator]?.clientId
+                        val dealerOriginated = turnId != null &&
+                            (dealerOriginatedTurns.remove(locator to turnId) || pendingClient in clientIds)
+                        externalTurnStarted(locator, dealerOriginated, turnId)
+                    }
+                    "turn/completed" -> {
+                        turnId?.let { dealerOriginatedTurns.remove(locator to it) }
+                        mutableState.update { state ->
+                            state.copy(
+                                threadActions = state.threadActions.reconcileInterrupt(locator, null),
+                                threads = state.threads[locator]?.let { row ->
+                                    state.threads + (
+                                        locator to row.copy(
+                                            status = "idle",
+                                            workState = ThreadWorkState.READY,
+                                            activeTurnId = null,
+                                        )
+                                    )
+                                } ?: state.threads,
+                            )
+                        }
+                        scope.launch {
+                            draftMutex.withLock {
+                                threadAttachmentStore.writePendingInterrupt(locator, null)
+                            }
+                        }
+                        browseThread(locator)
+                    }
+                }
             }
         }
     }
@@ -532,6 +807,7 @@ class DealerConnectionService : Service() {
     internal fun externalTurnStarted(
         locator: CodexThreadLocator,
         dealerOriginated: Boolean = false,
+        turnId: String? = null,
     ) {
         mutableState.update { state ->
             val attachments = state.threadAttachments.externalTurnStarted(locator, dealerOriginated)
@@ -540,6 +816,9 @@ class DealerConnectionService : Service() {
                 threads = state.threads[locator]?.let { thread ->
                     state.threads + (
                         locator to thread.copy(
+                            status = "active",
+                            workState = ThreadWorkState.BUSY,
+                            activeTurnId = turnId ?: thread.activeTurnId,
                             intendedControlSurface = if (attachments.hasDealerClaim(locator)) {
                                 ControlSurface.DEALER
                             } else {
@@ -557,17 +836,69 @@ class DealerConnectionService : Service() {
         scope.launch {
             try {
                 val conversationId = "${locator.hostId}/${locator.threadId}"
-                val cards = AppServerThreadProjection.cards(
-                    appServer.threadRead(locator.threadId),
-                    conversationId,
-                )
+                val response = appServer.threadRead(locator.threadId)
+                val authoritative = AppServerThreadProjection.authoritativeState(response)
+                val cards = AppServerThreadProjection.cards(response, conversationId)
+                var clearDraft = false
+                var clearInterrupt = false
                 mutableState.update { state ->
+                    val pending = state.threadActions.pendingInputs[locator]
+                    val delivered = pending != null &&
+                        AppServerThreadProjection.countUserClientId(response, pending.clientId) == 1
+                    clearDraft = delivered
+                    clearInterrupt = state.threadActions.pendingInterrupts[locator] != null &&
+                        state.threadActions.pendingInterrupts[locator] != authoritative.activeTurnId
+                    val actions = when {
+                        delivered -> state.threadActions.inputAccepted(locator, pending.clientId)
+                        else -> state.threadActions
+                    }.reconcileInterrupt(locator, authoritative.activeTurnId)
+                    val prior = state.cards
+                        .filter { it.conversationId == conversationId }
+                        .associateBy(Card::id)
+                    val reconciled = cards.map { card ->
+                        prior[card.id]?.let {
+                            card.copy(
+                                sequence = it.sequence,
+                                revision = it.revision + 1,
+                                createdAtMs = it.createdAtMs,
+                            )
+                        } ?: card
+                    }
+                    val localOnly = prior.values.filter { card ->
+                        card.id !in reconciled.mapTo(mutableSetOf(), Card::id) &&
+                            card.delivery != null
+                    }
                     state.copy(
-                        cards = state.cards.filterNot { it.conversationId == conversationId } + cards,
+                        threadActions = actions,
+                        cards = state.cards.filterNot { it.conversationId == conversationId } +
+                            localOnly + reconciled,
+                        threads = state.threads[locator]?.let { row ->
+                            state.threads + (
+                                locator to row.copy(
+                                    status = when (authoritative.workState) {
+                                        ThreadWorkState.BUSY, ThreadWorkState.ATTENTION_REQUIRED -> "active"
+                                        ThreadWorkState.READY -> "idle"
+                                        null -> row.status
+                                    },
+                                    workState = authoritative.workState,
+                                    activeTurnId = authoritative.activeTurnId,
+                                )
+                            )
+                        } ?: state.threads,
                         browsedThread = locator,
                         threadDiscoveryErrors = state.threadDiscoveryErrors - locator.hostId,
                         error = null,
                     )
+                }
+                if (clearDraft) {
+                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    draftMutex.withLock {
+                        threadAttachmentStore.writeDraft(locator, retainedDraft)
+                        threadAttachmentStore.writePendingInput(locator, null)
+                    }
+                }
+                if (clearInterrupt) {
+                    draftMutex.withLock { threadAttachmentStore.writePendingInterrupt(locator, null) }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -914,6 +1245,7 @@ data class DealerUiState(
     val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
     val recovery: DealerRecoveryUiState? = null,
     val threadAttachments: ThreadAttachmentState = ThreadAttachmentState(),
+    val threadActions: ThreadActionState = ThreadActionState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),
@@ -934,6 +1266,27 @@ data class DealerRecoveryUiState(
     val maxAttempts: Int? = null,
     val retryInMs: Long? = null,
 )
+
+private fun List<Card>.updateDelivery(cardId: String, delivery: DeliveryState): List<Card> = map { card ->
+    if (card.id == cardId) {
+        val current = card.delivery
+        if (current == DeliveryState.DELIVERED ||
+            current == DeliveryState.REJECTED ||
+            current == DeliveryState.UNKNOWN && delivery != DeliveryState.DELIVERED
+        ) {
+            card
+        } else {
+            card.copy(
+                revision = card.revision + 1,
+                state = if (delivery == DeliveryState.DELIVERED) CardState.COMMITTED else CardState.OPEN,
+                delivery = delivery,
+                updatedAtMs = System.currentTimeMillis(),
+            )
+        }
+    } else {
+        card
+    }
+}
 
 internal object DealerServiceState {
     val mutableState = MutableStateFlow(DealerUiState())

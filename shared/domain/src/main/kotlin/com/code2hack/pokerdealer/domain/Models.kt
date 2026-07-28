@@ -98,6 +98,7 @@ data class DiscoveredThread(
     val archived: Boolean = false,
     val loaded: Boolean = false,
     val workState: ThreadWorkState? = null,
+    val activeTurnId: String? = null,
     val attached: Boolean = false,
     val unreadCount: Int = 0,
     val intendedControlSurface: ControlSurface = ControlSurface.NONE,
