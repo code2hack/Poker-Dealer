@@ -150,6 +150,7 @@ internal fun supportedServerRequests(
     qualifiedVersions: Map<String, Set<String>>,
 ): Set<String> = buildSet {
     add(COMMAND_APPROVAL_METHOD)
+    add(FILE_APPROVAL_METHOD)
     qualifiedVersions.forEach { (method, versions) ->
         if (appServerVersion in versions) add(method)
     }

@@ -171,6 +171,22 @@ class WebSocketJsonRpcTest {
     }
 
     @Test
+    fun `file approval request reaches the bounded supported queue`() = runTest {
+        val stream = InteractiveStream()
+        val peer = WebSocketJsonRpcPeer(
+            AppServerWebSocket(stream),
+            supportedServerRequests = setOf(FILE_APPROVAL_METHOD),
+        )
+        stream.feedFixture("file-approval-request.json")
+
+        val request = peer.receiveServerRequest()
+
+        assertEquals(FILE_APPROVAL_METHOD, request?.method)
+        peer.reject(request!!, "fixture complete")
+        peer.close()
+    }
+
+    @Test
     fun `disconnect closes transport and fails every response waiter once`() = runTest {
         val stream = InteractiveStream()
         val peer = WebSocketJsonRpcPeer(AppServerWebSocket(stream))
