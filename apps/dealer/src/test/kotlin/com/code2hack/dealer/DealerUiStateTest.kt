@@ -5,6 +5,7 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
 import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
@@ -147,10 +148,9 @@ class DealerUiStateTest {
     @Test
     fun runRequiresDealerControlForTheExactHostQualifiedThread() {
         val state = DealerUiState(
-            control = DealerControlState(
-                CodexThreadLocator("spark", "thread"),
-                ControlSurface.DEALER,
-            ),
+            threadAttachments = ThreadAttachmentState()
+                .attach(CodexThreadLocator("spark", "thread"))
+                .claim(CodexThreadLocator("spark", "thread")),
         )
         val config = DealerRunConfig("spark", "", "spark", "user", "thread", "turn")
 
@@ -159,7 +159,7 @@ class DealerUiStateTest {
         assertEquals(false, state.hasDealerControl(config.copy(threadId = "other")))
         assertEquals(
             false,
-            state.copy(control = state.control?.copy(surface = ControlSurface.LOCAL_TUI))
+            state.copy(threadAttachments = state.threadAttachments.release(CodexThreadLocator("spark", "thread")))
                 .hasDealerControl(config),
         )
 
@@ -173,10 +173,9 @@ class DealerUiStateTest {
             loopbackSshPort = 8022,
         )
         val termuxState = DealerUiState(
-            control = DealerControlState(
-                CodexThreadLocator("fold6-termux", "phone-thread"),
-                ControlSurface.DEALER,
-            ),
+            threadAttachments = ThreadAttachmentState()
+                .attach(CodexThreadLocator("fold6-termux", "phone-thread"))
+                .claim(CodexThreadLocator("fold6-termux", "phone-thread")),
         )
 
         assertEquals(true, termuxState.hasDealerControl(termuxConfig))

@@ -236,6 +236,14 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun threadUnsubscribe(threadId: String): JsonObject {
+        checkInitialized()
+        return request(
+            "thread/unsubscribe",
+            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
+        ).jsonObject
+    }
+
     suspend fun threadRead(threadId: String): JsonObject {
         checkInitialized()
         return request(
@@ -356,6 +364,11 @@ class CodexAppServerSession(
             onCard(card)
             card
         }
+    }
+
+    suspend fun receiveNotification(): AppServerNotification? {
+        checkInitialized()
+        return peer.receiveNotification()
     }
 
     suspend fun close() {

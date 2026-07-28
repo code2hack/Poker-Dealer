@@ -84,6 +84,21 @@ class ThreadDiscoveryTest {
             shared,
         )
     }
+
+    @Test
+    fun `attachment methods resume with inherited settings and unsubscribe only the thread`() = runTest {
+        val peer = AttachmentFixturePeer()
+        val session = CodexAppServerSession(peer)
+        session.initialize()
+
+        session.threadResume("thr_u4090_m1")
+        session.threadUnsubscribe("thr_u4090_m1")
+
+        assertEquals(
+            listOf("thread-resume-request.json", "thread-unsubscribe-request.json"),
+            peer.checkedFixtures,
+        )
+    }
 }
 
 private fun discoveryPeer(loadedListMissing: Boolean = false): DiscoveryFixturePeer =
@@ -136,6 +151,30 @@ private class DiscoveryFixturePeer(
     override suspend fun close() {
         closed = true
     }
+}
+
+private class AttachmentFixturePeer : JsonRpcPeer {
+    private val fixtures = ArrayDeque(
+        listOf(
+            "thread-resume-request.json" to "thread-resume-response.json",
+            "thread-unsubscribe-request.json" to "thread-unsubscribe-response.json",
+        ),
+    )
+    val checkedFixtures = mutableListOf<String>()
+
+    override suspend fun request(method: String, params: JsonElement): JsonElement {
+        if (method == "initialize") return JsonObject(emptyMap())
+        val (requestFixture, responseFixture) = fixtures.removeFirst()
+        val expected = fixture(requestFixture).jsonObject
+        assertEquals((expected["method"] as JsonPrimitive).contentOrNull, method)
+        assertEquals(expected["params"], params)
+        checkedFixtures += requestFixture
+        return fixture(responseFixture).jsonObject.getValue("result")
+    }
+
+    override suspend fun notify(method: String, params: JsonElement?) = Unit
+    override suspend fun receiveNotification(): AppServerNotification? = null
+    override suspend fun close() = Unit
 }
 
 private fun fixture(name: String): JsonElement {
