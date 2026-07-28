@@ -47,6 +47,7 @@ import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -252,6 +253,7 @@ private fun DealerApp(
     var selectedHostId by remember(state.hostId) { mutableStateOf(state.hostId ?: "u4090") }
     var lanHost by remember { mutableStateOf("") }
     var tailnetHost by remember { mutableStateOf("") }
+    var loopbackSshPort by remember { mutableStateOf("") }
     var sshUser by remember { mutableStateOf("") }
     var threadId by remember { mutableStateOf("") }
     var turnText by remember { mutableStateOf("") }
@@ -263,6 +265,13 @@ private fun DealerApp(
         it?.let(onKnownHosts)
     }
     val locator = CodexThreadLocator(selectedHostId, threadId.trim())
+    val selectedHost = InitialCodexHosts.all.single { it.id == selectedHostId }
+    val isTermux = selectedHost == InitialCodexHosts.fold6Termux
+    val validRoute = if (isTermux) {
+        loopbackSshPort.toIntOrNull()?.let { it in 1..65_535 } == true
+    } else {
+        lanHost.isNotBlank() || tailnetHost.isNotBlank()
+    }
     val currentControlSurface = state.control
         ?.takeIf { it.locator == locator }
         ?.surface
@@ -271,7 +280,7 @@ private fun DealerApp(
     val canRun = setup.serviceReady &&
         !state.running &&
         hasDealerControl &&
-        (lanHost.isNotBlank() || tailnetHost.isNotBlank()) &&
+        validRoute &&
         sshUser.isNotBlank() &&
         threadId.isNotBlank() &&
         turnText.isNotBlank() &&
@@ -287,7 +296,7 @@ private fun DealerApp(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                if (selectedHostId == "spark") "DGX Spark" else "u4090",
+                selectedHost.displayName,
                 style = MaterialTheme.typography.headlineSmall,
                 color = Color.White,
             )
@@ -296,57 +305,69 @@ private fun DealerApp(
                 color = if (state.error == null && setup.error == null) Color(0xFF8EE7B2) else Color(0xFFFFA8A8),
             )
             Text(
-                "Route order: LAN > embedded tsnet > external Tailscale",
+                if (isTermux) {
+                    "Android/Termux ARM64 | community distribution | opportunistic"
+                } else {
+                    "Route order: LAN > embedded tsnet > external Tailscale"
+                },
                 color = Color(0xFFBBC8D6),
                 style = MaterialTheme.typography.labelMedium,
             )
-            Text(
-                "SSH_EMBEDDED_TSNET: ${state.tailnet.connectionLabel}",
-                color = if (state.tailnet.state == EmbeddedTailnetState.ERROR) {
-                    Color(0xFFFFA8A8)
-                } else {
-                    Color(0xFFBBC8D6)
-                },
-                style = MaterialTheme.typography.labelMedium,
-            )
-            state.tailnet.error?.let {
-                Text(it, color = Color(0xFFFFA8A8), style = MaterialTheme.typography.labelSmall)
-            }
-            state.tailnet.nodeName?.let {
-                Text("Node: $it", color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
-            }
-            state.tailnet.health.forEach {
-                Text(it, color = Color(0xFFFFC38B), style = MaterialTheme.typography.labelSmall)
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = onStartTailnet,
-                    enabled = !state.tailnet.active,
-                ) {
-                    Text("Start tailnet")
+            if (isTermux) {
+                Text(
+                    "Route: loopback SSH only",
+                    color = Color(0xFFBBC8D6),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            } else {
+                Text(
+                    "SSH_EMBEDDED_TSNET: ${state.tailnet.connectionLabel}",
+                    color = if (state.tailnet.state == EmbeddedTailnetState.ERROR) {
+                        Color(0xFFFFA8A8)
+                    } else {
+                        Color(0xFFBBC8D6)
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                state.tailnet.error?.let {
+                    Text(it, color = Color(0xFFFFA8A8), style = MaterialTheme.typography.labelSmall)
                 }
-                OutlinedButton(
-                    onClick = onStopTailnet,
-                    enabled = state.tailnet.active &&
-                        state.tailnet.state !in setOf(
+                state.tailnet.nodeName?.let {
+                    Text("Node: $it", color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
+                }
+                state.tailnet.health.forEach {
+                    Text(it, color = Color(0xFFFFC38B), style = MaterialTheme.typography.labelSmall)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = onStartTailnet,
+                        enabled = !state.tailnet.active,
+                    ) {
+                        Text("Start tailnet")
+                    }
+                    OutlinedButton(
+                        onClick = onStopTailnet,
+                        enabled = state.tailnet.active &&
+                            state.tailnet.state !in setOf(
+                                EmbeddedTailnetState.STOPPING,
+                                EmbeddedTailnetState.RESETTING,
+                            ),
+                    ) {
+                        Text("Stop tailnet")
+                    }
+                    OutlinedButton(
+                        onClick = { confirmTailnetReset = true },
+                        enabled = state.tailnet.state !in setOf(
                             EmbeddedTailnetState.STOPPING,
                             EmbeddedTailnetState.RESETTING,
                         ),
-                ) {
-                    Text("Stop tailnet")
-                }
-                OutlinedButton(
-                    onClick = { confirmTailnetReset = true },
-                    enabled = state.tailnet.state !in setOf(
-                        EmbeddedTailnetState.STOPPING,
-                        EmbeddedTailnetState.RESETTING,
-                    ),
-                ) {
-                    Text("Reset identity")
-                }
-                state.tailnet.loginUrl?.let { loginUrl ->
-                    OutlinedButton(onClick = { onLoginTailnet(loginUrl) }) {
-                        Text("Log in")
+                    ) {
+                        Text("Reset identity")
+                    }
+                    state.tailnet.loginUrl?.let { loginUrl ->
+                        OutlinedButton(onClick = { onLoginTailnet(loginUrl) }) {
+                            Text("Log in")
+                        }
                     }
                 }
             }
@@ -388,23 +409,40 @@ private fun DealerApp(
                 ) {
                     Text("u4090")
                 }
+                OutlinedButton(
+                    onClick = { selectedHostId = "fold6-termux" },
+                    enabled = !state.running && selectedHostId != "fold6-termux",
+                ) {
+                    Text("Fold6 Termux")
+                }
             }
-            OutlinedTextField(
-                value = lanHost,
-                onValueChange = { lanHost = it },
-                enabled = !state.running,
-                label = { Text("LAN host") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = tailnetHost,
-                onValueChange = { tailnetHost = it },
-                enabled = !state.running,
-                label = { Text("Tailnet host") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            if (isTermux) {
+                OutlinedTextField(
+                    value = loopbackSshPort,
+                    onValueChange = { loopbackSshPort = it },
+                    enabled = !state.running,
+                    label = { Text("Termux loopback SSH port") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            } else {
+                OutlinedTextField(
+                    value = lanHost,
+                    onValueChange = { lanHost = it },
+                    enabled = !state.running,
+                    label = { Text("LAN host") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = tailnetHost,
+                    onValueChange = { tailnetHost = it },
+                    enabled = !state.running,
+                    label = { Text("Tailnet host") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             OutlinedTextField(
                 value = sshUser,
                 onValueChange = { sshUser = it },
@@ -447,7 +485,15 @@ private fun DealerApp(
                     onClick = { privateKeyPicker.launch(arrayOf("*/*")) },
                     enabled = !state.running,
                 ) {
-                    Text(if (setup.privateKeyLoaded) "SSH key selected" else "Select SSH key")
+                    Text(
+                        if (setup.privateKeyLoaded) {
+                            "SSH key selected"
+                        } else if (isTermux) {
+                            "Select dedicated Termux SSH key"
+                        } else {
+                            "Select SSH key"
+                        },
+                    )
                 }
                 OutlinedButton(
                     onClick = { knownHostsPicker.launch(arrayOf("text/*", "*/*")) },
@@ -478,6 +524,7 @@ private fun DealerApp(
                             sshUser = sshUser.trim(),
                             threadId = threadId.trim(),
                             turnText = turnText,
+                            loopbackSshPort = loopbackSshPort.toIntOrNull() ?: 0,
                         )
                         onRun(config)
                     },

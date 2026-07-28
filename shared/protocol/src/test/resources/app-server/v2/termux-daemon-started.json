@@ -1,0 +1,10 @@
+{
+  "status": "started",
+  "backend": "pid",
+  "pid": 0,
+  "managedCodexPath": "/data/data/com.termux/files/usr/lib/node_modules/@mmmbuto/codex-cli-termux/bin/codex.bin",
+  "managedCodexVersion": "0.145.0",
+  "socketPath": "/data/data/com.termux/files/home/.codex/app-server-control/app-server-control.sock",
+  "cliVersion": "0.145.0",
+  "appServerVersion": "0.145.0"
+}

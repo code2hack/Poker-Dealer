@@ -34,37 +34,41 @@ data class DaemonVersions(
     val status: String?,
     val cliVersion: String?,
     val appServerVersion: String?,
+    val managedCodexVersion: String?,
+    val socketPath: String?,
     val raw: JsonObject,
 )
 
-class UpstreamCodexDaemon(
-    codexExecutable: String = DEFAULT_CODEX_EXECUTABLE,
-) {
+interface CodexDaemonLifecycle {
+    val appServerProxyCommand: String
+    suspend fun ensureRunning(ssh: HostSshSession): DaemonVersions
+}
+
+abstract class JsonCodexDaemonLifecycle(
+    codexExecutable: String,
+) : CodexDaemonLifecycle {
     init {
         require(codexExecutable.isNotBlank()) { "Codex executable is required" }
     }
 
     val daemonVersionCommand = "$codexExecutable app-server daemon version"
     val daemonStartCommand = "$codexExecutable app-server daemon start"
-    val appServerProxyCommand = "$codexExecutable app-server proxy"
+    final override val appServerProxyCommand = "$codexExecutable app-server proxy"
 
-    suspend fun ensureRunning(ssh: HostSshSession): DaemonVersions {
+    final override suspend fun ensureRunning(ssh: HostSshSession): DaemonVersions {
         val current = ssh.exec(daemonVersionCommand)
         if (current.exitCode == 0) {
             val versions = parseVersions(current)
-            if (versions.status == null || versions.status == "running") return versions
+            if (isRunning(versions)) return validate(versions)
         }
         val started = ssh.exec(daemonStartCommand)
         require(started.exitCode == 0) { "Failed to start app-server daemon: ${started.stderr.ifBlank { started.stdout }}" }
+        validateStart(started)
         val version = ssh.exec(daemonVersionCommand)
         require(version.exitCode == 0) {
             "Failed to query app-server daemon after start: ${version.stderr.ifBlank { version.stdout }}"
         }
-        return parseVersions(version).also {
-            require(it.status == null || it.status == "running") {
-                "App-server daemon did not reach running state: ${it.status}"
-            }
-        }
+        return validate(parseVersions(version))
     }
 
     fun parseVersions(result: CommandResult): DaemonVersions {
@@ -73,9 +77,15 @@ class UpstreamCodexDaemon(
             status = (raw["status"] as? JsonPrimitive)?.contentOrNull,
             cliVersion = raw.findString("cliVersion", "cli_version", "codexVersion", "codex_version"),
             appServerVersion = raw.findString("appServerVersion", "app_server_version", "serverVersion", "server_version"),
+            managedCodexVersion = raw.findString("managedCodexVersion", "managed_codex_version"),
+            socketPath = raw.findString("socketPath", "socket_path", "controlSocket", "control_socket"),
             raw = raw,
         )
     }
+
+    protected abstract fun isRunning(versions: DaemonVersions): Boolean
+    protected abstract fun validate(versions: DaemonVersions): DaemonVersions
+    protected open fun validateStart(result: CommandResult) = Unit
 
     private fun JsonElement.findString(vararg keys: String): String? = when (this) {
         is JsonObject -> {
@@ -85,9 +95,53 @@ class UpstreamCodexDaemon(
         is JsonArray -> firstNotNullOfOrNull { it.findString(*keys) }
         else -> null
     }
+}
+
+class UpstreamCodexDaemon(
+    codexExecutable: String = DEFAULT_CODEX_EXECUTABLE,
+) : JsonCodexDaemonLifecycle(codexExecutable) {
+    override fun isRunning(versions: DaemonVersions): Boolean =
+        versions.status == null || versions.status == "running"
+
+    override fun validate(versions: DaemonVersions): DaemonVersions {
+        require(isRunning(versions)) {
+            "App-server daemon did not reach running state: ${versions.status}"
+        }
+        return versions
+    }
 
     companion object {
         const val DEFAULT_CODEX_EXECUTABLE = "~/.local/bin/codex"
+    }
+}
+
+class TermuxCommunityCodexDaemon(
+    codexExecutable: String = DEFAULT_CODEX_EXECUTABLE,
+) : JsonCodexDaemonLifecycle(codexExecutable) {
+    override fun isRunning(versions: DaemonVersions): Boolean = versions.status == "running"
+
+    override fun validate(versions: DaemonVersions): DaemonVersions {
+        require(isRunning(versions)) {
+            "Termux app-server daemon did not reach running state: ${versions.status}"
+        }
+        require(!versions.socketPath.isNullOrBlank()) {
+            "Termux app-server daemon did not report a bound control socket"
+        }
+        return versions
+    }
+
+    override fun validateStart(result: CommandResult) {
+        val started = parseVersions(result)
+        require(started.status == "started") {
+            "Termux app-server daemon start returned status ${started.status}"
+        }
+        require(!started.socketPath.isNullOrBlank()) {
+            "Termux app-server daemon start did not report a bound control socket"
+        }
+    }
+
+    companion object {
+        const val DEFAULT_CODEX_EXECUTABLE = "codex"
     }
 }
 
@@ -399,7 +453,7 @@ class M1OneHostDealerSlice(
     private val host: CodexHost = InitialCodexHosts.u4090,
     private val dialer: HostTcpDialer,
     private val sshClient: HostSshClient,
-    private val daemon: UpstreamCodexDaemon = UpstreamCodexDaemon(),
+    private val daemon: CodexDaemonLifecycle = UpstreamCodexDaemon(),
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val timeouts: M1Timeouts = M1Timeouts(),
     private val appServerFactory: suspend (DuplexByteStream) -> CodexAppServerSession = { proxy ->

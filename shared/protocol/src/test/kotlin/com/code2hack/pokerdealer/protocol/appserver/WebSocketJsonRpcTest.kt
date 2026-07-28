@@ -57,17 +57,20 @@ class WebSocketJsonRpcTest {
 
     @Test
     fun `json rpc rejects unknown server requests and preserves unknown notifications`() = runTest {
+        val rejected = mutableListOf<String>()
         val stream = MemoryStream(
             serverTextFrame("""{"id":7,"method":"future/request","params":{"value":1}}""") +
                 serverTextFrame("""{"method":"future/event","params":{"value":2},"futureField":true}"""),
         )
         val peer = WebSocketJsonRpcPeer(
             AppServerWebSocket(stream, maskFactory = { byteArrayOf(0, 0, 0, 0) }),
+            onRejectedServerRequest = rejected::add,
         )
 
         val notification = peer.receiveNotification()
 
         assertEquals("future/event", notification?.method)
+        assertEquals(listOf("future/request"), rejected)
         assertEquals("true", notification?.raw?.get("futureField").toString())
         assertTrue(stream.writtenBytes().containsClientText("Dealer cannot handle server request"))
     }

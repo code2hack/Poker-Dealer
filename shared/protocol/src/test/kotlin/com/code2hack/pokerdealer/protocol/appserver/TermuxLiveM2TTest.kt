@@ -1,0 +1,208 @@
+package com.code2hack.pokerdealer.protocol.appserver
+
+import com.code2hack.pokerdealer.domain.Card
+import com.code2hack.pokerdealer.domain.CardState
+import com.code2hack.pokerdealer.domain.CodexHost
+import com.code2hack.pokerdealer.domain.DeliveryState
+import com.code2hack.pokerdealer.domain.HostConnectionRoute
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.protocol.host.HostSshSession
+import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
+import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
+import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
+import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable
+import java.nio.file.Files
+import java.nio.file.Path
+
+class TermuxLiveM2TTest {
+    @Test
+    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_TERMUX", matches = "true")
+    fun `Termux completes the live loopback app-server slice`() = runBlocking {
+        val host = InitialCodexHosts.fold6Termux
+        val rendered = linkedMapOf<String, Card>()
+        val clientId = "dealer-fold6-termux-m2t-${System.currentTimeMillis()}"
+        val dialer = SocketHostTcpDialer(
+            mapOf(
+                (host.id to HostConnectionRoute.SSH_LOOPBACK) to RouteEndpoint(
+                    requireEnv("POKER_DEALER_LIVE_TERMUX_HOST"),
+                    requireEnv("POKER_DEALER_LIVE_TERMUX_PORT").toInt(),
+                ),
+            ),
+        )
+        val sshClient = JschHostSshClient(
+            mapOf(
+                host.id to SshHostAuthentication(
+                    username = requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_USER"),
+                    privateKey = Files.readAllBytes(
+                        Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_PRIVATE_KEY")),
+                    ),
+                    knownHosts = Files.readAllBytes(
+                        Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_KNOWN_HOSTS")),
+                    ),
+                ),
+            ),
+        )
+        val slice = M1OneHostDealerSlice(
+            host = host,
+            dialer = dialer,
+            sshClient = sshClient,
+            daemon = TermuxCommunityCodexDaemon(),
+        )
+
+        val result = withTimeout(300_000) {
+            slice.run(
+                M1TurnInput(
+                    text = "Reply with exactly DEALER_TERMUX_LIVE_OK.",
+                    threadId = System.getenv("POKER_DEALER_LIVE_TERMUX_THREAD_ID")?.takeIf(String::isNotBlank),
+                    clientUserMessageId = clientId,
+                ),
+                onCard = { rendered[it.id] = it },
+            )
+        }
+
+        assertEquals(host.id, result.host.id)
+        assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.route)
+        assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.reconnectRoute)
+        assertEquals("${host.id}/${result.threadId}", result.conversationId)
+        assertTrue(result.historyCards.isNotEmpty())
+        assertTrue(result.streamedCards.isNotEmpty())
+        assertTrue(result.streamedCards.all { it.state == CardState.COMMITTED })
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
+        assertEquals(result.userCard, rendered[clientId])
+        assertEquals(1, result.matchingUserMessagesAfterReconnect)
+        assertTrue(
+            result.routeDiagnostics
+                .filter { it.attempted }
+                .all { it.route == HostConnectionRoute.SSH_LOOPBACK },
+        )
+
+        withTimeout(300_000) {
+            probeUnsupportedServerRequest(host, dialer, sshClient, result.threadId)
+        }
+    }
+
+    private suspend fun probeUnsupportedServerRequest(
+        host: CodexHost,
+        dialer: SocketHostTcpDialer,
+        sshClient: JschHostSshClient,
+        threadId: String,
+    ) {
+        val rejectedMethods = mutableListOf<String>()
+        val tcp = dialer.connect(host, HostConnectionRoute.SSH_LOOPBACK, port = 22)
+        var ssh: HostSshSession? = null
+        var session: CodexAppServerSession? = null
+        try {
+            val connectedSsh = sshClient.connect(host, tcp)
+            ssh = connectedSsh
+            val daemon = TermuxCommunityCodexDaemon()
+            daemon.ensureRunning(connectedSsh)
+            val socket = AppServerWebSocket(connectedSsh.execStream(daemon.appServerProxyCommand))
+            socket.open()
+            val connectedPeer = WebSocketJsonRpcPeer(
+                socket,
+                onRejectedServerRequest = rejectedMethods::add,
+            )
+            val connectedSession = CodexAppServerSession(connectedPeer)
+            session = connectedSession
+            connectedSession.initialize()
+            connectedSession.threadResume(threadId)
+            val turnStart = connectedPeer.request(
+                "turn/start",
+                liveTurnStartParams(
+                    threadId = threadId,
+                    clientId = "dealer-fold6-termux-rejection-${System.currentTimeMillis()}",
+                    approvalPolicy = "untrusted",
+                    text = "Attempt exactly one shell command: " +
+                        "`sh -c 'printf APPROVAL_REQUEST_PROBE'`. " +
+                        "If it is denied, do not run another command. " +
+                        "Then reply exactly DEALER_TERMUX_REJECTION_OK.",
+                ),
+            ).jsonObject
+            val cards = connectedSession.streamAgentCards(
+                threadId = threadId,
+                turnId = turnStart.liveTurnId(),
+                conversationId = "${host.id}/$threadId",
+                firstSequence = 1,
+            )
+
+            assertEquals(
+                1,
+                rejectedMethods.count { it == "item/commandExecution/requestApproval" },
+            )
+            assertTrue(cards.all { it.state == CardState.COMMITTED })
+            assertTrue(cards.any { "DEALER_TERMUX_REJECTION_OK" in it.fullText })
+            val restoreStart = connectedPeer.request(
+                "turn/start",
+                liveTurnStartParams(
+                    threadId = threadId,
+                    clientId = "dealer-fold6-termux-restore-${System.currentTimeMillis()}",
+                    approvalPolicy = "never",
+                    text = "Reply exactly DEALER_TERMUX_POLICY_RESTORED.",
+                ),
+            ).jsonObject
+            val restoreCards = connectedSession.streamAgentCards(
+                threadId = threadId,
+                turnId = restoreStart.liveTurnId(),
+                conversationId = "${host.id}/$threadId",
+                firstSequence = cards.size.toLong() + 1,
+            )
+            assertTrue(restoreCards.any { "DEALER_TERMUX_POLICY_RESTORED" in it.fullText })
+            val restored = connectedSession.threadResume(threadId)
+            assertEquals("never", restored["approvalPolicy"]?.jsonPrimitive?.content)
+        } finally {
+            withContext(NonCancellable) {
+                runCatching { session?.close() }
+                runCatching { ssh?.close() }
+                runCatching { tcp.close() }
+            }
+        }
+    }
+
+    private fun liveTurnStartParams(
+        threadId: String,
+        clientId: String,
+        approvalPolicy: String,
+        text: String,
+    ): JsonObject = buildJsonObject {
+        put("threadId", JsonPrimitive(threadId))
+        put("clientUserMessageId", JsonPrimitive(clientId))
+        put("approvalPolicy", JsonPrimitive(approvalPolicy))
+        put("approvalsReviewer", JsonPrimitive("user"))
+        put(
+            "input",
+            buildJsonArray {
+                add(
+                    buildJsonObject {
+                        put("type", JsonPrimitive("text"))
+                        put("text", JsonPrimitive(text))
+                    },
+                )
+            },
+        )
+    }
+
+    private fun JsonObject.liveTurnId(): String =
+        this["turn"]
+            ?.jsonObject
+            ?.get("id")
+            ?.jsonPrimitive
+            ?.content
+            ?: error("live turn/start response did not include a turn ID")
+
+    private fun requireEnv(name: String): String =
+        System.getenv(name)?.takeIf(String::isNotBlank) ?: error("$name is required")
+}

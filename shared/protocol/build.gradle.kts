@@ -27,9 +27,13 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    val liveU4090 = providers.environmentVariable("POKER_DEALER_LIVE_U4090")
+    val liveWorkstation = providers.environmentVariable("POKER_DEALER_LIVE_WORKSTATION")
         .map { it == "true" }
         .orElse(false)
-    outputs.upToDateWhen { !liveU4090.get() }
-    outputs.doNotCacheIf("u4090 live test is enabled") { liveU4090.get() }
+    val liveTermux = providers.environmentVariable("POKER_DEALER_LIVE_TERMUX")
+        .map { it == "true" }
+        .orElse(false)
+    val liveHost = liveWorkstation.zip(liveTermux) { workstation, termux -> workstation || termux }
+    outputs.upToDateWhen { !liveHost.get() }
+    outputs.doNotCacheIf("host live test is enabled") { liveHost.get() }
 }

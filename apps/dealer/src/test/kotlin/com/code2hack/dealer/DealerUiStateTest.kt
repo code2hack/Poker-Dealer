@@ -117,5 +117,23 @@ class DealerUiStateTest {
             state.copy(control = state.control?.copy(surface = ControlSurface.LOCAL_TUI))
                 .hasDealerControl(config),
         )
+
+        val termuxConfig = DealerRunConfig(
+            hostId = "fold6-termux",
+            lanHost = "",
+            tailnetHost = "",
+            sshUser = "termux",
+            threadId = "phone-thread",
+            turnText = "turn",
+            loopbackSshPort = 8022,
+        )
+        val termuxState = DealerUiState(
+            control = DealerControlState(
+                CodexThreadLocator("fold6-termux", "phone-thread"),
+                ControlSurface.DEALER,
+            ),
+        )
+
+        assertEquals(true, termuxState.hasDealerControl(termuxConfig))
     }
 }

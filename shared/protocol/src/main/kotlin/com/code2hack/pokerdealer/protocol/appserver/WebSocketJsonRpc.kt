@@ -255,6 +255,7 @@ interface JsonRpcPeer {
 class WebSocketJsonRpcPeer(
     private val socket: AppServerWebSocket,
     private val maxPendingNotifications: Int = 1_024,
+    private val onRejectedServerRequest: (String) -> Unit = {},
 ) : JsonRpcPeer {
     private var nextId = 1L
     private val pending = ArrayDeque<AppServerNotification>()
@@ -332,6 +333,7 @@ class WebSocketJsonRpcPeer(
                 )
             },
         )
+        onRejectedServerRequest(request.method)
     }
 
     private suspend fun readInbound(): Inbound? {

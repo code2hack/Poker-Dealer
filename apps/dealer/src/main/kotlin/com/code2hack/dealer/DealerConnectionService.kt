@@ -22,6 +22,8 @@ import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
+import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
+import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
@@ -100,8 +102,8 @@ class DealerConnectionService : Service() {
         ensureForeground()
         runJob = scope.launch {
             val cards = CardRevisionStore()
-            val host = InitialCodexHosts.workstations.firstOrNull { it.id == config.hostId }
-                ?: error("Unsupported workstation ${config.hostId}")
+            val host = InitialCodexHosts.all.firstOrNull { it.id == config.hostId }
+                ?: error("Unsupported host ${config.hostId}")
             val input = M1TurnInput(
                 text = config.turnText,
                 threadId = config.threadId,
@@ -128,33 +130,42 @@ class DealerConnectionService : Service() {
             try {
                 val slice = M1OneHostDealerSlice(
                     host = host,
-                    dialer = routeDialer(
-                        lan = SocketHostTcpDialer(
-                            endpoints = if (config.lanHost.isBlank()) {
-                                emptyMap()
-                            } else {
-                                mapOf(
-                                    (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
-                                )
-                            },
-                            capabilities = mapOf(
-                                (host.id to HostConnectionRoute.SSH_LAN) to if (config.lanHost.isBlank()) {
-                                    RouteCapability.DISABLED
-                                } else {
-                                    RouteCapability.SUPPORTED_CONFIGURED
-                                },
+                    dialer = if (host == InitialCodexHosts.fold6Termux) {
+                        SocketHostTcpDialer(
+                            endpoints = mapOf(
+                                (host.id to HostConnectionRoute.SSH_LOOPBACK) to
+                                    RouteEndpoint("127.0.0.1", config.loopbackSshPort),
                             ),
-                        ),
-                        embedded = EmbeddedTailnetHostTcpDialer(
-                            engine = tailnetEngine,
-                            destinations = if (config.tailnetHost.isBlank()) {
-                                emptyMap()
-                            } else {
-                                mapOf(host.id to config.tailnetHost)
-                            },
-                            state = { mutableState.value.tailnet.state },
-                        ),
-                    ),
+                        )
+                    } else {
+                        routeDialer(
+                            lan = SocketHostTcpDialer(
+                                endpoints = if (config.lanHost.isBlank()) {
+                                    emptyMap()
+                                } else {
+                                    mapOf(
+                                        (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
+                                    )
+                                },
+                                capabilities = mapOf(
+                                    (host.id to HostConnectionRoute.SSH_LAN) to if (config.lanHost.isBlank()) {
+                                        RouteCapability.DISABLED
+                                    } else {
+                                        RouteCapability.SUPPORTED_CONFIGURED
+                                    },
+                                ),
+                            ),
+                            embedded = EmbeddedTailnetHostTcpDialer(
+                                engine = tailnetEngine,
+                                destinations = if (config.tailnetHost.isBlank()) {
+                                    emptyMap()
+                                } else {
+                                    mapOf(host.id to config.tailnetHost)
+                                },
+                                state = { mutableState.value.tailnet.state },
+                            ),
+                        )
+                    },
                     sshClient = JschHostSshClient(
                         mapOf(
                             host.id to SshHostAuthentication(
@@ -164,6 +175,11 @@ class DealerConnectionService : Service() {
                             ),
                         ),
                     ),
+                    daemon = if (host == InitialCodexHosts.fold6Termux) {
+                        TermuxCommunityCodexDaemon()
+                    } else {
+                        UpstreamCodexDaemon()
+                    },
                 )
                 val result = slice.run(
                     input,
@@ -225,7 +241,7 @@ class DealerConnectionService : Service() {
 
     @Synchronized
     fun takeControl(hostId: String, threadId: String): Boolean {
-        if (runJob != null || threadId.isBlank() || InitialCodexHosts.workstations.none { it.id == hostId }) {
+        if (runJob != null || threadId.isBlank() || InitialCodexHosts.all.none { it.id == hostId }) {
             return false
         }
         mutableState.update {
@@ -580,6 +596,7 @@ data class DealerRunConfig(
     val sshUser: String,
     val threadId: String,
     val turnText: String,
+    val loopbackSshPort: Int = 0,
 )
 
 internal fun DealerUiState.hasDealerControl(config: DealerRunConfig): Boolean =

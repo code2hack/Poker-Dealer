@@ -118,7 +118,19 @@ object InitialCodexHosts {
         connectionState = HostConnectionState.DISCONNECTED,
     )
 
+    val fold6Termux = CodexHost(
+        id = "fold6-termux",
+        displayName = "Fold6 Termux",
+        kind = CodexHostKind.TERMUX_ANDROID,
+        architecture = HostArchitecture.ANDROID_ARM64,
+        distribution = CodexDistribution.TERMUX_COMMUNITY,
+        connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
+        availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
+        connectionState = HostConnectionState.DISCONNECTED,
+    )
+
     val workstations = listOf(spark, u4090)
+    val all = workstations + fold6Termux
 }
 
 @Serializable

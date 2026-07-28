@@ -315,6 +315,107 @@ class CodexAppServerM1Test {
     }
 
     @Test
+    fun `Termux community daemon parses machine lifecycle output and requires a bound socket`() = runTest {
+        val daemon = TermuxCommunityCodexDaemon()
+        val session = ScriptedSshSession(
+            CommandResult(
+                1,
+                "",
+                "Error: failed to connect to the Termux app-server control socket: No such file or directory",
+            ),
+            CommandResult(0, loadFixtureText("termux-daemon-started.json")),
+            CommandResult(0, loadFixtureText("termux-daemon-running.json")),
+        )
+
+        val versions = daemon.ensureRunning(session)
+
+        assertEquals("running", versions.status)
+        assertEquals("0.145.0", versions.managedCodexVersion)
+        assertEquals("0.145.0", versions.appServerVersion)
+        assertTrue(versions.socketPath.orEmpty().endsWith("app-server-control.sock"))
+        assertEquals("\"pid\"", versions.raw["backend"].toString())
+        assertEquals(
+            listOf(
+                daemon.daemonVersionCommand,
+                daemon.daemonStartCommand,
+                daemon.daemonVersionCommand,
+            ),
+            session.execCommands,
+        )
+    }
+
+    @Test
+    fun `Termux community daemon rejects running output without socket evidence`() = runTest {
+        val session = ScriptedSshSession(
+            CommandResult(
+                0,
+                """{"status":"running","managedCodexVersion":"0.145.0","appServerVersion":"0.145.0"}""",
+            ),
+        )
+
+        val failure = runCatching {
+            TermuxCommunityCodexDaemon().ensureRunning(session)
+        }.exceptionOrNull()
+
+        assertTrue(failure?.message.orEmpty().contains("did not report a bound control socket"))
+    }
+
+    @Test
+    fun `Termux community daemon rejects an unobserved start status`() = runTest {
+        val session = ScriptedSshSession(
+            CommandResult(1, "", "control socket unavailable"),
+            CommandResult(0, loadFixtureText("termux-daemon-running.json")),
+        )
+
+        val failure = runCatching {
+            TermuxCommunityCodexDaemon().ensureRunning(session)
+        }.exceptionOrNull()
+
+        assertTrue(failure?.message.orEmpty().contains("start returned status running"))
+    }
+
+    @Test
+    fun `Fold6 Termux reuses the shared turn stack through loopback only`() = runTest {
+        val firstPeer = completeFirstPeer()
+        val secondPeer = completeReconnectPeer()
+        val peers = ArrayDeque(listOf(firstPeer, secondPeer))
+        val dialer = RecordingDialer(
+            capabilities = mapOf(HostConnectionRoute.SSH_LOOPBACK to RouteCapability.SUPPORTED_CONFIGURED),
+        )
+        val sshClient = RecordingSshClient(loadFixtureText("termux-daemon-running.json"))
+        val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
+        val slice = M1OneHostDealerSlice(
+            host = InitialCodexHosts.fold6Termux,
+            dialer = dialer,
+            sshClient = sshClient,
+            daemon = TermuxCommunityCodexDaemon(),
+            appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
+        )
+
+        val result = slice.run(
+            M1TurnInput(
+                text = "Dealer M1 proof from u4090",
+                clientUserMessageId = "dealer-client-u4090-m1",
+            ),
+            onCard = renderedCards::add,
+        )
+
+        assertEquals("${InitialCodexHosts.fold6Termux.id}/${result.threadId}", result.conversationId)
+        assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.route)
+        assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.reconnectRoute)
+        assertEquals(listOf(HostConnectionRoute.SSH_LOOPBACK, HostConnectionRoute.SSH_LOOPBACK), dialer.routes)
+        assertTrue(result.routeDiagnostics.all { it.route == HostConnectionRoute.SSH_LOOPBACK })
+        assertEquals(
+            listOf(DeliveryState.LOCAL_PENDING, DeliveryState.ACCEPTED, DeliveryState.DELIVERED),
+            renderedCards.filter { it.id == "dealer-client-u4090-m1" }.map { it.delivery },
+        )
+        assertEquals(listOf("initialize", "thread/list", "thread/resume", "thread/read", "turn/start"), firstPeer.requests)
+        assertEquals(listOf("initialized"), firstPeer.notifications)
+        assertEquals(listOf("initialize", "thread/resume", "thread/read"), secondPeer.requests)
+        assertEquals(listOf("initialized"), secondPeer.notifications)
+    }
+
+    @Test
     fun `LAN-only provider skips unsupported routes and preserves the LAN failure`() = runTest {
         val lanFailure = IllegalStateException("LAN connection refused")
         val dialer = RecordingDialer(failures = mapOf(HostConnectionRoute.SSH_LAN to lanFailure))
@@ -619,10 +720,11 @@ private class HangingJsonRpcPeer : JsonRpcPeer {
     }
 }
 
-private fun loadFixture(name: String): JsonElement {
-    val text = object {}.javaClass.getResource("/app-server/v2/$name")?.readText()
+private fun loadFixture(name: String): JsonElement = AppServerJson.parseToJsonElement(loadFixtureText(name))
+
+private fun loadFixtureText(name: String): String {
+    return object {}.javaClass.getResource("/app-server/v2/$name")?.readText()
         ?: error("Missing fixture $name")
-    return AppServerJson.parseToJsonElement(text)
 }
 
 private class RecordingDialer(
@@ -651,7 +753,10 @@ private class RecordingDialer(
     }
 }
 
-private class RecordingSshClient : HostSshClient {
+private class RecordingSshClient(
+    private val daemonStatus: String =
+        """{"status":"running","cliVersion":"codex-cli 0.145.0","appServerVersion":"0.145.0"}""",
+) : HostSshClient {
     val sessions = mutableListOf<ScriptedSshSession>()
 
     override suspend fun connect(
@@ -659,7 +764,7 @@ private class RecordingSshClient : HostSshClient {
         tcpStream: DuplexByteStream,
     ): HostSshSession {
         return ScriptedSshSession(
-            CommandResult(0, """{"status":"running","cliVersion":"codex-cli 0.145.0","appServerVersion":"0.145.0"}"""),
+            CommandResult(0, daemonStatus),
         ).also { sessions += it }
     }
 }

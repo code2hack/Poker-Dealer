@@ -9,27 +9,18 @@ import org.junit.jupiter.api.Test
 class CodexHostTest {
     @Test
     fun `termux host round trips with distribution and loopback route`() {
-        val host = CodexHost(
-            id = "fold6-termux",
-            displayName = "Fold6 Termux",
-            kind = CodexHostKind.TERMUX_ANDROID,
-            architecture = HostArchitecture.ANDROID_ARM64,
-            distribution = CodexDistribution.TERMUX_COMMUNITY,
-            connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
-            activeConnectionRoute = HostConnectionRoute.SSH_LOOPBACK,
-            availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
-            connectionState = HostConnectionState.WAITING_FOR_HOST_APP,
-            daemonState = DaemonState.STOPPED,
-            codexVersion = "community-build",
-        )
+        val host = InitialCodexHosts.fold6Termux
 
         val encoded = Json.encodeToString(host)
         val decoded = Json.decodeFromString<CodexHost>(encoded)
 
         assertEquals(host, decoded)
+        assertEquals(HostArchitecture.ANDROID_ARM64, decoded.architecture)
         assertEquals(CodexHostKind.TERMUX_ANDROID, decoded.kind)
+        assertEquals(CodexDistribution.TERMUX_COMMUNITY, decoded.distribution)
         assertEquals(listOf(HostConnectionRoute.SSH_LOOPBACK), decoded.connectionRoutes)
         assertEquals(HostAvailabilityClass.OPPORTUNISTIC, decoded.availabilityClass)
+        assertEquals(decoded, InitialCodexHosts.all.single { it.id == "fold6-termux" })
     }
 
     @Test
