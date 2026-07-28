@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
+import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
@@ -1171,6 +1172,9 @@ internal fun DealerUiState.hasUnsettledAction(locator: CodexThreadLocator): Bool
 private fun DealerCards(cards: List<Card>, modifier: Modifier = Modifier) {
     LazyColumn(modifier = modifier.fillMaxWidth()) {
         items(cards, key = Card::id) { card ->
+            var expanded by remember(card.id) { mutableStateOf(false) }
+            val structured = card.source == CardSource.CODEX_COMMAND ||
+                card.source == CardSource.CODEX_FILE_CHANGE
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1178,15 +1182,64 @@ private fun DealerCards(cards: List<Card>, modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    listOfNotNull(card.role.name, card.state.name, card.delivery?.name).joinToString(" | "),
+                    listOfNotNull(
+                        card.role.name,
+                        card.state.name,
+                        card.status,
+                        card.turnOutcome?.name,
+                        card.delivery?.name,
+                    ).joinToString(" | "),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF56616D),
                 )
-                Text(
-                    card.fullText,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                when (card.source) {
+                    CardSource.CODEX_COMMAND -> {
+                        Text(card.command ?: "Command unavailable", fontFamily = FontFamily.Monospace)
+                        Text(
+                            listOfNotNull(
+                                card.workingDirectory,
+                                card.exitCode?.let { "exit $it" },
+                            ).joinToString(" | "),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                    CardSource.CODEX_FILE_CHANGE -> {
+                        Text(
+                            "${card.fileChanges.size} affected path(s)",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        card.fileChanges.forEach {
+                            Text("${it.kind}: ${it.path}", fontFamily = FontFamily.Monospace)
+                        }
+                    }
+                    else -> Unit
+                }
+                if (!card.contentComplete) {
+                    Text(
+                        "Incomplete review material; approval is disabled.",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                card.storageError?.let {
+                    Text(
+                        "Retention failed: $it",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (structured && card.fullText.isNotEmpty()) {
+                    OutlinedButton(onClick = { expanded = !expanded }) {
+                        Text(if (expanded) "Collapse" else "Expand complete content")
+                    }
+                }
+                if (!structured || expanded) {
+                    Text(
+                        card.fullText,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             HorizontalDivider()
         }

@@ -1,0 +1,9 @@
+{
+  "method": "item/commandExecution/outputDelta",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "itemId": "cmd_1",
+    "delta": "one\n"
+  }
+}
