@@ -2,6 +2,7 @@ package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -39,6 +40,7 @@ class ThreadDiscoveryTest {
         assertEquals(2, rows.first().unreadCount)
         assertEquals(ControlSurface.DEALER, rows.first().intendedControlSurface)
         assertEquals("active", rows.first().status)
+        assertEquals(ThreadWorkState.BUSY, rows.first().workState)
         assertEquals("Named thread", rows.first().name)
         assertEquals(
             listOf(
