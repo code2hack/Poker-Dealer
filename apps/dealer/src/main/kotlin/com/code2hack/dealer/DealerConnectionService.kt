@@ -21,9 +21,14 @@ import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
+import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
+import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
+import com.code2hack.pokerdealer.protocol.appserver.M1TurnOutcome
+import com.code2hack.pokerdealer.protocol.appserver.M1TurnRecoveryException
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
+import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
@@ -101,9 +106,14 @@ class DealerConnectionService : Service() {
         }
         ensureForeground()
         runJob = scope.launch {
-            val cards = CardRevisionStore()
             val host = InitialCodexHosts.all.firstOrNull { it.id == config.hostId }
                 ?: error("Unsupported host ${config.hostId}")
+            val conversationId = "${host.id}/${config.threadId}"
+            val cards = CardRevisionStore().also { store ->
+                mutableState.value.cards
+                    .filter { it.conversationId == conversationId }
+                    .forEach(store::apply)
+            }
             val input = M1TurnInput(
                 text = config.turnText,
                 threadId = config.threadId,
@@ -111,7 +121,7 @@ class DealerConnectionService : Service() {
             )
             cards.apply(
                 input.pendingUserCard(
-                    conversationId = "${host.id}/${config.threadId}",
+                    conversationId = conversationId,
                     sequence = Long.MAX_VALUE,
                 ),
             )
@@ -120,10 +130,11 @@ class DealerConnectionService : Service() {
                     status = DealerRunState.CONNECTING,
                     hostId = host.id,
                     route = null,
-                    threadId = null,
+                    threadId = config.threadId,
                     appServerVersion = null,
                     cards = cards.values(),
                     routeDiagnostics = emptyList(),
+                    recovery = null,
                     error = null,
                 )
             }
@@ -194,6 +205,9 @@ class DealerConnectionService : Service() {
                     onRoute = { route, diagnostics ->
                         mutableState.update { it.withActiveRoute(route, diagnostics) }
                     },
+                    onRecovery = { recovery ->
+                        mutableState.update { it.withRecovery(host, recovery) }
+                    },
                 )
                 mutableState.update {
                     it.afterRun(
@@ -205,15 +219,28 @@ class DealerConnectionService : Service() {
                 }
             } catch (failure: CancellationException) {
                 mutableState.update {
-                    it.copy(status = DealerRunState.CANCELLED, route = null, error = null)
+                    it.copy(status = DealerRunState.CANCELLED, route = null, recovery = null, error = null)
                 }
                 throw failure
+            } catch (failure: M1TurnRecoveryException) {
+                mutableState.update {
+                    it.copy(
+                        status = failure.outcome.toDealerRunState(),
+                        route = null,
+                        recovery = null,
+                        error = failure.message,
+                    )
+                }
             } catch (failure: Throwable) {
                 mutableState.update { state ->
                     state.copy(
                         status = DealerRunState.ERROR,
                         route = null,
                         routeDiagnostics = failure.routeDiagnostics().ifEmpty { state.routeDiagnostics },
+                        recovery = DealerRecoveryUiState(
+                            phase = failure.m1FailurePhase(),
+                            action = host.recoveryAction(failure.m1FailurePhase()),
+                        ),
                         error = failure.message ?: failure::class.java.simpleName,
                     )
                 }
@@ -460,8 +487,12 @@ enum class DealerRunState(
     CONNECTING("Connecting", active = true),
     RUNNING("Running", active = true),
     RECONNECTING("Reconnecting", active = true),
+    BACKING_OFF("Waiting to retry", active = true),
     COMPLETED("Completed"),
     RECOVERED("Recovered"),
+    INTERRUPTED("Interrupted"),
+    FAILED("Failed"),
+    UNKNOWN("Unknown outcome"),
     CANCELLED("Cancelled"),
     ERROR("Error"),
 }
@@ -474,6 +505,7 @@ data class DealerUiState(
     val appServerVersion: String? = null,
     val cards: List<Card> = emptyList(),
     val routeDiagnostics: List<RouteDiagnostic> = emptyList(),
+    val recovery: DealerRecoveryUiState? = null,
     // ponytail: process-local soft control; persist it when host/thread Room storage lands.
     val control: DealerControlState? = null,
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
@@ -486,6 +518,14 @@ data class DealerUiState(
 data class DealerControlState(
     val locator: CodexThreadLocator,
     val surface: ControlSurface,
+)
+
+data class DealerRecoveryUiState(
+    val phase: M1FailurePhase,
+    val action: String,
+    val failedAttempt: Int? = null,
+    val maxAttempts: Int? = null,
+    val retryInMs: Long? = null,
 )
 
 internal object DealerServiceState {
@@ -504,6 +544,7 @@ internal fun DealerUiState.afterRun(
     threadId = threadId,
     appServerVersion = appServerVersion,
     routeDiagnostics = routeDiagnostics,
+    recovery = null,
     error = null,
 )
 
@@ -566,6 +607,7 @@ internal fun String.toEmbeddedTailnetUiState(): EmbeddedTailnetUiState {
 internal fun DealerUiState.withPhase(phase: M1ConnectionPhase): DealerUiState = copy(
     status = phase.toDealerRunState(),
     route = if (phase == M1ConnectionPhase.RECONNECTING) null else route,
+    recovery = if (phase == M1ConnectionPhase.RECONNECTING) recovery else null,
 )
 
 internal fun DealerUiState.withActiveRoute(
@@ -581,6 +623,49 @@ private fun M1ConnectionPhase.toDealerRunState(): DealerRunState = when (this) {
     M1ConnectionPhase.RUNNING -> DealerRunState.RUNNING
     M1ConnectionPhase.RECONNECTING -> DealerRunState.RECONNECTING
 }
+
+internal fun DealerUiState.withRecovery(
+    host: CodexHost,
+    update: M1RecoveryUpdate,
+): DealerUiState = copy(
+    status = DealerRunState.BACKING_OFF,
+    route = null,
+    recovery = DealerRecoveryUiState(
+        phase = update.failurePhase,
+        action = host.recoveryAction(update.failurePhase),
+        failedAttempt = update.failedAttempt,
+        maxAttempts = update.maxAttempts,
+        retryInMs = update.retryInMs,
+    ),
+)
+
+private fun M1TurnOutcome.toDealerRunState(): DealerRunState = when (this) {
+    M1TurnOutcome.INTERRUPTED -> DealerRunState.INTERRUPTED
+    M1TurnOutcome.FAILED -> DealerRunState.FAILED
+    M1TurnOutcome.UNKNOWN -> DealerRunState.UNKNOWN
+}
+
+internal fun CodexHost.recoveryAction(phase: M1FailurePhase): String =
+    if (this == InitialCodexHosts.fold6Termux) {
+        when (phase) {
+            M1FailurePhase.TCP_CONNECT ->
+                "Open Termux after Android suspension or process stop, then restore sshd."
+            M1FailurePhase.SSH_CONNECT ->
+                "Restore Termux sshd and verify the dedicated Dealer key and host pin."
+            M1FailurePhase.DAEMON ->
+                "Start the Termux app-server daemon; repair the community distribution if lifecycle checks fail."
+            M1FailurePhase.PROXY, M1FailurePhase.WEBSOCKET ->
+                "Restart the Termux app-server daemon and its proxy, then retry."
+            M1FailurePhase.APP_SERVER_INITIALIZE, M1FailurePhase.APP_SERVER_REQUEST ->
+                "Retry after app-server recovery; repair an unsupported community distribution if this repeats."
+            M1FailurePhase.TURN_START, M1FailurePhase.TURN_NOTIFICATIONS ->
+                "Restore Termux and retry recovery; Dealer will inspect the thread without replaying turn/start."
+            M1FailurePhase.RECONNECT_INSPECTION ->
+                "Restore Termux, then retry recovery after the bounded inspection window."
+        }
+    } else {
+        "Restore the failing ${phase.name.lowercase().replace('_', ' ')} phase and retry."
+    }
 
 internal fun Throwable.routeDiagnostics(): List<RouteDiagnostic> =
     when (this) {

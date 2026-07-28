@@ -3,7 +3,12 @@ package com.code2hack.dealer
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.DeliveryState
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
+import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
+import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
+import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
 import com.code2hack.pokerdealer.protocol.host.RouteCapability
 import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
 import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
@@ -81,6 +86,46 @@ class DealerUiStateTest {
         initialFailure.addSuppressed(RouteConnectionException("u4090", listOf(diagnostic), null))
 
         assertEquals(listOf(diagnostic), initialFailure.routeDiagnostics())
+    }
+
+    @Test
+    fun TermuxRecoveryShowsFailingPhaseBackoffAndAction() {
+        val state = DealerUiState(status = DealerRunState.RECONNECTING).withRecovery(
+            InitialCodexHosts.fold6Termux,
+            M1RecoveryUpdate(
+                failedAttempt = 1,
+                maxAttempts = 4,
+                retryInMs = 1_000,
+                failurePhase = M1FailurePhase.TCP_CONNECT,
+            ),
+        )
+
+        assertEquals(DealerRunState.BACKING_OFF, state.status)
+        assertEquals(M1FailurePhase.TCP_CONNECT, state.recovery?.phase)
+        assertEquals(1_000L, state.recovery?.retryInMs)
+        assertEquals(true, state.recovery?.action?.contains("Open Termux"))
+        assertEquals(true, state.cards.isEmpty())
+    }
+
+    @Test
+    fun acceptedOrUnknownActionBlocksAnotherTurnUntilReconciled() {
+        val locator = CodexThreadLocator("fold6-termux", "thread")
+        val pending = M1TurnInput("turn", "thread", "client")
+            .pendingUserCard("fold6-termux/thread", 1)
+
+        assertEquals(false, DealerUiState(cards = listOf(pending)).hasUnsettledAction(locator))
+        assertEquals(
+            true,
+            DealerUiState(
+                cards = listOf(pending.copy(delivery = DeliveryState.ACCEPTED)),
+            ).hasUnsettledAction(locator),
+        )
+        assertEquals(
+            true,
+            DealerUiState(
+                cards = listOf(pending.copy(delivery = DeliveryState.UNKNOWN)),
+            ).hasUnsettledAction(locator),
+        )
     }
 
     @Test

@@ -172,6 +172,85 @@ class CodexAppServerM1Test {
     }
 
     @Test
+    fun `Termux reconnect backs off after loopback failure then rereads without replay`() = runTest {
+        val firstPeer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("thread-list-request.json", "thread-list-response.json"),
+                fixture("thread-resume-request.json", "thread-resume-response.json"),
+                fixture("thread-read-request.json", "thread-read-response-before.json"),
+                fixture("turn-start-request.json", "turn-start-response.json"),
+            ),
+            notifications = listOf("agent-delta-notification-1.json"),
+        )
+        val recoveredPeer = completeReconnectPeer()
+        val peers = ArrayDeque(listOf(firstPeer, recoveredPeer))
+        val dialer = RecordingDialer(
+            capabilities = mapOf(HostConnectionRoute.SSH_LOOPBACK to RouteCapability.SUPPORTED_CONFIGURED),
+            failuresByCall = mapOf(2 to IllegalStateException("loopback sshd stopped")),
+        )
+        val recovery = mutableListOf<M1RecoveryUpdate>()
+        val slice = M1OneHostDealerSlice(
+            host = InitialCodexHosts.fold6Termux,
+            dialer = dialer,
+            sshClient = RecordingSshClient(
+                daemonStatus = loadFixtureText("termux-daemon-running.json"),
+            ),
+            daemon = TermuxCommunityCodexDaemon(),
+            reconnectPolicy = M1ReconnectPolicy(maxAttempts = 3, initialBackoffMs = 10, maxBackoffMs = 20),
+            appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
+        )
+
+        val result = slice.run(
+            M1TurnInput("Dealer M1 proof from u4090", clientUserMessageId = "dealer-client-u4090-m1"),
+            onRecovery = recovery::add,
+        )
+
+        assertEquals(M1FailurePhase.TCP_CONNECT, recovery.single().failurePhase)
+        assertEquals(10, recovery.single().retryInMs)
+        assertEquals(3, dialer.routes.size)
+        assertEquals(1, firstPeer.requests.count { it == "turn/start" })
+        assertEquals(0, recoveredPeer.requests.count { it == "turn/start" })
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
+        assertTrue(result.recoveredAfterDisconnect)
+    }
+
+    @Test
+    fun `cancellation during reconnect backoff stops before another connection attempt`() = runTest {
+        val firstPeer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("thread-list-request.json", "thread-list-response.json"),
+                fixture("thread-resume-request.json", "thread-resume-response.json"),
+                fixture("thread-read-request.json", "thread-read-response-before.json"),
+                fixture("turn-start-request.json", "turn-start-response.json"),
+            ),
+            notifications = listOf("agent-delta-notification-1.json"),
+        )
+        val dialer = RecordingDialer(failuresByCall = mapOf(2 to IllegalStateException("host stopped")))
+        val recovery = mutableListOf<M1RecoveryUpdate>()
+        val slice = M1OneHostDealerSlice(
+            dialer = dialer,
+            sshClient = RecordingSshClient(),
+            reconnectPolicy = M1ReconnectPolicy(initialBackoffMs = 60_000, maxBackoffMs = 60_000),
+            appServerFactory = { CodexAppServerSession(firstPeer) },
+        )
+        val job = launch {
+            slice.run(
+                M1TurnInput("Dealer M1 proof from u4090", clientUserMessageId = "dealer-client-u4090-m1"),
+                onRecovery = recovery::add,
+            )
+        }
+        while (recovery.isEmpty()) yield()
+
+        job.cancelAndJoin()
+
+        assertEquals(2, dialer.routes.size)
+        assertTrue(firstPeer.closed)
+        assertTrue(dialer.streams.single().closed)
+    }
+
+    @Test
     fun `uncertain turn acceptance keeps one user card marked unknown without replay`() = runTest {
         val firstPeer = FixtureJsonRpcPeer(
             exchanges = listOf(
@@ -212,6 +291,7 @@ class CodexAppServerM1Test {
         )
         assertEquals(listOf(1L, 2L), userRevisions.map { it.revision })
         assertTrue(failure?.message.orEmpty().contains("turn/start was not replayed"))
+        assertEquals(M1TurnOutcome.UNKNOWN, (failure as M1TurnRecoveryException).outcome)
         assertEquals(1, firstPeer.requests.count { it == "turn/start" })
         assertEquals(0, secondPeer.requests.count { it == "turn/start" })
     }
@@ -619,6 +699,7 @@ class CodexAppServerM1Test {
 
         assertTrue(failure is ConnectionPhaseTimeoutException)
         assertTrue(failure?.message.orEmpty().contains("reconnect inspection timed out after 100ms"))
+        assertEquals(M1FailurePhase.RECONNECT_INSPECTION, failure?.m1FailurePhase())
         assertEquals(
             listOf(DeliveryState.LOCAL_PENDING, DeliveryState.ACCEPTED),
             renderedCards.filter { it.id == "dealer-client-u4090-m1" }.map { it.delivery },
@@ -731,6 +812,7 @@ private class RecordingDialer(
     private val capabilities: Map<HostConnectionRoute, RouteCapability> =
         mapOf(HostConnectionRoute.SSH_LAN to RouteCapability.SUPPORTED_CONFIGURED),
     private val failures: Map<HostConnectionRoute, Throwable> = emptyMap(),
+    private val failuresByCall: Map<Int, Throwable> = emptyMap(),
 ) : HostTcpDialer {
     val routes = mutableListOf<HostConnectionRoute>()
     val ports = mutableListOf<Int>()
@@ -748,6 +830,7 @@ private class RecordingDialer(
     ): DuplexByteStream {
         routes += route
         ports += port
+        failuresByCall[routes.size]?.let { throw it }
         failures[route]?.let { throw it }
         return NoopStream().also { streams += it }
     }

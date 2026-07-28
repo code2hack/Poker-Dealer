@@ -7,15 +7,18 @@ import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.host.HostSshSession
+import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
 import com.code2hack.pokerdealer.protocol.host.RouteEndpoint
 import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -35,27 +38,8 @@ class TermuxLiveM2TTest {
         val host = InitialCodexHosts.fold6Termux
         val rendered = linkedMapOf<String, Card>()
         val clientId = "dealer-fold6-termux-m2t-${System.currentTimeMillis()}"
-        val dialer = SocketHostTcpDialer(
-            mapOf(
-                (host.id to HostConnectionRoute.SSH_LOOPBACK) to RouteEndpoint(
-                    requireEnv("POKER_DEALER_LIVE_TERMUX_HOST"),
-                    requireEnv("POKER_DEALER_LIVE_TERMUX_PORT").toInt(),
-                ),
-            ),
-        )
-        val sshClient = JschHostSshClient(
-            mapOf(
-                host.id to SshHostAuthentication(
-                    username = requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_USER"),
-                    privateKey = Files.readAllBytes(
-                        Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_PRIVATE_KEY")),
-                    ),
-                    knownHosts = Files.readAllBytes(
-                        Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_KNOWN_HOSTS")),
-                    ),
-                ),
-            ),
-        )
+        val dialer = liveDialer(host)
+        val sshClient = liveSshClient(host)
         val slice = M1OneHostDealerSlice(
             host = host,
             dialer = dialer,
@@ -94,6 +78,77 @@ class TermuxLiveM2TTest {
             probeUnsupportedServerRequest(host, dialer, sshClient, result.threadId)
         }
     }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "POKER_DEALER_LIVE_TERMUX", matches = "true")
+    fun `Termux recovers a real proxy EOF after bounded loopback backoff without replay`() = runBlocking {
+        val host = InitialCodexHosts.fold6Termux
+        val rendered = linkedMapOf<String, Card>()
+        val recovery = mutableListOf<M1RecoveryUpdate>()
+        val clientId = "dealer-fold6-termux-recovery-${System.currentTimeMillis()}"
+        val dialer = FaultingReconnectDialer(liveDialer(host))
+        val sshClient = liveSshClient(host)
+        var appServerConnections = 0
+        val slice = M1OneHostDealerSlice(
+            host = host,
+            dialer = dialer,
+            sshClient = sshClient,
+            daemon = TermuxCommunityCodexDaemon(),
+            appServerFactory = { proxy ->
+                val socket = AppServerWebSocket(proxy)
+                socket.open()
+                val peer = WebSocketJsonRpcPeer(socket)
+                appServerConnections += 1
+                CodexAppServerSession(
+                    if (appServerConnections == 1) DisconnectOnAgentDeltaPeer(peer) else peer,
+                )
+            },
+        )
+
+        val result = withTimeout(300_000) {
+            slice.run(
+                M1TurnInput(
+                    text = "Reply with exactly DEALER_TERMUX_RECOVERY_OK.",
+                    threadId = System.getenv("POKER_DEALER_LIVE_TERMUX_THREAD_ID")?.takeIf(String::isNotBlank),
+                    clientUserMessageId = clientId,
+                ),
+                onCard = { rendered[it.id] = it },
+                onRecovery = recovery::add,
+            )
+        }
+
+        assertTrue(result.recoveredAfterDisconnect)
+        assertEquals(1, result.matchingUserMessagesAfterReconnect)
+        assertEquals(DeliveryState.DELIVERED, result.userCard.delivery)
+        assertEquals(result.userCard, rendered[clientId])
+        assertEquals(M1FailurePhase.TCP_CONNECT, recovery.single().failurePhase)
+        assertEquals(3, dialer.connectCalls)
+        assertEquals(2, appServerConnections)
+        println("TERMUX_PROXY_RECOVERY=RECOVERED delivery=${result.userCard.delivery} matches=1")
+    }
+
+    private fun liveDialer(host: CodexHost) = SocketHostTcpDialer(
+        mapOf(
+            (host.id to HostConnectionRoute.SSH_LOOPBACK) to RouteEndpoint(
+                requireEnv("POKER_DEALER_LIVE_TERMUX_HOST"),
+                requireEnv("POKER_DEALER_LIVE_TERMUX_PORT").toInt(),
+            ),
+        ),
+    )
+
+    private fun liveSshClient(host: CodexHost) = JschHostSshClient(
+        mapOf(
+            host.id to SshHostAuthentication(
+                username = requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_USER"),
+                privateKey = Files.readAllBytes(
+                    Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_SSH_PRIVATE_KEY")),
+                ),
+                knownHosts = Files.readAllBytes(
+                    Path.of(requireEnv("POKER_DEALER_LIVE_TERMUX_KNOWN_HOSTS")),
+                ),
+            ),
+        ),
+    )
 
     private suspend fun probeUnsupportedServerRequest(
         host: CodexHost,
@@ -205,4 +260,47 @@ class TermuxLiveM2TTest {
 
     private fun requireEnv(name: String): String =
         System.getenv(name)?.takeIf(String::isNotBlank) ?: error("$name is required")
+}
+
+private class DisconnectOnAgentDeltaPeer(
+    private val delegate: JsonRpcPeer,
+) : JsonRpcPeer {
+    override suspend fun request(method: String, params: JsonElement): JsonElement =
+        delegate.request(method, params)
+
+    override suspend fun notify(method: String, params: JsonElement?) =
+        delegate.notify(method, params)
+
+    override suspend fun receiveNotification(): AppServerNotification? {
+        val notification = delegate.receiveNotification()
+        if (notification?.method == "item/agentMessage/delta") {
+            delegate.close()
+            error("Injected proxy EOF after the first agent delta")
+        }
+        return notification
+    }
+
+    override suspend fun close() = delegate.close()
+}
+
+private class FaultingReconnectDialer(
+    private val delegate: HostTcpDialer,
+) : HostTcpDialer {
+    var connectCalls = 0
+
+    override fun capability(host: CodexHost, route: HostConnectionRoute) =
+        delegate.capability(host, route)
+
+    override suspend fun connect(
+        host: CodexHost,
+        route: HostConnectionRoute,
+        port: Int,
+    ) = when (++connectCalls) {
+        2 -> error("Injected loopback sshd interruption")
+        3 -> {
+            delay(8_000)
+            delegate.connect(host, route, port)
+        }
+        else -> delegate.connect(host, route, port)
+    }
 }

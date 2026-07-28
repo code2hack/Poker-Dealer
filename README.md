@@ -157,13 +157,13 @@ M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/
 
 The shared LAN live test also passes against daemon-backed host-local TUI threads on Spark and u4090; see `docs/evidence/workstations-m2-2026-07-28.md`. Dealer can select either workstation and requires an explicit host/thread-specific soft control claim before sending. A Fold6 run also preserved a VPN-routed LAN failure, fell through to embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Live mixed-version proof remains outstanding.
 
-Fold6 Termux now passes the first M2T capability slice through loopback SSH, its community-distribution daemon lifecycle, the shared app-server stack, and the same daemon-backed local TUI; see `docs/evidence/fold6-m2t-turn-2026-07-28.md`. The host remains degraded pending Android suspension recovery in issue #14.
+Fold6 Termux now passes M2T through loopback SSH, its community-distribution daemon lifecycle, the shared app-server stack, the same daemon-backed local TUI, and bounded interruption recovery without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
 Dealer selects Spark, u4090, or Fold6 Termux and accepts only the routes valid for that host. It imports an unencrypted Android-compatible PEM SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn. The UI and notification can cancel the run, one-shot completion reports `Completed` or `Recovered`, and the submitted user card shows pending, accepted, delivered, or unknown delivery state.
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-The next implementation slice is issue #14: prove Fold6 Termux interruption and Android suspension recovery without replay before changing its compatibility state from degraded. Mixed-version workstation proof remains separate M2 work.
+The next implementation slice is the remaining M2 mixed-version workstation proof. Spark and u4090 have passed the shared stack on the same Codex version; broad mixed-version compatibility is not yet proven.
 
 ## Build and test
 

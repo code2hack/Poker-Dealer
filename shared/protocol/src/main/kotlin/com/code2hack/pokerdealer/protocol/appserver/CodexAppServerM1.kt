@@ -19,6 +19,7 @@ import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
 import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
 import com.code2hack.pokerdealer.protocol.host.withConnectionPhaseTimeout
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -433,6 +434,63 @@ enum class M1ConnectionPhase {
     RECONNECTING,
 }
 
+enum class M1FailurePhase {
+    TCP_CONNECT,
+    SSH_CONNECT,
+    DAEMON,
+    PROXY,
+    WEBSOCKET,
+    APP_SERVER_INITIALIZE,
+    APP_SERVER_REQUEST,
+    TURN_START,
+    TURN_NOTIFICATIONS,
+    RECONNECT_INSPECTION,
+}
+
+private class M1PhaseMarker(
+    val phase: M1FailurePhase,
+) : IllegalStateException("$phase failed")
+
+data class M1ReconnectPolicy(
+    val maxAttempts: Int = 6,
+    val initialBackoffMs: Long = 1_000,
+    val maxBackoffMs: Long = 8_000,
+) {
+    init {
+        require(maxAttempts > 0) { "Reconnect attempts must be positive" }
+        require(initialBackoffMs >= 0) { "Initial reconnect backoff must not be negative" }
+        require(maxBackoffMs >= initialBackoffMs) { "Maximum reconnect backoff must cover the initial backoff" }
+    }
+
+    fun backoffMs(failedAttempt: Int): Long {
+        var backoff = initialBackoffMs
+        repeat((failedAttempt - 1).coerceAtLeast(0)) {
+            backoff = if (backoff >= maxBackoffMs / 2) maxBackoffMs else backoff * 2
+        }
+        return backoff
+    }
+}
+
+data class M1RecoveryUpdate(
+    val failedAttempt: Int,
+    val maxAttempts: Int,
+    val retryInMs: Long,
+    val failurePhase: M1FailurePhase,
+)
+
+enum class M1TurnOutcome {
+    INTERRUPTED,
+    FAILED,
+    UNKNOWN,
+}
+
+class M1TurnRecoveryException(
+    val outcome: M1TurnOutcome,
+    val delivery: DeliveryState,
+    message: String,
+    cause: Throwable,
+) : IllegalStateException(message, cause)
+
 data class M1RunResult(
     val host: CodexHost,
     val route: HostConnectionRoute,
@@ -456,6 +514,7 @@ class M1OneHostDealerSlice(
     private val daemon: CodexDaemonLifecycle = UpstreamCodexDaemon(),
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val timeouts: M1Timeouts = M1Timeouts(),
+    private val reconnectPolicy: M1ReconnectPolicy = M1ReconnectPolicy(),
     private val appServerFactory: suspend (DuplexByteStream) -> CodexAppServerSession = { proxy ->
         val socket = AppServerWebSocket(proxy, handshakeTimeoutMs = timeouts.webSocketUpgradeMs)
         socket.open()
@@ -471,6 +530,7 @@ class M1OneHostDealerSlice(
         onCard: suspend (Card) -> Unit = {},
         onPhase: suspend (M1ConnectionPhase) -> Unit = {},
         onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit = { _, _ -> },
+        onRecovery: suspend (M1RecoveryUpdate) -> Unit = {},
     ): M1RunResult {
         require(input.text.isNotBlank()) { "Turn text must not be blank" }
         require(input.clientUserMessageId.isNotBlank()) { "Client user-message ID must not be blank" }
@@ -494,14 +554,22 @@ class M1OneHostDealerSlice(
         }
         val firstPass = try {
             connect(onRoute).useConnected { first ->
-                val initializeResult = first.appServer.initialize()
-                val listedThreads = first.appServer.threadList()
+                val initializeResult = inPhase(M1FailurePhase.APP_SERVER_INITIALIZE) {
+                    first.appServer.initialize()
+                }
+                val listedThreads = inPhase(M1FailurePhase.APP_SERVER_REQUEST) {
+                    first.appServer.threadList()
+                }
                 val threadId = input.threadId ?: listedThreads.firstThreadId()
                     ?: error("No app-server threads available on ${host.id}")
                 val conversationId = "${host.id}/$threadId"
-                first.appServer.threadResume(threadId)
+                inPhase(M1FailurePhase.APP_SERVER_REQUEST) {
+                    first.appServer.threadResume(threadId)
+                }
                 val historyCards = AppServerThreadProjection.cards(
-                    first.appServer.threadRead(threadId),
+                    inPhase(M1FailurePhase.APP_SERVER_REQUEST) {
+                        first.appServer.threadRead(threadId)
+                    },
                     conversationId = conversationId,
                 )
                 val pendingUserCard = input.pendingUserCard(
@@ -523,20 +591,24 @@ class M1OneHostDealerSlice(
                 historyCards.forEach { emitCard(it) }
                 emitCard(pendingUserCard)
                 turnAttempted = true
-                val turnStart = first.appServer.turnStart(threadId, input.text, input.clientUserMessageId)
+                val turnStart = inPhase(M1FailurePhase.TURN_START) {
+                    first.appServer.turnStart(threadId, input.text, input.clientUserMessageId)
+                }
                 val acceptedUserCard = pendingUserCard.withDelivery(DeliveryState.ACCEPTED, emittedRevisions)
                 latestUserCard = acceptedUserCard
                 emitCard(acceptedUserCard)
                 onPhase(M1ConnectionPhase.RUNNING)
                 val turnId = turnStart.turnId()
                     ?: error("turn/start response did not include a turn ID")
-                val streamedCards = first.appServer.streamAgentCards(
-                    threadId = threadId,
-                    turnId = turnId,
-                    conversationId = conversationId,
-                    firstSequence = acceptedUserCard.sequence + 1,
-                    onCard = emitCard,
-                )
+                val streamedCards = inPhase(M1FailurePhase.TURN_NOTIFICATIONS) {
+                    first.appServer.streamAgentCards(
+                        threadId = threadId,
+                        turnId = turnId,
+                        conversationId = conversationId,
+                        firstSequence = acceptedUserCard.sequence + 1,
+                        onCard = emitCard,
+                    )
+                }
                 FirstPass(
                     route = first.route,
                     daemonVersions = first.daemonVersions,
@@ -560,7 +632,7 @@ class M1OneHostDealerSlice(
             if (turnAttempted && context != null) {
                 onPhase(M1ConnectionPhase.RECONNECTING)
                 val inspection = try {
-                    inspectAfterReconnect(context.threadId, input.clientUserMessageId, onRoute)
+                    inspectAfterReconnect(context.threadId, input.clientUserMessageId, onRoute, onRecovery)
                 } catch (recoveryFailure: Throwable) {
                     if (recoveryFailure is CancellationException) {
                         withContext(NonCancellable) {
@@ -603,17 +675,20 @@ class M1OneHostDealerSlice(
                         )
                     }
                 }
-                throw IllegalStateException(
-                    "Turn outcome is ${inspection.turnStatus(input.clientUserMessageId)}; reconnect found " +
-                        "${inspection.matchingUserMessages} matching user message(s). turn/start was not replayed.",
-                    failure,
+                val status = inspection.turnStatus(input.clientUserMessageId)
+                throw M1TurnRecoveryException(
+                    outcome = status.toM1TurnOutcome(),
+                    delivery = reconciledUserCard.delivery ?: DeliveryState.UNKNOWN,
+                    message = "Turn outcome is $status; reconnect found ${inspection.matchingUserMessages} " +
+                        "matching user message(s). turn/start was not replayed.",
+                    cause = failure,
                 )
             }
             throw failure
         }
 
         onPhase(M1ConnectionPhase.RECONNECTING)
-        val inspection = inspectAfterReconnect(firstPass.threadId, input.clientUserMessageId, onRoute)
+        val inspection = inspectAfterReconnect(firstPass.threadId, input.clientUserMessageId, onRoute, onRecovery)
         val reconciledUserCard = if (inspection.matchingUserMessages == 1) {
             firstPass.userCard.withDelivery(DeliveryState.DELIVERED, emittedRevisions)
         } else {
@@ -645,18 +720,56 @@ class M1OneHostDealerSlice(
         threadId: String,
         clientUserMessageId: String,
         onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit,
+        onRecovery: suspend (M1RecoveryUpdate) -> Unit,
     ): ReconnectInspection = withConnectionPhaseTimeout("reconnect inspection", timeouts.reconnectInspectionMs) {
-        connect(onRoute).useConnected { connection ->
-            connection.appServer.initialize()
-            connection.appServer.threadResume(threadId)
-            val threadRead = connection.appServer.threadRead(threadId)
-            ReconnectInspection(
-                route = connection.route,
-                threadRead = threadRead,
-                matchingUserMessages = AppServerThreadProjection.countUserClientId(threadRead, clientUserMessageId),
-                diagnostics = connection.routeDiagnostics,
-            )
+        val failures = mutableListOf<Throwable>()
+        repeat(reconnectPolicy.maxAttempts) { index ->
+            try {
+                return@withConnectionPhaseTimeout inspectOnce(threadId, clientUserMessageId, onRoute)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (failure: Throwable) {
+                failures += failure
+                val failedAttempt = index + 1
+                if (failedAttempt == reconnectPolicy.maxAttempts) {
+                    failures.dropLast(1).forEach(failure::addSuppressed)
+                    throw failure
+                }
+                val backoffMs = reconnectPolicy.backoffMs(failedAttempt)
+                onRecovery(
+                    M1RecoveryUpdate(
+                        failedAttempt = failedAttempt,
+                        maxAttempts = reconnectPolicy.maxAttempts,
+                        retryInMs = backoffMs,
+                        failurePhase = failure.m1FailurePhase(),
+                    ),
+                )
+                delay(backoffMs)
+            }
         }
+        error("Reconnect attempts exhausted")
+    }
+
+    private suspend fun inspectOnce(
+        threadId: String,
+        clientUserMessageId: String,
+        onRoute: suspend (HostConnectionRoute, List<RouteDiagnostic>) -> Unit,
+    ): ReconnectInspection = connect(onRoute).useConnected { connection ->
+        inPhase(M1FailurePhase.APP_SERVER_INITIALIZE) {
+            connection.appServer.initialize()
+        }
+        inPhase(M1FailurePhase.APP_SERVER_REQUEST) {
+            connection.appServer.threadResume(threadId)
+        }
+        val threadRead = inPhase(M1FailurePhase.APP_SERVER_REQUEST) {
+            connection.appServer.threadRead(threadId)
+        }
+        ReconnectInspection(
+            route = connection.route,
+            threadRead = threadRead,
+            matchingUserMessages = AppServerThreadProjection.countUserClientId(threadRead, clientUserMessageId),
+            diagnostics = connection.routeDiagnostics,
+        )
     }
 
     private suspend fun connect(
@@ -666,18 +779,23 @@ class M1OneHostDealerSlice(
         var proxy: DuplexByteStream? = null
         try {
             onRoute(routed.route, routed.diagnostics)
-            val versions = withConnectionPhaseTimeout("daemon status/start", timeouts.daemonCommandMs) {
-                daemon.ensureRunning(routed.ssh)
+            val versions = inPhase(M1FailurePhase.DAEMON) {
+                withConnectionPhaseTimeout("daemon status/start", timeouts.daemonCommandMs) {
+                    daemon.ensureRunning(routed.ssh)
+                }
             }
-            proxy = withConnectionPhaseTimeout("app-server proxy start", timeouts.proxyStartMs) {
-                routed.ssh.execStream(daemon.appServerProxyCommand)
+            proxy = inPhase(M1FailurePhase.PROXY) {
+                withConnectionPhaseTimeout("app-server proxy start", timeouts.proxyStartMs) {
+                    routed.ssh.execStream(daemon.appServerProxyCommand)
+                }
             }
+            val appServer = inPhase(M1FailurePhase.WEBSOCKET) { appServerFactory(proxy) }
             return ConnectedM1(
                 routed.route,
                 routed.tcp,
                 routed.ssh,
                 versions,
-                appServerFactory(proxy),
+                appServer,
                 routed.diagnostics,
             )
         } catch (failure: Throwable) {
@@ -739,11 +857,15 @@ class M1OneHostDealerSlice(
     private suspend fun connectSsh(route: HostConnectionRoute): RoutedSsh {
         var tcp: DuplexByteStream? = null
         try {
-            tcp = withConnectionPhaseTimeout("TCP connect ${host.id} via $route", timeouts.tcpConnectMs) {
-                dialer.connect(host, route, port = 22)
+            tcp = inPhase(M1FailurePhase.TCP_CONNECT) {
+                withConnectionPhaseTimeout("TCP connect ${host.id} via $route", timeouts.tcpConnectMs) {
+                    dialer.connect(host, route, port = 22)
+                }
             }
-            val ssh = withConnectionPhaseTimeout("SSH connect ${host.id} via $route", timeouts.sshConnectMs) {
-                sshClient.connect(host, tcp)
+            val ssh = inPhase(M1FailurePhase.SSH_CONNECT) {
+                withConnectionPhaseTimeout("SSH connect ${host.id} via $route", timeouts.sshConnectMs) {
+                    sshClient.connect(host, tcp)
+                }
             }
             return RoutedSsh(route, tcp, ssh)
         } catch (failure: Throwable) {
@@ -890,6 +1012,36 @@ class M1OneHostDealerSlice(
             delivery = delivery,
         )
     }
+
+    private suspend fun <T> inPhase(
+        phase: M1FailurePhase,
+        block: suspend () -> T,
+    ): T = try {
+        block()
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (failure: Throwable) {
+        failure.addSuppressed(M1PhaseMarker(phase))
+        throw failure
+    }
+}
+
+fun Throwable.m1FailurePhase(): M1FailurePhase = when (this) {
+    is M1PhaseMarker -> phase
+    else -> if (message?.startsWith("reconnect inspection timed out") == true) {
+        M1FailurePhase.RECONNECT_INSPECTION
+    } else {
+        suppressed.filterIsInstance<M1PhaseMarker>().firstOrNull()?.phase
+            ?: cause?.m1FailurePhase()
+            ?: suppressed.firstNotNullOfOrNull { it.m1FailurePhase() }
+            ?: M1FailurePhase.APP_SERVER_REQUEST
+    }
+}
+
+private fun String.toM1TurnOutcome(): M1TurnOutcome = when (this) {
+    "interrupted", "cancelled" -> M1TurnOutcome.INTERRUPTED
+    "failed" -> M1TurnOutcome.FAILED
+    else -> M1TurnOutcome.UNKNOWN
 }
 
 private suspend fun DuplexByteStream.closeSuppressing(failure: Throwable) {

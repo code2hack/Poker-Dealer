@@ -814,6 +814,11 @@ The shared workstation slice now works against daemon-backed local-TUI threads o
 
 Complete when loopback SSH, distribution-specific daemon behavior, proxy/app-server APIs, local TUI coexistence, one turn, and Android suspension recovery work with a tested community build.
 
+M2T completed on the tested Fold6 community build on 2026-07-28. Capability, local-TUI
+coexistence, and the first turn are recorded in `docs/evidence/fold6-m2t-turn-2026-07-28.md`;
+bounded proxy, `sshd`, daemon, and Termux-process recovery without replay is recorded in
+`docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
+
 ### M3 — Structured actions and approvals
 
 Complete when Dealer supports command/file-change presentation, approvals/user input, steering/interruption, lossless request handling, and duplicate-resolution prevention.
@@ -840,8 +845,10 @@ Complete when:
 
 ## 17. Immediate next job
 
-A fresh Codex worker MUST begin with M2T, the Fold6 Termux host slice defined above. It MUST reuse the existing route-neutral stream, SSH, proxy WebSocket, app-server, projection, delivery reconciliation, and reconnect implementation. The new host path is loopback SSH plus `codex app-server proxy`, with distribution-specific daemon behavior kept behind the lifecycle boundary.
+A fresh Codex worker SHOULD complete the remaining M2 mixed-version workstation proof. Spark and
+u4090 MUST use the same daemon-backed app-server stack while running different supported Codex
+versions, and core initialize, thread, turn, projection, control, reconnect, and no-replay behavior
+MUST remain compatible.
 
-The worker MUST capability-test the installed community Termux build and record real-Fold6 evidence for daemon lifecycle, Unix-socket binding, proxy and initialization, required thread/turn APIs, local-TUI coexistence, one turn, reconnect, and Android suspension recovery.
-
-The worker MUST NOT access Termux-private files or Unix sockets directly, route the Termux host through embedded tsnet, assume upstream Linux installation or update behavior, restore a bridge or tmux backend, add Poker networking, or build a terminal.
+Do not broaden that proof into experimental APIs, Poker networking, Morse, ASR, a terminal,
+cross-host migration, or changes to the completed Fold6 Termux route.

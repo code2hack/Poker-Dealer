@@ -71,7 +71,7 @@ For Fold6 development diagnostics, keep wireless ADB enabled and prefer it over 
 
 The same LAN app-server slice now passes against daemon-backed local-TUI threads on both Spark and u4090, and Dealer requires an explicit host-qualified soft control claim before sending; see `docs/evidence/workstations-m2-2026-07-28.md`. A Fold6 run retained a VPN-routed LAN failure, selected embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts ran Codex `0.145.0`, so live mixed-version behavior remains partial M2 evidence rather than M2 completion.
 
-The first M2T capability slice now qualifies the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, and its daemon-backed local TUI; see `docs/evidence/fold6-m2t-turn-2026-07-28.md`. Fold6 Termux remains degraded until issue #14 proves interruption and Android suspension recovery without replay. The remaining M2 mixed-version proof stays separate.
+M2T now qualifies the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and bounded recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`. The remaining M2 mixed-version proof stays separate.
 
 ## Core identity
 

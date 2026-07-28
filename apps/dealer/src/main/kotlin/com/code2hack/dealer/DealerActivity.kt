@@ -47,6 +47,7 @@ import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -277,8 +278,10 @@ private fun DealerApp(
         ?.surface
         ?: ControlSurface.NONE
     val hasDealerControl = currentControlSurface == ControlSurface.DEALER
+    val hasUnsettledAction = state.hasUnsettledAction(locator)
     val canRun = setup.serviceReady &&
         !state.running &&
+        !hasUnsettledAction &&
         hasDealerControl &&
         validRoute &&
         sshUser.isNotBlank() &&
@@ -385,6 +388,20 @@ private fun DealerApp(
             }
             state.appServerVersion?.let {
                 Text("app-server $it", color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
+            }
+            state.recovery?.let {
+                Text(
+                    buildString {
+                        append("Recovery: ").append(it.phase)
+                        if (it.failedAttempt != null && it.maxAttempts != null) {
+                            append(" | attempt ").append(it.failedAttempt).append('/').append(it.maxAttempts)
+                        }
+                        if (it.retryInMs != null) append(" | retry in ").append(it.retryInMs).append("ms")
+                    },
+                    color = Color(0xFFFFC38B),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                Text(it.action, color = Color(0xFFFFC38B), style = MaterialTheme.typography.labelSmall)
             }
         }
 
@@ -539,6 +556,13 @@ private fun DealerApp(
             state.error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
+            if (hasUnsettledAction) {
+                Text(
+                    "Restore the host and reconcile this accepted/unknown action before sending another turn.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
 
         HorizontalDivider()
@@ -568,6 +592,11 @@ private fun DealerApp(
             },
         )
     }
+}
+
+internal fun DealerUiState.hasUnsettledAction(locator: CodexThreadLocator): Boolean = cards.any {
+    it.conversationId == "${locator.hostId}/${locator.threadId}" &&
+        it.delivery in setOf(DeliveryState.ACCEPTED, DeliveryState.UNKNOWN)
 }
 
 @Composable

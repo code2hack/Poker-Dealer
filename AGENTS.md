@@ -157,9 +157,11 @@ M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence
 
 The current M2 workstation slice proves Spark and u4090 through the same daemon-backed app-server stack, including explicit soft control and LAN-to-embedded-tailnet fallback. Mixed-version proof remains separate M2 work; see `docs/evidence/workstations-m2-2026-07-28.md`.
 
-The first M2T capability slice now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, and its daemon-backed local TUI; see `docs/evidence/fold6-m2t-turn-2026-07-28.md`. The host remains degraded. Unless a newer committed plan says otherwise, implement issue #14: recover the Fold6 Termux thread after interruption or Android suspension without replay.
+M2T now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, start Poker networking, Morse, ASR, a terminal, or broad experimental app-server APIs in M2T.
+The remaining M2 work is mixed-version workstation proof. Do not claim broad version compatibility until Spark and u4090 have been exercised with different supported Codex versions.
+
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, or start Poker networking, Morse, ASR, a terminal, or broad experimental app-server APIs during the remaining M2 work.
 
 ## Completion discipline
 
