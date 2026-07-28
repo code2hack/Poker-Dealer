@@ -54,7 +54,10 @@ class InitializedHostSessionConnector(
                 )
                 socket.open()
                 CodexAppServerSession(
-                    WebSocketJsonRpcPeer(socket),
+                    WebSocketJsonRpcPeer(
+                        socket,
+                        supportedServerRequests = setOf(COMMAND_APPROVAL_METHOD),
+                    ),
                     requestTimeoutMs = configured.timeouts.appServerRequestMs,
                     turnInactivityTimeoutMs = configured.timeouts.turnInactivityMs,
                     experimentalApi = descendantFilterQualified,

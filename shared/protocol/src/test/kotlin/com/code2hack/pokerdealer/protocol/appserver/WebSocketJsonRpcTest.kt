@@ -153,6 +153,24 @@ class WebSocketJsonRpcTest {
     }
 
     @Test
+    fun `handled request can fail closed only once`() = runTest {
+        val stream = InteractiveStream()
+        val peer = WebSocketJsonRpcPeer(
+            AppServerWebSocket(stream, maskFactory = { byteArrayOf(0, 0, 0, 0) }),
+            supportedServerRequests = setOf(COMMAND_APPROVAL_METHOD),
+        )
+        stream.feedFixture("multiplex-handled-request.json")
+        val request = peer.receiveServerRequest()!!
+
+        peer.reject(request, "Incomplete command scope")
+        val duplicate = runCatching { peer.reject(request, "again") }.exceptionOrNull()
+
+        assertTrue(stream.writtenBytes().containsClientText("Incomplete command scope"))
+        assertTrue(duplicate?.message.orEmpty().contains("no longer pending"))
+        peer.close()
+    }
+
+    @Test
     fun `disconnect closes transport and fails every response waiter once`() = runTest {
         val stream = InteractiveStream()
         val peer = WebSocketJsonRpcPeer(AppServerWebSocket(stream))

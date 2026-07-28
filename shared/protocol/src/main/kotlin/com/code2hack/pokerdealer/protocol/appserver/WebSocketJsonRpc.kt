@@ -273,6 +273,9 @@ interface JsonRpcPeer {
     suspend fun respond(request: AppServerRequest, result: JsonElement) {
         error("Server requests are not supported by this peer")
     }
+    suspend fun reject(request: AppServerRequest, message: String) {
+        error("Server requests are not supported by this peer")
+    }
     suspend fun awaitClose(): Nothing = awaitCancellation()
     suspend fun close()
 }
@@ -352,6 +355,13 @@ class WebSocketJsonRpcPeer(
             put("id", request.id)
             put("result", result)
         })
+    }
+
+    override suspend fun reject(request: AppServerRequest, message: String) {
+        require(pendingServerRequests.remove(request.id, request)) {
+            "Server request ${request.id} is no longer pending"
+        }
+        reject(request.id, request.method, request.raw ?: JsonObject(emptyMap()), message)
     }
 
     override suspend fun close() {

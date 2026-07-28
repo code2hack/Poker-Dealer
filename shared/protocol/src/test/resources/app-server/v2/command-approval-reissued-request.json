@@ -1,0 +1,13 @@
+{
+  "id": "approval-reissued",
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-2",
+    "turnId": "turn-2",
+    "itemId": "item-2",
+    "approvalId": "callback-reissued",
+    "command": "pwd",
+    "cwd": "/work/repo",
+    "startedAtMs": 1004
+  }
+}

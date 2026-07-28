@@ -1,0 +1,16 @@
+{
+  "id": 2,
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "item-network",
+    "command": null,
+    "cwd": null,
+    "networkApprovalContext": {
+      "host": "example.test",
+      "protocol": "https"
+    },
+    "startedAtMs": 1001
+  }
+}
