@@ -277,6 +277,14 @@ interface JsonRpcPeer {
     suspend fun close()
 }
 
+class JsonRpcRemoteException(
+    val method: String,
+    val error: JsonElement,
+) : IllegalStateException("app-server $method failed: $error") {
+    val code: Int?
+        get() = ((error as? JsonObject)?.get("code") as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+}
+
 class WebSocketJsonRpcPeer(
     private val socket: AppServerWebSocket,
     private val maxPendingNotifications: Int = 1_024,
@@ -362,9 +370,7 @@ class WebSocketJsonRpcPeer(
                         if (pending == null) {
                             runCatching { onDiagnostic(inbound.raw) }
                         } else if (inbound.error != null) {
-                            pending.result.completeExceptionally(
-                                IllegalStateException("app-server ${pending.method} failed: ${inbound.error}"),
-                            )
+                            pending.result.completeExceptionally(JsonRpcRemoteException(pending.method, inbound.error))
                         } else {
                             pending.result.complete(inbound.result ?: JsonNull)
                         }

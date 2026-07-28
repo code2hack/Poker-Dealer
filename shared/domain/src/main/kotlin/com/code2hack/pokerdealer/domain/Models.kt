@@ -87,6 +87,21 @@ data class CodexThreadLocator(
     val threadId: String,
 )
 
+@Serializable
+data class DiscoveredThread(
+    val locator: CodexThreadLocator,
+    val name: String? = null,
+    val preview: String? = null,
+    val workingDirectory: String? = null,
+    val updatedAtSeconds: Long? = null,
+    val status: String? = null,
+    val archived: Boolean = false,
+    val loaded: Boolean = false,
+    val attached: Boolean = false,
+    val unreadCount: Int = 0,
+    val intendedControlSurface: ControlSurface = ControlSurface.NONE,
+)
+
 object InitialCodexHosts {
     val spark = CodexHost(
         id = "spark",

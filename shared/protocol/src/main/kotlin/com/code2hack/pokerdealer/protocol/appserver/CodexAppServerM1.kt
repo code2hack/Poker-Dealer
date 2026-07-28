@@ -193,6 +193,41 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun threadDiscoveryList(
+        archived: Boolean,
+        cursor: String? = null,
+        limit: Int = 100,
+    ): JsonObject {
+        checkInitialized()
+        return request(
+            "thread/list",
+            buildJsonObject {
+                put("limit", JsonPrimitive(limit))
+                put("archived", JsonPrimitive(archived))
+                cursor?.let { put("cursor", JsonPrimitive(it)) }
+                put(
+                    "sourceKinds",
+                    buildJsonArray {
+                        add(JsonPrimitive("cli"))
+                        add(JsonPrimitive("vscode"))
+                        add(JsonPrimitive("appServer"))
+                    },
+                )
+            },
+        ).jsonObject
+    }
+
+    suspend fun threadLoadedListOrNull(): JsonObject? {
+        checkInitialized()
+        return try {
+            request("thread/loaded/list", JsonObject(emptyMap()), closeOnFailure = false).jsonObject
+        } catch (failure: JsonRpcRemoteException) {
+            if (failure.code == -32601) null else closeAfterFailure(failure)
+        } catch (failure: Throwable) {
+            closeAfterFailure(failure)
+        }
+    }
+
     suspend fun threadResume(threadId: String): JsonObject {
         checkInitialized()
         return request(
@@ -327,12 +362,16 @@ class CodexAppServerSession(
         peer.close()
     }
 
-    private suspend fun request(method: String, params: JsonElement): JsonElement = try {
+    private suspend fun request(
+        method: String,
+        params: JsonElement,
+        closeOnFailure: Boolean = true,
+    ): JsonElement = try {
         withConnectionPhaseTimeout("$method response", requestTimeoutMs) {
             peer.request(method, params)
         }
     } catch (failure: Throwable) {
-        closeAfterFailure(failure)
+        if (closeOnFailure) closeAfterFailure(failure) else throw failure
     }
 
     private suspend fun notify(method: String, params: JsonElement? = null) {

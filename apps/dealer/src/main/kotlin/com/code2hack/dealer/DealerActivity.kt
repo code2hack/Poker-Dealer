@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.text.format.DateUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -48,8 +49,10 @@ import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
+import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -104,6 +107,8 @@ class DealerActivity : ComponentActivity() {
                         onCancel = { service?.cancelRun() },
                         onEnableHost = ::enableHost,
                         onDisableHost = { service?.disableHost(it) },
+                        onRefreshThreads = { service?.refreshThreads(it) },
+                        onBrowseThread = { service?.browseThread(it) },
                         onTakeControl = { hostId, threadId -> service?.takeControl(hostId, threadId) },
                         onYieldControl = { hostId, threadId -> service?.yieldControl(hostId, threadId) },
                         onStartTailnet = ::startEmbeddedTailnet,
@@ -262,6 +267,8 @@ private fun DealerApp(
     onCancel: () -> Unit,
     onEnableHost: (DealerHostConnectionConfig) -> Unit,
     onDisableHost: (String) -> Unit,
+    onRefreshThreads: (String) -> Unit,
+    onBrowseThread: (CodexThreadLocator) -> Unit,
     onTakeControl: (String, String) -> Unit,
     onYieldControl: (String, String) -> Unit,
     onStartTailnet: () -> Unit,
@@ -317,6 +324,12 @@ private fun DealerApp(
         sshUser.isNotBlank() &&
         setup.privateKeyLoaded &&
         setup.knownHostsLoaded
+    val discoveredThreads = state.threads.values
+        .filter { it.locator.hostId == selectedHostId }
+        .sortedWith(
+            compareBy<DiscoveredThread> { it.archived }
+                .thenByDescending { it.updatedAtSeconds ?: Long.MIN_VALUE },
+        )
 
     Column(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -463,8 +476,17 @@ private fun DealerApp(
                 }
             }
             if (hostSession?.enabled == true) {
-                Button(onClick = { onDisableHost(selectedHostId) }) {
-                    Text("Disconnect host")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onDisableHost(selectedHostId) }) {
+                        Text("Disconnect host")
+                    }
+                    OutlinedButton(
+                        onClick = { onRefreshThreads(selectedHostId) },
+                        enabled = hostSession.status == HostSessionStatus.CONNECTED &&
+                            selectedHostId !in state.refreshingThreadHosts,
+                    ) {
+                        Text(if (selectedHostId in state.refreshingThreadHosts) "Refreshing…" else "Refresh threads")
+                    }
                 }
                 hostSession.error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error)
@@ -486,6 +508,12 @@ private fun DealerApp(
                 ) {
                     Text("Connect host")
                 }
+            }
+            state.threadDiscoveryErrors[selectedHostId]?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
+            }
+            discoveredThreads.forEach { thread ->
+                ThreadRow(thread, onBrowseThread)
             }
             if (isTermux) {
                 OutlinedTextField(
@@ -621,7 +649,11 @@ private fun DealerApp(
 
         HorizontalDivider()
         DealerCards(
-            state.cards.filter { it.conversationId.substringBefore('/') == selectedHostId },
+            state.cards.filter {
+                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
+                    it.conversationId == "${browsed.hostId}/${browsed.threadId}"
+                } ?: (it.conversationId.substringBefore('/') == selectedHostId)
+            },
             Modifier.weight(1f),
         )
     }
@@ -648,6 +680,50 @@ private fun DealerApp(
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun ThreadRow(
+    thread: DiscoveredThread,
+    onBrowseThread: (CodexThreadLocator) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF3F5F7))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(thread.name ?: thread.preview ?: thread.locator.threadId)
+        Text(
+            listOfNotNull(
+                thread.locator.hostId,
+                thread.status,
+                "loaded".takeIf { thread.loaded },
+                "archived".takeIf { thread.archived },
+                "attached".takeIf { thread.attached },
+                "unread ${thread.unreadCount}".takeIf { thread.unreadCount > 0 },
+                "control ${thread.intendedControlSurface}".takeIf {
+                    thread.intendedControlSurface != ControlSurface.NONE
+                },
+            ).joinToString(" | "),
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF56616D),
+        )
+        Text(thread.locator.threadId, style = MaterialTheme.typography.labelSmall)
+        thread.workingDirectory?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+        }
+        thread.updatedAtSeconds?.let {
+            Text(
+                DateUtils.getRelativeTimeSpanString(it * 1_000).toString(),
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        OutlinedButton(onClick = { onBrowseThread(thread.locator) }) {
+            Text("Browse history")
+        }
     }
 }
 

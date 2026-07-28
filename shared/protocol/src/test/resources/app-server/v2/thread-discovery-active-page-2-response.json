@@ -1,0 +1,28 @@
+{
+  "id": 4,
+  "result": {
+    "data": [
+      {
+        "id": "thr_second",
+        "preview": "Second page",
+        "cwd": "/workspace/two",
+        "source": "vscode",
+        "status": {"type": "idle"},
+        "updatedAt": 1784600400
+      },
+      {
+        "id": "thr_exec",
+        "preview": "Hidden exec thread",
+        "source": "exec",
+        "status": {"type": "idle"}
+      },
+      {
+        "id": "thr_subagent",
+        "preview": "Hidden subagent thread",
+        "source": "subAgent",
+        "status": {"type": "idle"}
+      }
+    ],
+    "nextCursor": null
+  }
+}

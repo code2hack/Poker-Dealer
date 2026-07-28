@@ -1,0 +1,16 @@
+{
+  "id": 5,
+  "result": {
+    "data": [
+      {
+        "id": "thr_archived",
+        "preview": "Archived app-server thread",
+        "cwd": "/workspace/archive",
+        "source": "appServer",
+        "status": {"type": "idle"},
+        "updatedAt": 1784600100
+      }
+    ],
+    "nextCursor": null
+  }
+}

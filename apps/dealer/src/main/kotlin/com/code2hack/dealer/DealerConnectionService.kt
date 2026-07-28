@@ -16,6 +16,7 @@ import com.code2hack.pokerdealer.domain.CardRevisionStore
 import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
+import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -29,7 +30,11 @@ import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnectionConfig
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
+import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
+import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
+import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
@@ -72,6 +77,7 @@ class DealerConnectionService : Service() {
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
     private lateinit var hostSessions: HostSessionManager
     private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
+    private var connectedHostIds = emptySet<String>()
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -101,6 +107,11 @@ class DealerConnectionService : Service() {
             hostSessions.start()
             hostSessions.state.collect { sessions ->
                 mutableState.update { it.copy(hostSessions = sessions) }
+                val connected = sessions.filterValues {
+                    it.status == HostSessionStatus.CONNECTED
+                }.keys
+                (connected - connectedHostIds).forEach(::refreshThreads)
+                connectedHostIds = connected
                 if (sessions.values.any(HostSessionState::enabled)) {
                     ensureForeground()
                 } else stopIfIdle()
@@ -307,6 +318,82 @@ class DealerConnectionService : Service() {
         }
     }
 
+    fun refreshThreads(hostId: String) {
+        if (mutableState.value.refreshingThreadHosts.contains(hostId)) return
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        scope.launch {
+            mutableState.update {
+                it.copy(
+                    refreshingThreadHosts = it.refreshingThreadHosts + hostId,
+                    threadDiscoveryErrors = it.threadDiscoveryErrors - hostId,
+                )
+            }
+            try {
+                val discovered = HostThreadDiscovery(appServer).discover(hostId) { locator ->
+                    val state = mutableState.value
+                    val existing = state.threads[locator]
+                    ThreadDiscoveryLocalState(
+                        attached = existing?.attached == true,
+                        unreadCount = existing?.unreadCount ?: 0,
+                        intendedControlSurface = state.control
+                            ?.takeIf { it.locator == locator }
+                            ?.surface
+                            ?: ControlSurface.NONE,
+                    )
+                }
+                mutableState.update { state ->
+                    state.copy(
+                        threads = state.threads.filterKeys { it.hostId != hostId } +
+                            discovered.associateBy(DiscoveredThread::locator),
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        threadDiscoveryErrors = it.threadDiscoveryErrors +
+                            (hostId to (failure.message ?: failure::class.java.simpleName)),
+                    )
+                }
+            } finally {
+                mutableState.update {
+                    it.copy(refreshingThreadHosts = it.refreshingThreadHosts - hostId)
+                }
+            }
+        }
+    }
+
+    fun browseThread(locator: CodexThreadLocator) {
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: return
+        scope.launch {
+            try {
+                val conversationId = "${locator.hostId}/${locator.threadId}"
+                val cards = AppServerThreadProjection.cards(
+                    appServer.threadRead(locator.threadId),
+                    conversationId,
+                )
+                mutableState.update { state ->
+                    state.copy(
+                        cards = state.cards.filterNot { it.conversationId == conversationId } + cards,
+                        browsedThread = locator,
+                        threadDiscoveryErrors = state.threadDiscoveryErrors - locator.hostId,
+                        error = null,
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        threadDiscoveryErrors = it.threadDiscoveryErrors +
+                            (locator.hostId to (failure.message ?: failure::class.java.simpleName)),
+                    )
+                }
+            }
+        }
+    }
+
     private fun cacheHostSession(stored: StoredHostConnection): HostSessionConnectionConfig {
         val config = stored.config
         val host = InitialCodexHosts.all.single { it.id == config.hostId }
@@ -378,6 +465,15 @@ class DealerConnectionService : Service() {
                     CodexThreadLocator(hostId, threadId),
                     ControlSurface.DEALER,
                 ),
+                threads = it.threads.mapValues { (locator, thread) ->
+                    thread.copy(
+                        intendedControlSurface = when {
+                            locator == CodexThreadLocator(hostId, threadId) -> ControlSurface.DEALER
+                            thread.intendedControlSurface == ControlSurface.DEALER -> ControlSurface.NONE
+                            else -> thread.intendedControlSurface
+                        },
+                    )
+                },
                 error = null,
             )
         }
@@ -389,7 +485,15 @@ class DealerConnectionService : Service() {
         val locator = CodexThreadLocator(hostId, threadId)
         if (runJob != null || mutableState.value.control?.locator != locator) return false
         mutableState.update {
-            it.copy(control = DealerControlState(locator, ControlSurface.LOCAL_TUI))
+            val discovered = it.threads[locator]
+            it.copy(
+                control = DealerControlState(locator, ControlSurface.LOCAL_TUI),
+                threads = if (discovered == null) {
+                    it.threads
+                } else {
+                    it.threads + (locator to discovered.copy(intendedControlSurface = ControlSurface.LOCAL_TUI))
+                },
+            )
         }
         return true
     }
@@ -629,6 +733,10 @@ data class DealerUiState(
     val control: DealerControlState? = null,
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),
+    val threads: Map<CodexThreadLocator, DiscoveredThread> = emptyMap(),
+    val refreshingThreadHosts: Set<String> = emptySet(),
+    val threadDiscoveryErrors: Map<String, String> = emptyMap(),
+    val browsedThread: CodexThreadLocator? = null,
     val error: String? = null,
 ) {
     val running: Boolean
