@@ -1,0 +1,26 @@
+{
+  "method": "item/completed",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "completedAtMs": 1785283203000,
+    "item": {
+      "id": "file_1",
+      "type": "fileChange",
+      "status": "completed",
+      "changes": [
+        {
+          "path": "shared/domain/Card.kt",
+          "kind": "update",
+          "diff": "@@ -1 +1 @@\n-old\n+newer\n"
+        },
+        {
+          "path": "shared/protocol/CardProjection.kt",
+          "kind": "add",
+          "diff": "@@ -0,0 +1 @@\n+projection\n"
+        }
+      ],
+      "futureOptionalField": 23
+    }
+  }
+}

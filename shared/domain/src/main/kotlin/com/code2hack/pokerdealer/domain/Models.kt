@@ -196,6 +196,22 @@ data class Card(
     val updatedAtMs: Long,
     val delivery: DeliveryState? = null,
     val source: CardSource,
+    val turnId: String? = null,
+    val command: String? = null,
+    val workingDirectory: String? = null,
+    val status: String? = null,
+    val exitCode: Int? = null,
+    val fileChanges: List<FileChangeContent> = emptyList(),
+    val turnOutcome: TurnOutcome? = null,
+    val contentComplete: Boolean = true,
+    val storageError: String? = null,
+)
+
+@Serializable
+data class FileChangeContent(
+    val path: String,
+    val kind: String,
+    val diff: String,
 )
 
 @Serializable

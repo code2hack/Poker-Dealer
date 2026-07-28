@@ -13,6 +13,7 @@ import android.os.IBinder
 import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
+import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
@@ -43,9 +44,11 @@ import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
 import com.code2hack.pokerdealer.protocol.appserver.HostThreadStartSettings
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
+import com.code2hack.pokerdealer.protocol.appserver.AppServerStructuredCardProjection
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
 import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
+import com.code2hack.pokerdealer.protocol.appserver.RetainedCardStore
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
@@ -92,6 +95,7 @@ class DealerConnectionService : Service() {
     private lateinit var hostSessions: HostSessionManager
     private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
     private lateinit var threadAttachmentStore: DealerThreadAttachmentStore
+    private lateinit var retainedCardStore: RetainedCardStore
     private val attachmentMutex = Mutex()
     private val draftMutex = Mutex()
     private val notificationJobs = mutableMapOf<String, Job>()
@@ -114,6 +118,7 @@ class DealerConnectionService : Service() {
         super.onCreate()
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
+        retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
         hostSessions = HostSessionManager(
             hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
             intentStore = HostConnectionIntentDataStore(this),
@@ -132,6 +137,15 @@ class DealerConnectionService : Service() {
                 }
                 emptySet<CodexThreadLocator>() to ThreadActionState()
             }
+            val restoredCards = restoredAttachments.flatMap { locator ->
+                runCatching { retainedCardStore.read(locator) }
+                    .onFailure { failure ->
+                        mutableState.update {
+                            it.copy(error = "Unable to restore retained cards: ${failure.message}")
+                        }
+                    }
+                    .getOrDefault(emptyList())
+            }
             mutableState.update {
                 it.copy(
                     threadAttachments = ThreadAttachmentState(
@@ -139,6 +153,8 @@ class DealerConnectionService : Service() {
                         dealerClaims = it.threadAttachments.dealerClaims.intersect(restoredAttachments),
                     ),
                     threadActions = restoredActions,
+                    cards = (it.cards + restoredCards)
+                        .distinctBy { card -> card.conversationId to card.id },
                 )
             }
             hostSessions.start()
@@ -1005,6 +1021,28 @@ class DealerConnectionService : Service() {
                 val locator = CodexThreadLocator(hostId, threadId)
                 val turnId = (turn?.get("id") as? JsonPrimitive)?.contentOrNull
                     ?: (params["turnId"] as? JsonPrimitive)?.contentOrNull
+                if (notification.method in STRUCTURED_CARD_NOTIFICATIONS) {
+                    val conversationId = "${locator.hostId}/${locator.threadId}"
+                    val projected = AppServerStructuredCardProjection.apply(
+                        current = mutableState.value.cards.filter { it.conversationId == conversationId },
+                        notification = notification,
+                        conversationId = conversationId,
+                    )
+                    val retained = retainCards(locator, projected.cards)
+                    mutableState.update { state ->
+                        state.copy(
+                            cards = state.cards.filterNot { it.conversationId == conversationId } +
+                                retained.cards,
+                            error = retained.error ?: state.error,
+                        )
+                    }
+                    if (projected.requiresReread) {
+                        scope.launch {
+                            delay(INCOMPLETE_CARD_REREAD_DELAY_MILLIS)
+                            browseThread(locator)
+                        }
+                    }
+                }
                 when (notification.method) {
                     "thread/name/updated" -> {
                         val name = (params["threadName"] as? JsonPrimitive)?.contentOrNull
@@ -1084,6 +1122,23 @@ class DealerConnectionService : Service() {
                 val response = appServer.threadRead(locator.threadId)
                 val authoritative = AppServerThreadProjection.authoritativeState(response)
                 val cards = AppServerThreadProjection.cards(response, conversationId)
+                val prior = mutableState.value.cards
+                    .filter { it.conversationId == conversationId }
+                    .associateBy(Card::id)
+                val reconciled = cards.map { card ->
+                    prior[card.id]?.let {
+                        card.copy(
+                            sequence = it.sequence,
+                            revision = it.revision + 1,
+                            createdAtMs = it.createdAtMs,
+                        )
+                    } ?: card
+                }
+                val localOnly = prior.values.filter { card ->
+                    card.id !in reconciled.mapTo(mutableSetOf(), Card::id) &&
+                        card.delivery != null
+                }
+                val retained = retainCards(locator, localOnly + reconciled)
                 var clearDraft = false
                 var clearInterrupt = false
                 mutableState.update { state ->
@@ -1097,26 +1152,10 @@ class DealerConnectionService : Service() {
                         delivered -> state.threadActions.inputAccepted(locator, pending.clientId)
                         else -> state.threadActions
                     }.reconcileInterrupt(locator, authoritative.activeTurnId)
-                    val prior = state.cards
-                        .filter { it.conversationId == conversationId }
-                        .associateBy(Card::id)
-                    val reconciled = cards.map { card ->
-                        prior[card.id]?.let {
-                            card.copy(
-                                sequence = it.sequence,
-                                revision = it.revision + 1,
-                                createdAtMs = it.createdAtMs,
-                            )
-                        } ?: card
-                    }
-                    val localOnly = prior.values.filter { card ->
-                        card.id !in reconciled.mapTo(mutableSetOf(), Card::id) &&
-                            card.delivery != null
-                    }
                     state.copy(
                         threadActions = actions,
                         cards = state.cards.filterNot { it.conversationId == conversationId } +
-                            localOnly + reconciled,
+                            retained.cards,
                         threads = state.threads[locator]?.let { row ->
                             state.threads + (
                                 locator to row.copy(
@@ -1132,7 +1171,7 @@ class DealerConnectionService : Service() {
                         } ?: state.threads,
                         browsedThread = locator,
                         threadDiscoveryErrors = state.threadDiscoveryErrors - locator.hostId,
-                        error = null,
+                        error = retained.error,
                     )
                 }
                 if (clearDraft) {
@@ -1159,6 +1198,39 @@ class DealerConnectionService : Service() {
                     )
                 }
             }
+        }
+    }
+
+    private suspend fun retainCards(
+        locator: CodexThreadLocator,
+        cards: List<Card>,
+    ): RetainedCards {
+        if (locator !in mutableState.value.threadAttachments.attached) return RetainedCards(cards)
+        val clean = cards.map { card ->
+            if (card.source in STRUCTURED_CARD_SOURCES) {
+                card.copy(
+                    contentComplete = card.reviewMaterialPresent(),
+                    storageError = null,
+                )
+            } else {
+                card
+            }
+        }
+        return try {
+            retainedCardStore.write(locator, clean)
+            RetainedCards(clean)
+        } catch (failure: Throwable) {
+            val message = failure.message ?: failure::class.java.simpleName
+            RetainedCards(
+                cards = clean.map { card ->
+                    if (card.source in STRUCTURED_CARD_SOURCES) {
+                        card.copy(contentComplete = false, storageError = message)
+                    } else {
+                        card
+                    }
+                },
+                error = "Unable to retain complete command/file content: $message",
+            )
         }
     }
 
@@ -1463,7 +1535,32 @@ class DealerConnectionService : Service() {
         const val NOTIFICATION_ID = 4090
         const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
         const val TAILNET_STATUS_INTERVAL_MILLIS = 1_000L
+        const val INCOMPLETE_CARD_REREAD_DELAY_MILLIS = 500L
+        val STRUCTURED_CARD_NOTIFICATIONS = setOf(
+            "item/started",
+            "item/completed",
+            "item/commandExecution/outputDelta",
+            "item/fileChange/outputDelta",
+            "item/fileChange/patchUpdated",
+            "turn/diff/updated",
+            "turn/completed",
+        )
+        val STRUCTURED_CARD_SOURCES = setOf(
+            CardSource.CODEX_COMMAND,
+            CardSource.CODEX_FILE_CHANGE,
+        )
     }
+}
+
+private data class RetainedCards(
+    val cards: List<Card>,
+    val error: String? = null,
+)
+
+private fun Card.reviewMaterialPresent(): Boolean = when (source) {
+    CardSource.CODEX_COMMAND -> command != null && workingDirectory != null && status != null
+    CardSource.CODEX_FILE_CHANGE -> status != null && fileChanges.isNotEmpty()
+    else -> true
 }
 
 enum class DealerRunState(

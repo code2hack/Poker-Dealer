@@ -10,6 +10,7 @@ import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.domain.TurnOutcome
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
 import com.code2hack.pokerdealer.protocol.host.HostSshClient
@@ -1287,9 +1288,31 @@ object AppServerThreadProjection {
         return thread["turns"].orEmptyArray().flatMap { turnElement ->
             val turn = turnElement as? JsonObject ?: return@flatMap emptyList()
             val createdAtMs = (turn.long("startedAt") ?: 0L) * 1_000
+            val turnId = turn.string("id")
+            val turnOutcome = when (turn.string("status")) {
+                "completed" -> TurnOutcome.COMPLETED
+                "interrupted", "cancelled" -> TurnOutcome.INTERRUPTED
+                "failed" -> TurnOutcome.FAILED
+                else -> null
+            }
             turn["items"].orEmptyArray().mapNotNull { itemElement ->
                 val item = itemElement as? JsonObject
                 val type = item?.string("type") ?: "unknown"
+                val structured = item?.let {
+                    AppServerStructuredCardProjection.run {
+                        it.structuredCard(
+                            conversationId = conversationId,
+                            turnId = turnId,
+                            sequence = sequence,
+                            createdAtMs = createdAtMs,
+                            turnOutcome = turnOutcome,
+                        )
+                    }
+                }
+                if (structured != null) {
+                    sequence++
+                    return@mapNotNull structured
+                }
                 val text = item?.projectedText(type) ?: itemElement.toString()
                 if (text.isBlank()) return@mapNotNull null
                 Card(
@@ -1306,6 +1329,8 @@ object AppServerThreadProjection {
                     updatedAtMs = createdAtMs,
                     delivery = DeliveryState.DELIVERED.takeIf { type == "userMessage" },
                     source = sourceFor(type),
+                    turnId = turnId,
+                    turnOutcome = turnOutcome,
                 )
             }
         }

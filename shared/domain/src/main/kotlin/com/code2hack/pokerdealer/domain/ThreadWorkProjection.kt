@@ -6,6 +6,7 @@ enum class ThreadWorkState {
     READY,
 }
 
+@kotlinx.serialization.Serializable
 enum class TurnOutcome {
     COMPLETED,
     FAILED,

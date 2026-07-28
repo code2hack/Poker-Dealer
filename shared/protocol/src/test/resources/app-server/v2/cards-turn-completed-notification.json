@@ -1,0 +1,12 @@
+{
+  "method": "turn/completed",
+  "params": {
+    "threadId": "thr_cards",
+    "turn": {
+      "id": "turn_cards",
+      "threadId": "thr_cards",
+      "status": "completed",
+      "items": []
+    }
+  }
+}

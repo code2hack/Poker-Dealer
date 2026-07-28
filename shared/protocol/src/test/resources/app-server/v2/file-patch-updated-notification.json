@@ -1,0 +1,20 @@
+{
+  "method": "item/fileChange/patchUpdated",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "itemId": "file_1",
+    "changes": [
+      {
+        "path": "shared/domain/Card.kt",
+        "kind": "update",
+        "diff": "@@ -1 +1 @@\n-old\n+newer\n"
+      },
+      {
+        "path": "shared/protocol/CardProjection.kt",
+        "kind": "add",
+        "diff": "@@ -0,0 +1 @@\n+projection\n"
+      }
+    ]
+  }
+}
