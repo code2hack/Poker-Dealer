@@ -4,6 +4,7 @@ import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
+import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
@@ -228,5 +229,54 @@ class DealerUiStateTest {
         assertEquals("high", state.threadActions.pendingReasoningEfforts[locator])
         assertEquals(locator, state.browsedThread)
         assertEquals(null, state.newThread)
+    }
+
+    @Test
+    fun failedResumeKeepsSettingsOpenWithoutAttachmentOrControl() {
+        val locator = CodexThreadLocator("u4090", "loaded")
+        val state = DealerUiState(
+            resumeThread = ResumeThreadUiState(
+                locator = locator,
+                observedWorkingDirectories = listOf("/work/repo"),
+                workingDirectory = "/work/repo",
+                resuming = true,
+            ),
+        ).withThreadResumeFailure("Resume settings unavailable: override ignored")
+
+        assertEquals("Resume settings unavailable: override ignored", state.resumeThread?.error)
+        assertFalse(state.resumeThread?.resuming ?: true)
+        assertEquals(emptySet<CodexThreadLocator>(), state.threadAttachments.attached)
+        assertEquals(emptySet<CodexThreadLocator>(), state.threadAttachments.dealerClaims)
+    }
+
+    @Test
+    fun inheritedResumeAttachesAsObserverWhileVerifiedOverridesGrantControl() {
+        val locator = CodexThreadLocator("u4090", "loaded")
+        val initial = DealerUiState(
+            threads = mapOf(
+                locator to DiscoveredThread(
+                    locator = locator,
+                    workingDirectory = "/work/repo",
+                    workState = ThreadWorkState.READY,
+                ),
+            ),
+        )
+
+        val observer = initial.withResumedThread(
+            locator,
+            ThreadStartSelection("/work/repo"),
+            grantControl = false,
+        )
+        val controlled = initial.withResumedThread(
+            locator,
+            ThreadStartSelection("/work/repo", modelOverride = "model"),
+            grantControl = true,
+        )
+
+        assertEquals(setOf(locator), observer.threadAttachments.attached)
+        assertEquals(emptySet<CodexThreadLocator>(), observer.threadAttachments.dealerClaims)
+        assertEquals(ControlSurface.NONE, observer.threads.getValue(locator).intendedControlSurface)
+        assertEquals(setOf(locator), controlled.threadAttachments.dealerClaims)
+        assertEquals(ControlSurface.DEALER, controlled.threads.getValue(locator).intendedControlSurface)
     }
 }

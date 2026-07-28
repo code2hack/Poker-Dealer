@@ -29,6 +29,10 @@ class ThreadStartSettingsTest {
         val catalog = HostThreadStartSettings(session).read("/work/repo")
 
         assertEquals("host-default", catalog.defaultProviderId)
+        assertEquals("medium", catalog.defaultReasoningEffort)
+        assertEquals("workspace-write", catalog.defaultSandbox)
+        assertEquals("on-request", catalog.defaultApprovalPolicy)
+        assertEquals("user", catalog.defaultApprovalsReviewer)
         assertEquals(
             listOf("custom-id" to "Custom Provider", "unnamed-id" to "unnamed-id"),
             catalog.providers.map { it.id to it.label },
@@ -95,6 +99,56 @@ class ThreadStartSettingsTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun `resume sends reviewed settings but keeps reasoning for the next turn`() = runTest {
+        val peer = StartFixturePeer(
+            "thread-resume-reviewed-request.json" to "thread-resume-reviewed-response.json",
+        )
+        val session = CodexAppServerSession(peer).also { it.initialize() }
+
+        session.threadResume(
+            "thr_loaded",
+            ThreadStartSelection(
+                "/work/repo",
+                "custom-id",
+                "exact-wire-model",
+                reasoningEffort = "high",
+                permissionPreset = PermissionPreset.ASK_ON_PHONE,
+            ),
+        )
+
+        assertEquals(listOf("thread-resume-reviewed-request.json"), peer.checkedFixtures)
+    }
+
+    @Test
+    fun `loaded thread ignoring resume overrides is unsubscribed and never accepted`() {
+        val peer = StartFixturePeer(
+            "thread-resume-reviewed-request.json" to
+                "thread-resume-ignored-overrides-response.json",
+            "thread-unsubscribe-loaded-request.json" to "thread-unsubscribe-response.json",
+        )
+        val session = CodexAppServerSession(peer)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                session.initialize()
+                session.threadResume(
+                    "thr_loaded",
+                    ThreadStartSelection(
+                        "/work/repo",
+                        "custom-id",
+                        "exact-wire-model",
+                        permissionPreset = PermissionPreset.ASK_ON_PHONE,
+                    ),
+                )
+            }
+        }
+        assertEquals(
+            listOf("thread-resume-reviewed-request.json", "thread-unsubscribe-loaded-request.json"),
+            peer.checkedFixtures,
+        )
     }
 }
 

@@ -811,46 +811,192 @@ class DealerConnectionService : Service() {
     }
 
     fun attachThread(locator: CodexThreadLocator) {
-        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
-            mutableState.update { it.copy(error = "Connect ${locator.hostId} before attaching") }
+        val thread = mutableState.value.threads[locator] ?: run {
+            mutableState.update { it.copy(error = "Refresh ${locator.hostId} before attaching") }
             return
         }
+        val workingDirectory = thread.workingDirectory ?: run {
+            mutableState.update { it.copy(error = "The stored thread has no working directory") }
+            return
+        }
+        val observed = mutableState.value.threads.values
+            .asSequence()
+            .filter { it.locator.hostId == locator.hostId }
+            .mapNotNull(DiscoveredThread::workingDirectory)
+            .distinct()
+            .sorted()
+            .toList()
+        mutableState.update {
+            it.copy(
+                resumeThread = ResumeThreadUiState(
+                    locator = locator,
+                    observedWorkingDirectories = observed,
+                    workingDirectory = workingDirectory,
+                ),
+                error = null,
+            )
+        }
+        reviewResumeThread(locator, workingDirectory)
+    }
+
+    fun reviewResumeThread(locator: CodexThreadLocator, workingDirectory: String) {
+        if (!workingDirectory.startsWith('/') || '\u0000' in workingDirectory) {
+            mutableState.update {
+                it.copy(
+                    resumeThread = it.resumeThread?.copy(
+                        workingDirectory = workingDirectory,
+                        catalog = null,
+                        error = "Working directory must be an absolute host path",
+                    ),
+                )
+            }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update {
+                it.copy(
+                    resumeThread = it.resumeThread?.copy(
+                        error = "Connect ${locator.hostId} before attaching",
+                    ),
+                )
+            }
+            return
+        }
+        mutableState.update {
+            it.copy(
+                resumeThread = it.resumeThread?.copy(
+                    workingDirectory = workingDirectory,
+                    catalog = null,
+                    loading = true,
+                    error = null,
+                ),
+            )
+        }
         scope.launch {
-            attachmentMutex.withLock {
-                if (locator in mutableState.value.threadAttachments.attached) return@withLock
-                try {
-                    appServer.threadResume(locator.threadId)
-                    try {
-                        threadAttachmentStore.attach(locator)
-                    } catch (failure: Throwable) {
-                        runCatching { appServer.threadUnsubscribe(locator.threadId) }
-                        throw failure
+            try {
+                val catalog = HostThreadStartSettings(appServer).read(workingDirectory)
+                mutableState.update { state ->
+                    val current = state.resumeThread
+                    if (current?.locator == locator &&
+                        current.workingDirectory == workingDirectory
+                    ) {
+                        state.copy(resumeThread = current.copy(catalog = catalog, loading = false))
+                    } else {
+                        state
                     }
-                    mutableState.update { state ->
-                        val attached = state.threadAttachments.attach(locator)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update { state ->
+                    val current = state.resumeThread
+                    if (current?.locator == locator &&
+                        current.workingDirectory == workingDirectory
+                    ) {
                         state.copy(
-                            threadAttachments = attached,
-                            threads = state.threads[locator]?.let { thread ->
-                                state.threads + (
-                                    locator to thread.copy(
-                                        attached = true,
-                                        intendedControlSurface = ControlSurface.NONE,
-                                    )
-                                )
-                            } ?: state.threads,
-                            error = null,
+                            resumeThread = current.copy(
+                                loading = false,
+                                error = failure.message ?: failure::class.java.simpleName,
+                            ),
                         )
-                    }
-                    browseThread(locator)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Throwable) {
-                    mutableState.update {
-                        it.copy(error = failure.message ?: failure::class.java.simpleName)
+                    } else {
+                        state
                     }
                 }
             }
         }
+    }
+
+    fun resumeThread(selection: ThreadStartSelection, takeControl: Boolean) {
+        val review = mutableState.value.resumeThread ?: return
+        if (review.resuming) return
+        val catalog = review.catalog ?: run {
+            mutableState.update {
+                it.copy(resumeThread = it.resumeThread?.copy(error = "Review host settings before attaching"))
+            }
+            return
+        }
+        val validated = try {
+            selection.validated(catalog)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update {
+                it.copy(resumeThread = it.resumeThread?.copy(error = failure.message))
+            }
+            return
+        }
+        val controlBearing = validated.hasControlOverrides()
+        val currentWorkState = mutableState.value.threads[review.locator]?.workState
+        if (controlBearing && (!takeControl || currentWorkState != ThreadWorkState.READY)) {
+            mutableState.update {
+                it.copy(
+                    resumeThread = it.resumeThread?.copy(
+                        error = if (currentWorkState == ThreadWorkState.READY) {
+                            "Take Dealer control before applying Resume overrides"
+                        } else {
+                            "Resume overrides require a READY thread"
+                        },
+                    ),
+                )
+            }
+            return
+        }
+        val appServer = hostSessions.connectedSession(review.locator.hostId)?.appServer ?: run {
+            mutableState.update {
+                it.copy(
+                    resumeThread = it.resumeThread?.copy(
+                        error = "Connect ${review.locator.hostId} before attaching",
+                    ),
+                )
+            }
+            return
+        }
+        mutableState.update {
+            it.copy(resumeThread = it.resumeThread?.copy(resuming = true, error = null))
+        }
+        scope.launch {
+            attachmentMutex.withLock {
+                if (review.locator in mutableState.value.threadAttachments.attached) {
+                    mutableState.update { it.copy(resumeThread = null) }
+                    return@withLock
+                }
+                try {
+                    appServer.threadResume(review.locator.threadId, validated)
+                    try {
+                        threadAttachmentStore.attach(review.locator)
+                        threadAttachmentStore.writeReasoningEffort(
+                            review.locator,
+                            validated.reasoningEffort,
+                        )
+                    } catch (failure: Throwable) {
+                        runCatching { appServer.threadUnsubscribe(review.locator.threadId) }
+                        runCatching { threadAttachmentStore.detach(review.locator) }
+                        throw failure
+                    }
+                    mutableState.update {
+                        it.withResumedThread(
+                            review.locator,
+                            validated,
+                            grantControl = controlBearing,
+                        )
+                    }
+                    browseThread(review.locator)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    mutableState.update {
+                        it.withThreadResumeFailure(
+                            "Resume settings unavailable: " +
+                                (failure.message ?: failure::class.java.simpleName),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun dismissResumeThread() {
+        if (mutableState.value.resumeThread?.resuming == true) return
+        mutableState.update { it.copy(resumeThread = null) }
     }
 
     fun detachThread(locator: CodexThreadLocator) {
@@ -1429,6 +1575,7 @@ data class DealerUiState(
     val threadDiscoveryErrors: Map<String, String> = emptyMap(),
     val browsedThread: CodexThreadLocator? = null,
     val newThread: NewThreadUiState? = null,
+    val resumeThread: ResumeThreadUiState? = null,
     val error: String? = null,
 ) {
     val running: Boolean
@@ -1445,8 +1592,22 @@ data class NewThreadUiState(
     val error: String? = null,
 )
 
+data class ResumeThreadUiState(
+    val locator: CodexThreadLocator,
+    val observedWorkingDirectories: List<String>,
+    val workingDirectory: String,
+    val catalog: ThreadStartCatalog? = null,
+    val loading: Boolean = false,
+    val resuming: Boolean = false,
+    val error: String? = null,
+)
+
 internal fun DealerUiState.withThreadCreationFailure(message: String): DealerUiState = copy(
     newThread = newThread?.copy(creating = false, error = message),
+)
+
+internal fun DealerUiState.withThreadResumeFailure(message: String): DealerUiState = copy(
+    resumeThread = resumeThread?.copy(resuming = false, error = message),
 )
 
 internal fun DealerUiState.withCreatedThread(
@@ -1473,6 +1634,36 @@ internal fun DealerUiState.withCreatedThread(
     newThread = null,
     error = null,
 )
+
+internal fun DealerUiState.withResumedThread(
+    locator: CodexThreadLocator,
+    selection: ThreadStartSelection,
+    grantControl: Boolean,
+): DealerUiState {
+    val attached = threadAttachments.attach(locator).let {
+        if (grantControl) it.claim(locator) else it
+    }
+    return copy(
+        threadAttachments = attached,
+        threadActions = threadActions.setPendingReasoningEffort(locator, selection.reasoningEffort),
+        threads = threads[locator]?.let { thread ->
+            threads + (
+                locator to thread.copy(
+                    workingDirectory = selection.workingDirectory,
+                    attached = true,
+                    intendedControlSurface = if (grantControl) {
+                        ControlSurface.DEALER
+                    } else {
+                        ControlSurface.NONE
+                    },
+                )
+            )
+        } ?: threads,
+        browsedThread = locator,
+        resumeThread = null,
+        error = null,
+    )
+}
 
 data class DealerRecoveryUiState(
     val phase: M1FailurePhase,

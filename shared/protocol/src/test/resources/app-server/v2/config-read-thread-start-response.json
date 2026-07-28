@@ -3,6 +3,10 @@
     "config": {
       "model_provider": "host-default",
       "model": "host-model",
+      "model_reasoning_effort": "medium",
+      "sandbox_mode": "workspace-write",
+      "approval_policy": "on-request",
+      "approvals_reviewer": "user",
       "model_providers": {
         "custom-id": {
           "name": "Custom Provider",

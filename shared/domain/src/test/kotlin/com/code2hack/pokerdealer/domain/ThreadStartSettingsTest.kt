@@ -53,4 +53,28 @@ class ThreadStartSettingsTest {
             PermissionPreset.entries.map(PermissionPreset::label),
         )
     }
+
+    @Test
+    fun `only provider model and permission changes are control-bearing resume overrides`() {
+        assertEquals(false, ThreadStartSelection("/work/repo").hasControlOverrides())
+        assertEquals(
+            false,
+            ThreadStartSelection("/work/repo", reasoningEffort = "high").hasControlOverrides(),
+        )
+        assertEquals(
+            true,
+            ThreadStartSelection("/work/repo", providerOverride = "custom").hasControlOverrides(),
+        )
+        assertEquals(
+            true,
+            ThreadStartSelection("/work/repo", modelOverride = "model").hasControlOverrides(),
+        )
+        assertEquals(
+            true,
+            ThreadStartSelection(
+                "/work/repo",
+                permissionPreset = PermissionPreset.READ_ONLY,
+            ).hasControlOverrides(),
+        )
+    }
 }
