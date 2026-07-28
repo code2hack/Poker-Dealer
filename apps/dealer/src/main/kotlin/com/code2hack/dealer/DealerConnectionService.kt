@@ -26,6 +26,10 @@ import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnOutcome
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnRecoveryException
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnectionConfig
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
+import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
@@ -64,6 +68,10 @@ class DealerConnectionService : Service() {
     private var runJob: Job? = null
     private var tailnetJob: Job? = null
     private val tailnetEngine = Engine()
+    private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
+    private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
+    private lateinit var hostSessions: HostSessionManager
+    private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -76,6 +84,29 @@ class DealerConnectionService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
+
+    override fun onCreate() {
+        super.onCreate()
+        hostConnectionProfiles = DealerHostConnectionProfileStore(this)
+        hostSessions = HostSessionManager(
+            hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
+            intentStore = HostConnectionIntentDataStore(this),
+            connector = InitializedHostSessionConnector { hostId ->
+                synchronized(hostSessionConfigs) { hostSessionConfigs[hostId] }
+                    ?: cacheHostSession(hostConnectionProfiles.load(hostId))
+            },
+            scope = scope,
+        )
+        scope.launch {
+            hostSessions.start()
+            hostSessions.state.collect { sessions ->
+                mutableState.update { it.copy(hostSessions = sessions) }
+                if (sessions.values.any(HostSessionState::enabled)) {
+                    ensureForeground()
+                } else stopIfIdle()
+            }
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -96,11 +127,22 @@ class DealerConnectionService : Service() {
         privateKey: ByteArray,
         knownHosts: ByteArray,
     ): Boolean {
-        if (runJob != null || !mutableState.value.hasDealerControl(config)) {
+        if (runJob != null ||
+            mutableState.value.hostSessions[config.hostId]?.enabled == true ||
+            !mutableState.value.hasDealerControl(config)
+        ) {
             privateKey.fill(0)
             knownHosts.fill(0)
             if (runJob == null) {
-                mutableState.update { it.copy(error = "Take control of this host thread before sending") }
+                mutableState.update {
+                    it.copy(
+                        error = if (it.hostSessions[config.hostId]?.enabled == true) {
+                            "Disconnect the long-lived host session before using the legacy one-shot turn"
+                        } else {
+                            "Take control of this host thread before sending"
+                        },
+                    )
+                }
             }
             return false
         }
@@ -139,58 +181,22 @@ class DealerConnectionService : Service() {
                 )
             }
             try {
+                val connection = createHostSessionConfig(
+                    DealerHostConnectionConfig(
+                        host.id,
+                        config.lanHost,
+                        config.tailnetHost,
+                        config.sshUser,
+                        config.loopbackSshPort,
+                    ),
+                    privateKey,
+                    knownHosts,
+                )
                 val slice = M1OneHostDealerSlice(
                     host = host,
-                    dialer = if (host == InitialCodexHosts.fold6Termux) {
-                        SocketHostTcpDialer(
-                            endpoints = mapOf(
-                                (host.id to HostConnectionRoute.SSH_LOOPBACK) to
-                                    RouteEndpoint("127.0.0.1", config.loopbackSshPort),
-                            ),
-                        )
-                    } else {
-                        routeDialer(
-                            lan = SocketHostTcpDialer(
-                                endpoints = if (config.lanHost.isBlank()) {
-                                    emptyMap()
-                                } else {
-                                    mapOf(
-                                        (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
-                                    )
-                                },
-                                capabilities = mapOf(
-                                    (host.id to HostConnectionRoute.SSH_LAN) to if (config.lanHost.isBlank()) {
-                                        RouteCapability.DISABLED
-                                    } else {
-                                        RouteCapability.SUPPORTED_CONFIGURED
-                                    },
-                                ),
-                            ),
-                            embedded = EmbeddedTailnetHostTcpDialer(
-                                engine = tailnetEngine,
-                                destinations = if (config.tailnetHost.isBlank()) {
-                                    emptyMap()
-                                } else {
-                                    mapOf(host.id to config.tailnetHost)
-                                },
-                                state = { mutableState.value.tailnet.state },
-                            ),
-                        )
-                    },
-                    sshClient = JschHostSshClient(
-                        mapOf(
-                            host.id to SshHostAuthentication(
-                                username = config.sshUser,
-                                privateKey = privateKey,
-                                knownHosts = knownHosts,
-                            ),
-                        ),
-                    ),
-                    daemon = if (host == InitialCodexHosts.fold6Termux) {
-                        TermuxCommunityCodexDaemon()
-                    } else {
-                        UpstreamCodexDaemon()
-                    },
+                    dialer = connection.dialer,
+                    sshClient = connection.sshClient,
+                    daemon = connection.daemon,
                 )
                 val result = slice.run(
                     input,
@@ -247,13 +253,10 @@ class DealerConnectionService : Service() {
             } finally {
                 privateKey.fill(0)
                 knownHosts.fill(0)
-                if (!mutableState.value.tailnet.active) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
                 synchronized(this@DealerConnectionService) {
                     runJob = null
                 }
+                stopIfIdle()
             }
         }
         return true
@@ -264,6 +267,104 @@ class DealerConnectionService : Service() {
         val activeRun = runJob ?: return false
         activeRun.cancel(CancellationException("Cancelled by user"))
         return true
+    }
+
+    fun enableHost(
+        config: DealerHostConnectionConfig,
+        privateKey: ByteArray,
+        knownHosts: ByteArray,
+    ) {
+        scope.launch {
+            try {
+                hostConnectionProfiles.save(config, privateKey, knownHosts)
+                cacheHostSession(StoredHostConnection(config, privateKey, knownHosts))
+                hostSessions.setEnabled(config.hostId, true)
+            } catch (cancelled: CancellationException) {
+                privateKey.fill(0)
+                knownHosts.fill(0)
+                throw cancelled
+            } catch (failure: Throwable) {
+                privateKey.fill(0)
+                knownHosts.fill(0)
+                mutableState.update { it.copy(error = failure.message ?: failure::class.java.simpleName) }
+            }
+        }
+    }
+
+    fun disableHost(hostId: String) {
+        scope.launch {
+            hostSessions.setEnabled(hostId, false)
+            synchronized(hostSessionConfigs) {
+                hostSessionConfigs.remove(hostId)
+                hostSessionSecrets.remove(hostId)?.let {
+                    it.privateKey.fill(0)
+                    it.knownHosts.fill(0)
+                }
+            }
+            mutableState.update {
+                it.copy(control = it.control?.takeUnless { control -> control.locator.hostId == hostId })
+            }
+        }
+    }
+
+    private fun cacheHostSession(stored: StoredHostConnection): HostSessionConnectionConfig {
+        val config = stored.config
+        val host = InitialCodexHosts.all.single { it.id == config.hostId }
+        return synchronized(hostSessionConfigs) {
+            hostSessionSecrets.remove(host.id)?.let {
+                it.privateKey.fill(0)
+                it.knownHosts.fill(0)
+            }
+            hostSessionSecrets[host.id] = stored
+            createHostSessionConfig(config, stored.privateKey, stored.knownHosts)
+                .also { hostSessionConfigs[host.id] = it }
+        }
+    }
+
+    private fun createHostSessionConfig(
+        config: DealerHostConnectionConfig,
+        privateKey: ByteArray,
+        knownHosts: ByteArray,
+    ): HostSessionConnectionConfig {
+        val host = InitialCodexHosts.all.single { it.id == config.hostId }
+        return HostSessionConnectionConfig(
+            host = host,
+            dialer = if (host == InitialCodexHosts.fold6Termux) {
+                SocketHostTcpDialer(
+                    mapOf(
+                        (host.id to HostConnectionRoute.SSH_LOOPBACK) to
+                            RouteEndpoint("127.0.0.1", config.loopbackSshPort),
+                    ),
+                )
+            } else {
+                routeDialer(
+                    SocketHostTcpDialer(
+                        endpoints = if (config.lanHost.isBlank()) emptyMap() else mapOf(
+                            (host.id to HostConnectionRoute.SSH_LAN) to RouteEndpoint(config.lanHost),
+                        ),
+                    ),
+                    EmbeddedTailnetHostTcpDialer(
+                        tailnetEngine,
+                        if (config.tailnetHost.isBlank()) emptyMap() else mapOf(host.id to config.tailnetHost),
+                        state = { mutableState.value.tailnet.state },
+                    ),
+                )
+            },
+            sshClient = JschHostSshClient(
+                mapOf(
+                    host.id to SshHostAuthentication(
+                        username = config.sshUser,
+                        privateKey = privateKey,
+                        knownHosts = knownHosts,
+                    ),
+                ),
+            ),
+            daemon = if (host == InitialCodexHosts.fold6Termux) {
+                TermuxCommunityCodexDaemon()
+            } else {
+                UpstreamCodexDaemon()
+            },
+        )
     }
 
     @Synchronized
@@ -324,10 +425,7 @@ class DealerConnectionService : Service() {
                         ),
                     )
                 }
-                if (runJob == null) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                stopIfIdle()
             } finally {
                 synchronized(this@DealerConnectionService) {
                     tailnetJob = null
@@ -375,10 +473,7 @@ class DealerConnectionService : Service() {
                 mutableState.update {
                     it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPED))
                 }
-                if (runJob == null) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                stopIfIdle()
             } catch (failure: Throwable) {
                 mutableState.update {
                     it.copy(
@@ -414,10 +509,7 @@ class DealerConnectionService : Service() {
                 mutableState.update {
                     it.copy(tailnet = EmbeddedTailnetUiState(EmbeddedTailnetState.STOPPED))
                 }
-                if (runJob == null) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                stopIfIdle()
             } catch (failure: Throwable) {
                 mutableState.update {
                     it.copy(
@@ -434,6 +526,14 @@ class DealerConnectionService : Service() {
 
     override fun onDestroy() {
         runCatching { tailnetEngine.stop() }
+        synchronized(hostSessionConfigs) {
+            hostSessionSecrets.values.forEach {
+                it.privateKey.fill(0)
+                it.knownHosts.fill(0)
+            }
+            hostSessionSecrets.clear()
+            hostSessionConfigs.clear()
+        }
         scope.cancel()
         super.onDestroy()
     }
@@ -447,12 +547,21 @@ class DealerConnectionService : Service() {
                 NotificationManager.IMPORTANCE_LOW,
             ),
         )
-        val notification = Notification.Builder(this, NOTIFICATION_CHANNEL)
+        val builder = Notification.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.drawable.ic_dealer_connection)
             .setContentTitle("Dealer")
             .setContentText("Dealer connection active")
             .setOngoing(true)
-            .addAction(
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    Intent(this, DealerActivity::class.java),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+        if (mutableState.value.hostSessions.values.none(HostSessionState::enabled)) {
+            builder.addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, R.drawable.ic_dealer_connection),
                     "Cancel",
@@ -464,8 +573,18 @@ class DealerConnectionService : Service() {
                     ),
                 ).build(),
             )
-            .build()
-        startForeground(NOTIFICATION_ID, notification)
+        }
+        startForeground(NOTIFICATION_ID, builder.build())
+    }
+
+    private fun stopIfIdle() {
+        if (runJob == null &&
+            !mutableState.value.tailnet.active &&
+            mutableState.value.hostSessions.values.none(HostSessionState::enabled)
+        ) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     companion object {
@@ -509,6 +628,7 @@ data class DealerUiState(
     // ponytail: process-local soft control; persist it when host/thread Room storage lands.
     val control: DealerControlState? = null,
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
+    val hostSessions: Map<String, HostSessionState> = emptyMap(),
     val error: String? = null,
 ) {
     val running: Boolean
@@ -681,6 +801,14 @@ data class DealerRunConfig(
     val sshUser: String,
     val threadId: String,
     val turnText: String,
+    val loopbackSshPort: Int = 0,
+)
+
+data class DealerHostConnectionConfig(
+    val hostId: String,
+    val lanHost: String,
+    val tailnetHost: String,
+    val sshUser: String,
     val loopbackSshPort: Int = 0,
 )
 

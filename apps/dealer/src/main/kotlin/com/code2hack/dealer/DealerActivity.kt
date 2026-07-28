@@ -49,6 +49,7 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -101,6 +102,8 @@ class DealerActivity : ComponentActivity() {
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
                         onCancel = { service?.cancelRun() },
+                        onEnableHost = ::enableHost,
+                        onDisableHost = { service?.disableHost(it) },
                         onTakeControl = { hostId, threadId -> service?.takeControl(hostId, threadId) },
                         onYieldControl = { hostId, threadId -> service?.yieldControl(hostId, threadId) },
                         onStartTailnet = ::startEmbeddedTailnet,
@@ -191,6 +194,19 @@ class DealerActivity : ComponentActivity() {
         }
     }
 
+    private fun enableHost(config: DealerHostConnectionConfig) {
+        val key = privateKey?.copyOf() ?: return
+        val pins = knownHosts?.copyOf() ?: return
+        val connected = service
+        if (connected == null) {
+            key.fill(0)
+            pins.fill(0)
+            return
+        }
+        startForegroundService(Intent(this, DealerConnectionService::class.java))
+        connected.enableHost(config, key, pins)
+    }
+
     private fun startEmbeddedTailnet() {
         startForegroundService(
             Intent(this, DealerConnectionService::class.java)
@@ -244,6 +260,8 @@ private fun DealerApp(
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
     onCancel: () -> Unit,
+    onEnableHost: (DealerHostConnectionConfig) -> Unit,
+    onDisableHost: (String) -> Unit,
     onTakeControl: (String, String) -> Unit,
     onYieldControl: (String, String) -> Unit,
     onStartTailnet: () -> Unit,
@@ -279,14 +297,24 @@ private fun DealerApp(
         ?: ControlSurface.NONE
     val hasDealerControl = currentControlSurface == ControlSurface.DEALER
     val hasUnsettledAction = state.hasUnsettledAction(locator)
+    val hostSession = state.hostSessions[selectedHostId]
+    val enabledHostSession = hostSession?.takeIf(HostSessionState::enabled)
+    val selectedLegacyRun = state.hostId == selectedHostId
     val canRun = setup.serviceReady &&
         !state.running &&
+        hostSession?.enabled != true &&
         !hasUnsettledAction &&
         hasDealerControl &&
         validRoute &&
         sshUser.isNotBlank() &&
         threadId.isNotBlank() &&
         turnText.isNotBlank() &&
+        setup.privateKeyLoaded &&
+        setup.knownHostsLoaded
+    val canEnableHost = setup.serviceReady &&
+        hostSession?.enabled != true &&
+        validRoute &&
+        sshUser.isNotBlank() &&
         setup.privateKeyLoaded &&
         setup.knownHostsLoaded
 
@@ -304,7 +332,8 @@ private fun DealerApp(
                 color = Color.White,
             )
             Text(
-                "${state.status.label} | ${state.route ?: "no active route"}",
+                "${enabledHostSession?.status ?: if (selectedLegacyRun) state.status.label else "Disconnected"} | " +
+                    "${enabledHostSession?.route ?: state.route?.takeIf { selectedLegacyRun } ?: "no active route"}",
                 color = if (state.error == null && setup.error == null) Color(0xFF8EE7B2) else Color(0xFFFFA8A8),
             )
             Text(
@@ -374,7 +403,7 @@ private fun DealerApp(
                     }
                 }
             }
-            state.routeDiagnostics
+            (enabledHostSession?.diagnostics ?: state.routeDiagnostics.takeIf { selectedLegacyRun }.orEmpty())
                 .distinctBy { it.route to it.failure to it.capability }
                 .forEach {
                     Text(
@@ -383,13 +412,13 @@ private fun DealerApp(
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
-            state.threadId?.let {
+            state.threadId?.takeIf { selectedLegacyRun }?.let {
                 Text(it, color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
             }
-            state.appServerVersion?.let {
+            state.appServerVersion?.takeIf { selectedLegacyRun }?.let {
                 Text("app-server $it", color = Color(0xFFBBC8D6), style = MaterialTheme.typography.labelSmall)
             }
-            state.recovery?.let {
+            state.recovery?.takeIf { selectedLegacyRun }?.let {
                 Text(
                     buildString {
                         append("Recovery: ").append(it.phase)
@@ -431,6 +460,31 @@ private fun DealerApp(
                     enabled = !state.running && selectedHostId != "fold6-termux",
                 ) {
                     Text("Fold6 Termux")
+                }
+            }
+            if (hostSession?.enabled == true) {
+                Button(onClick = { onDisableHost(selectedHostId) }) {
+                    Text("Disconnect host")
+                }
+                hostSession.error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            } else {
+                Button(
+                    onClick = {
+                        onEnableHost(
+                            DealerHostConnectionConfig(
+                                hostId = selectedHostId,
+                                lanHost = lanHost.trim(),
+                                tailnetHost = tailnetHost.trim(),
+                                sshUser = sshUser.trim(),
+                                loopbackSshPort = loopbackSshPort.toIntOrNull() ?: 0,
+                            ),
+                        )
+                    },
+                    enabled = canEnableHost,
+                ) {
+                    Text("Connect host")
                 }
             }
             if (isTermux) {
@@ -553,7 +607,7 @@ private fun DealerApp(
             setup.error?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
-            state.error?.let {
+            state.error?.takeIf { selectedLegacyRun }?.let {
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             if (hasUnsettledAction) {
@@ -566,7 +620,10 @@ private fun DealerApp(
         }
 
         HorizontalDivider()
-        DealerCards(state.cards, Modifier.weight(1f))
+        DealerCards(
+            state.cards.filter { it.conversationId.substringBefore('/') == selectedHostId },
+            Modifier.weight(1f),
+        )
     }
     if (confirmTailnetReset) {
         AlertDialog(

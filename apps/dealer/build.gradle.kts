@@ -28,6 +28,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0-m1"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildFeatures {
@@ -55,6 +56,7 @@ dependencies {
     implementation(project(":shared:protocol"))
     implementation(platform(libs.compose.bom))
     implementation(libs.activity.compose)
+    implementation(libs.datastore.preferences)
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
@@ -62,6 +64,8 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.androidx.test.runner)
 }
 
 tasks.named("preBuild").configure {

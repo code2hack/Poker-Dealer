@@ -180,6 +180,8 @@ class CodexAppServerSession(
         return result
     }
 
+    suspend fun awaitClose(): Nothing = peer.awaitClose()
+
     suspend fun threadList(limit: Int = 20): JsonObject {
         checkInitialized()
         return request(
