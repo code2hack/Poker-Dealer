@@ -1,0 +1,19 @@
+{
+  "result": {
+    "config": {
+      "model_provider": "host-default",
+      "model": "host-model",
+      "model_providers": {
+        "custom-id": {
+          "name": "Custom Provider",
+          "base_url": "https://private.invalid",
+          "env_key": "DO_NOT_RETAIN"
+        },
+        "unnamed-id": {
+          "base_url": "https://private.invalid"
+        }
+      }
+    },
+    "origins": {}
+  }
+}

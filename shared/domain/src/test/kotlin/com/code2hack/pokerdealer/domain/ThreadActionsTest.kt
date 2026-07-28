@@ -68,4 +68,16 @@ class ThreadActionsTest {
         assertEquals("u4090", state.drafts[thread])
         assertEquals("spark", state.drafts[sameIdOtherHost])
     }
+
+    @Test
+    fun `reasoning effort is consumed by an accepted new turn but not a steer`() {
+        val ready = ThreadActionState()
+            .setPendingReasoningEffort(thread, "high")
+            .editDraft(thread, "prompt")
+        val (starting, start) = ready.beginInput(thread, ThreadWorkState.READY, null, true, "start")
+        val (steering, steer) = ready.beginInput(thread, ThreadWorkState.BUSY, "turn", true, "steer")
+
+        assertEquals(null, starting.inputAccepted(thread, start.clientId).pendingReasoningEfforts[thread])
+        assertEquals("high", steering.inputAccepted(thread, steer.clientId).pendingReasoningEfforts[thread])
+    }
 }

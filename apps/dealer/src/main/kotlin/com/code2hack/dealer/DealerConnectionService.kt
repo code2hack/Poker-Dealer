@@ -22,6 +22,8 @@ import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ThreadStartCatalog
+import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.domain.ThreadActionState
@@ -38,6 +40,7 @@ import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
+import com.code2hack.pokerdealer.protocol.appserver.HostThreadStartSettings
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
@@ -397,6 +400,7 @@ class DealerConnectionService : Service() {
             return
         }
         val text = actions.drafts.getValue(locator)
+        val reasoningEffort = actions.pendingReasoningEfforts[locator]
         val conversationId = "${locator.hostId}/${locator.threadId}"
         val sequence = state.cards
             .filter { it.conversationId == conversationId }
@@ -432,7 +436,12 @@ class DealerConnectionService : Service() {
             }
             try {
                 val response = when (pending.action) {
-                    ComposerAction.START -> appServer.turnStart(locator.threadId, text, clientId)
+                    ComposerAction.START -> appServer.turnStart(
+                        locator.threadId,
+                        text,
+                        clientId,
+                        effort = reasoningEffort,
+                    )
                     ComposerAction.STEER -> appServer.turnSteer(
                         locator.threadId,
                         pending.expectedTurnId!!,
@@ -479,6 +488,10 @@ class DealerConnectionService : Service() {
                         draftMutex.withLock {
                             threadAttachmentStore.writeDraft(locator, retainedDraft)
                             threadAttachmentStore.writePendingInput(locator, null)
+                            threadAttachmentStore.writeReasoningEffort(
+                                locator,
+                                mutableState.value.threadActions.pendingReasoningEfforts[locator],
+                            )
                         }
                     }.onFailure { failure ->
                         mutableState.update {
@@ -637,6 +650,164 @@ class DealerConnectionService : Service() {
                 }
             }
         }
+    }
+
+    fun beginNewThread(hostId: String) {
+        val observed = mutableState.value.threads.values
+            .asSequence()
+            .filter { it.locator.hostId == hostId }
+            .mapNotNull(DiscoveredThread::workingDirectory)
+            .distinct()
+            .sorted()
+            .toList()
+        val workingDirectory = observed.firstOrNull().orEmpty()
+        mutableState.update {
+            it.copy(
+                newThread = NewThreadUiState(
+                    hostId = hostId,
+                    observedWorkingDirectories = observed,
+                    workingDirectory = workingDirectory,
+                ),
+                error = null,
+            )
+        }
+        if (workingDirectory.isNotEmpty()) reviewNewThread(hostId, workingDirectory)
+    }
+
+    fun reviewNewThread(hostId: String, workingDirectory: String) {
+        if (!workingDirectory.startsWith('/') || '\u0000' in workingDirectory) {
+            mutableState.update {
+                it.copy(
+                    newThread = it.newThread?.copy(
+                        workingDirectory = workingDirectory,
+                        catalog = null,
+                        error = "Working directory must be an absolute host path",
+                    ),
+                )
+            }
+            return
+        }
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: run {
+            mutableState.update {
+                it.copy(newThread = it.newThread?.copy(error = "Connect $hostId before creating a thread"))
+            }
+            return
+        }
+        mutableState.update {
+            it.copy(
+                newThread = it.newThread?.copy(
+                    hostId = hostId,
+                    workingDirectory = workingDirectory,
+                    catalog = null,
+                    loading = true,
+                    error = null,
+                ),
+            )
+        }
+        scope.launch {
+            try {
+                val catalog = HostThreadStartSettings(appServer).read(workingDirectory)
+                mutableState.update { state ->
+                    val current = state.newThread
+                    if (current?.hostId == hostId &&
+                        current.workingDirectory == workingDirectory
+                    ) {
+                        state.copy(newThread = current.copy(catalog = catalog, loading = false))
+                    } else {
+                        state
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update { state ->
+                    val current = state.newThread
+                    if (current?.hostId == hostId &&
+                        current.workingDirectory == workingDirectory
+                    ) {
+                        state.copy(
+                            newThread = current.copy(
+                                loading = false,
+                                error = failure.message ?: failure::class.java.simpleName,
+                            ),
+                        )
+                    } else {
+                        state
+                    }
+                }
+            }
+        }
+    }
+
+    fun createThread(selection: ThreadStartSelection) {
+        val review = mutableState.value.newThread ?: return
+        if (review.creating) return
+        val catalog = review.catalog ?: run {
+            mutableState.update {
+                it.copy(newThread = it.newThread?.copy(error = "Review host settings before creating"))
+            }
+            return
+        }
+        val validated = try {
+            selection.validated(catalog)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update {
+                it.copy(newThread = it.newThread?.copy(error = failure.message))
+            }
+            return
+        }
+        val appServer = hostSessions.connectedSession(review.hostId)?.appServer ?: run {
+            mutableState.update {
+                it.copy(newThread = it.newThread?.copy(error = "Connect ${review.hostId} before creating"))
+            }
+            return
+        }
+        mutableState.update { it.copy(newThread = it.newThread?.copy(creating = true, error = null)) }
+        scope.launch {
+            try {
+                val response = appServer.threadStart(validated)
+                val thread = response["thread"] as? JsonObject
+                    ?: error("thread/start response did not include a thread")
+                require(AppServerThreadProjection.authoritativeState(response).workState == ThreadWorkState.READY) {
+                    "thread/start did not return a READY thread"
+                }
+                require(AppServerThreadProjection.cards(response, "").isEmpty()) {
+                    "thread/start did not return an empty thread"
+                }
+                val threadId = (thread["id"] as? JsonPrimitive)?.contentOrNull
+                    ?: error("thread/start response did not include a thread ID")
+                val locator = CodexThreadLocator(review.hostId, threadId)
+                attachmentMutex.withLock {
+                    try {
+                        threadAttachmentStore.attach(locator)
+                        threadAttachmentStore.writeReasoningEffort(locator, validated.reasoningEffort)
+                    } catch (failure: Throwable) {
+                        runCatching { appServer.threadUnsubscribe(threadId) }
+                        runCatching { threadAttachmentStore.detach(locator) }
+                        throw failure
+                    }
+                    mutableState.update { state ->
+                        state.withCreatedThread(
+                            locator = locator,
+                            name = (thread["name"] as? JsonPrimitive)?.contentOrNull,
+                            preview = (thread["preview"] as? JsonPrimitive)?.contentOrNull,
+                            selection = validated,
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withThreadCreationFailure(failure.message ?: failure::class.java.simpleName)
+                }
+            }
+        }
+    }
+
+    fun dismissNewThread() {
+        if (mutableState.value.newThread?.creating == true) return
+        mutableState.update { it.copy(newThread = null) }
     }
 
     fun attachThread(locator: CodexThreadLocator) {
@@ -895,6 +1066,10 @@ class DealerConnectionService : Service() {
                     draftMutex.withLock {
                         threadAttachmentStore.writeDraft(locator, retainedDraft)
                         threadAttachmentStore.writePendingInput(locator, null)
+                        threadAttachmentStore.writeReasoningEffort(
+                            locator,
+                            mutableState.value.threadActions.pendingReasoningEfforts[locator],
+                        )
                     }
                 }
                 if (clearInterrupt) {
@@ -1253,11 +1428,51 @@ data class DealerUiState(
     val refreshingThreadHosts: Set<String> = emptySet(),
     val threadDiscoveryErrors: Map<String, String> = emptyMap(),
     val browsedThread: CodexThreadLocator? = null,
+    val newThread: NewThreadUiState? = null,
     val error: String? = null,
 ) {
     val running: Boolean
         get() = status.active
 }
+
+data class NewThreadUiState(
+    val hostId: String,
+    val observedWorkingDirectories: List<String>,
+    val workingDirectory: String,
+    val catalog: ThreadStartCatalog? = null,
+    val loading: Boolean = false,
+    val creating: Boolean = false,
+    val error: String? = null,
+)
+
+internal fun DealerUiState.withThreadCreationFailure(message: String): DealerUiState = copy(
+    newThread = newThread?.copy(creating = false, error = message),
+)
+
+internal fun DealerUiState.withCreatedThread(
+    locator: CodexThreadLocator,
+    name: String?,
+    preview: String?,
+    selection: ThreadStartSelection,
+): DealerUiState = copy(
+    threadAttachments = threadAttachments.attach(locator).claim(locator),
+    threadActions = threadActions.setPendingReasoningEffort(locator, selection.reasoningEffort),
+    threads = threads + (
+        locator to DiscoveredThread(
+            locator = locator,
+            name = name,
+            preview = preview,
+            workingDirectory = selection.workingDirectory,
+            status = "idle",
+            workState = ThreadWorkState.READY,
+            attached = true,
+            intendedControlSurface = ControlSurface.DEALER,
+        )
+    ),
+    browsedThread = locator,
+    newThread = null,
+    error = null,
+)
 
 data class DealerRecoveryUiState(
     val phase: M1FailurePhase,

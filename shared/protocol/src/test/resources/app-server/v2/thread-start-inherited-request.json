@@ -1,0 +1,6 @@
+{
+  "method": "thread/start",
+  "params": {
+    "cwd": "/work/repo"
+  }
+}

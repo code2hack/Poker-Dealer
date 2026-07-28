@@ -1,0 +1,14 @@
+{
+  "method": "turn/start",
+  "params": {
+    "threadId": "thr_new",
+    "clientUserMessageId": "client-new",
+    "effort": "high",
+    "input": [
+      {
+        "type": "text",
+        "text": "first prompt"
+      }
+    ]
+  }
+}

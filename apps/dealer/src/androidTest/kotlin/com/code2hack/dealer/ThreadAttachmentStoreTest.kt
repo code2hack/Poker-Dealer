@@ -60,4 +60,15 @@ class ThreadAttachmentStoreTest {
         assertEquals("turn-1", restored.pendingInputs.getValue(input).expectedTurnId)
         assertEquals("turn-2", restored.pendingInterrupts[interrupt])
     }
+
+    @Test
+    fun nextTurnReasoningEffortSurvivesRecreation() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val locator = CodexThreadLocator("u4090", "reasoning")
+        DealerThreadAttachmentStore(context).writeReasoningEffort(locator, "high")
+
+        val restored = DealerThreadAttachmentStore(context).readActions()
+
+        assertEquals("high", restored.pendingReasoningEfforts[locator])
+    }
 }

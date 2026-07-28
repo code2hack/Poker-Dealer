@@ -8,6 +8,7 @@ import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
@@ -25,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -256,10 +258,86 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun configRead(workingDirectory: String): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "config/read",
+            buildJsonObject { put("cwd", JsonPrimitive(workingDirectory)) },
+        ).jsonObject
+    }
+
+    suspend fun configRequirementsRead(): JsonObject {
+        checkInitialized()
+        return actionRequest("configRequirements/read", JsonNull).jsonObject
+    }
+
+    suspend fun modelList(cursor: String? = null): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "model/list",
+            buildJsonObject { cursor?.let { put("cursor", JsonPrimitive(it)) } },
+        ).jsonObject
+    }
+
+    suspend fun threadStart(selection: ThreadStartSelection): JsonObject {
+        checkInitialized()
+        val response = actionRequest(
+            "thread/start",
+            buildJsonObject {
+                put("cwd", JsonPrimitive(selection.workingDirectory))
+                selection.providerOverride?.let { put("modelProvider", JsonPrimitive(it)) }
+                selection.modelOverride?.let { put("model", JsonPrimitive(it)) }
+                selection.permissionPreset.sandbox?.let { put("sandbox", JsonPrimitive(it)) }
+                selection.permissionPreset.approvalPolicy?.let {
+                    put("approvalPolicy", JsonPrimitive(it))
+                }
+                selection.permissionPreset.approvalsReviewer?.let {
+                    put("approvalsReviewer", JsonPrimitive(it))
+                }
+            },
+        ).jsonObject
+        require(response.string("cwd") == selection.workingDirectory) {
+            "thread/start did not apply the selected working directory"
+        }
+        selection.providerOverride?.let {
+            require(response.string("modelProvider") == it) {
+                "thread/start did not apply the selected provider"
+            }
+        }
+        selection.modelOverride?.let {
+            require(response.string("model") == it) {
+                "thread/start did not apply the selected model"
+            }
+        }
+        selection.permissionPreset.approvalPolicy?.let {
+            require(response.string("approvalPolicy") == it) {
+                "thread/start did not apply the selected approval policy"
+            }
+        }
+        selection.permissionPreset.approvalsReviewer?.let {
+            require(response.string("approvalsReviewer") == it) {
+                "thread/start did not apply the selected approvals reviewer"
+            }
+        }
+        selection.permissionPreset.sandbox?.let { expected ->
+            val sandbox = response["sandbox"]
+            val actual = when (sandbox) {
+                is JsonPrimitive -> sandbox.contentOrNull
+                is JsonObject -> sandbox.string("type")
+                else -> null
+            }
+            require(actual == expected || actual == expected.toCamelCase()) {
+                "thread/start did not apply the selected sandbox"
+            }
+        }
+        return response
+    }
+
     suspend fun turnStart(
         threadId: String,
         text: String,
         clientUserMessageId: String,
+        effort: String? = null,
     ): JsonObject {
         checkInitialized()
         return request(
@@ -267,6 +345,7 @@ class CodexAppServerSession(
             buildJsonObject {
                 put("threadId", JsonPrimitive(threadId))
                 put("clientUserMessageId", JsonPrimitive(clientUserMessageId))
+                effort?.let { put("effort", JsonPrimitive(it)) }
                 put(
                     "input",
                     buildJsonArray {
@@ -480,6 +559,13 @@ class CodexAppServerSession(
         updatedAtMs = nowMs(),
         source = CardSource.CODEX_AGENT_MESSAGE,
     )
+}
+
+private fun String.toCamelCase(): String {
+    val parts = split('-')
+    return parts.first() + parts.drop(1).joinToString("") {
+        it.replaceFirstChar(Char::uppercase)
+    }
 }
 
 data class M1TurnInput(
