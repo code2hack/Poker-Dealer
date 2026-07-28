@@ -54,6 +54,8 @@ import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
+import com.code2hack.pokerdealer.domain.FileApprovalDecision
+import com.code2hack.pokerdealer.domain.FileApprovalRequest
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
@@ -125,6 +127,9 @@ class DealerActivity : ComponentActivity() {
                         onInterrupt = { service?.interrupt(it) },
                         onCommandApproval = { locator, decision ->
                             service?.resolveCommandApproval(locator, decision)
+                        },
+                        onFileApproval = { locator, decision ->
+                            service?.resolveFileApproval(locator, decision)
                         },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
@@ -292,6 +297,7 @@ private fun DealerApp(
     onSubmit: (CodexThreadLocator) -> Unit,
     onInterrupt: (CodexThreadLocator) -> Unit,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+    onFileApproval: (ServerRequestLocator, FileApprovalDecision) -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
@@ -520,7 +526,9 @@ private fun DealerApp(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
-                            if (state.commandApprovals.unresolved(selectedHostId).isEmpty()) {
+                            if (state.commandApprovals.unresolved(selectedHostId).isEmpty() &&
+                                state.fileApprovals.unresolved(selectedHostId).isEmpty()
+                            ) {
                                 onDisableHost(selectedHostId)
                             } else {
                                 confirmDisconnectHostId = selectedHostId
@@ -749,18 +757,28 @@ private fun DealerApp(
                 } ?: (it.thread.hostId == selectedHostId)
             },
             onCommandApproval,
+            state.fileApprovals.requests.values.filter {
+                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
+                    it.thread == browsed
+                } ?: (it.thread.hostId == selectedHostId)
+            },
+            onFileApproval,
             Modifier.weight(1f),
         )
     }
     confirmDisconnectHostId?.let { hostId ->
-        val affected = state.commandApprovals.unresolved(hostId)
+        val affectedCommands = state.commandApprovals.unresolved(hostId)
+        val affectedFiles = state.fileApprovals.unresolved(hostId)
         AlertDialog(
             onDismissRequest = { confirmDisconnectHostId = null },
             title = { Text("Disconnect $hostId?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Dealer will cancel each request at most once where supported, wait briefly, then disconnect.")
-                    affected.forEach { request ->
+                    affectedCommands.forEach { request ->
+                        Text(request.disconnectScope(), fontFamily = FontFamily.Monospace)
+                    }
+                    affectedFiles.forEach { request ->
                         Text(request.disconnectScope(), fontFamily = FontFamily.Monospace)
                     }
                 }
@@ -894,6 +912,8 @@ private fun DealerCards(
     cards: List<Card>,
     approvals: List<CommandApprovalRequest>,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+    fileApprovals: List<FileApprovalRequest>,
+    onFileApproval: (ServerRequestLocator, FileApprovalDecision) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier = modifier.fillMaxWidth()) {
@@ -973,6 +993,10 @@ private fun DealerCards(
             CommandApprovalCard(request, onCommandApproval)
             HorizontalDivider()
         }
+        items(fileApprovals, key = { "file-approval:${it.locator}" }) { request ->
+            FileApprovalCard(request, onFileApproval)
+            HorizontalDivider()
+        }
     }
 }
 
@@ -1048,6 +1072,71 @@ private fun CommandApprovalDecision.label(): String = when (this) {
     CommandApprovalDecision.CANCEL -> "Cancel turn"
 }
 
+@Composable
+private fun FileApprovalCard(
+    request: FileApprovalRequest,
+    onDecision: (ServerRequestLocator, FileApprovalDecision) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            "FILE APPROVAL | ${request.resolution}",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF56616D),
+        )
+        request.reason?.let { Text(it) }
+        request.grantRoot?.let {
+            Text("requested session root: $it", fontFamily = FontFamily.Monospace)
+        }
+        request.fileChanges.forEach { change ->
+            Text("${change.kind}: ${change.path}", fontFamily = FontFamily.Monospace)
+            Text(change.diff, fontFamily = FontFamily.Monospace)
+        }
+        Text(
+            "turn ${request.turnId} | item ${request.itemId}",
+            style = MaterialTheme.typography.labelSmall,
+        )
+        when {
+            request.failureReason != null ->
+                Text("Rejected safely: ${request.failureReason}", color = MaterialTheme.colorScheme.error)
+            request.resolution == RequestResolutionState.PENDING && !request.reviewComplete ->
+                Text("Restoring complete review material; controls are disabled.")
+            request.resolution == RequestResolutionState.PENDING ->
+                FileApprovalDecision.entries.forEach { decision ->
+                    OutlinedButton(onClick = { onDecision(request.locator, decision) }) {
+                        Text(decision.label())
+                    }
+                }
+            request.resolution == RequestResolutionState.RESPONDING ->
+                Text("Sending decision; controls are locked.")
+            request.resolution == RequestResolutionState.UNKNOWN ->
+                Text(
+                    "Decision acceptance is unknown; Dealer will not replay it.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            else ->
+                Text(
+                    if (request.resolvedElsewhere) {
+                        "Resolved elsewhere"
+                    } else {
+                        "Resolved: ${request.decision?.label() ?: "decision unavailable"}"
+                    },
+                )
+        }
+    }
+}
+
+private fun FileApprovalDecision.label(): String = when (this) {
+    FileApprovalDecision.ACCEPT -> "Accept once"
+    FileApprovalDecision.ACCEPT_FOR_SESSION -> "Accept for session"
+    FileApprovalDecision.DECLINE -> "Decline"
+    FileApprovalDecision.CANCEL -> "Cancel turn"
+}
+
 private fun CommandApprovalRequest.disconnectScope(): String = buildString {
     append(thread.threadId).append(": ")
     append(scope.command ?: "network request")
@@ -1055,4 +1144,9 @@ private fun CommandApprovalRequest.disconnectScope(): String = buildString {
     if (scope.networkHost != null && scope.networkProtocol != null) {
         append(" | ").append(scope.networkProtocol).append("://").append(scope.networkHost)
     }
+}
+
+private fun FileApprovalRequest.disconnectScope(): String = buildString {
+    append(thread.threadId).append(": ")
+    append(fileChanges.joinToString { it.path }.ifEmpty { "file change (review incomplete)" })
 }

@@ -24,6 +24,8 @@ import com.code2hack.pokerdealer.domain.ComposerAction
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
+import com.code2hack.pokerdealer.domain.FileApprovalDecision
+import com.code2hack.pokerdealer.domain.FileApprovalState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -50,6 +52,9 @@ import com.code2hack.pokerdealer.protocol.appserver.AppServerStructuredCardProje
 import com.code2hack.pokerdealer.protocol.appserver.AppServerRequest
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalParseResult
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalProtocol
+import com.code2hack.pokerdealer.protocol.appserver.FILE_APPROVAL_METHOD
+import com.code2hack.pokerdealer.protocol.appserver.FileApprovalParseResult
+import com.code2hack.pokerdealer.protocol.appserver.FileApprovalProtocol
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
 import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
@@ -107,6 +112,7 @@ class DealerConnectionService : Service() {
     private val requestJobs = mutableMapOf<String, Job>()
     private val hostGenerations = mutableMapOf<String, Long>()
     private val wireCommandApprovals = mutableMapOf<ServerRequestLocator, AppServerRequest>()
+    private val wireFileApprovals = mutableMapOf<ServerRequestLocator, AppServerRequest>()
     private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
     private var connectedHostIds = emptySet<String>()
 
@@ -178,9 +184,13 @@ class DealerConnectionService : Service() {
                     wireCommandApprovals.keys.removeAll {
                         it.hostId == hostId && it.appServerGeneration == generation
                     }
+                    wireFileApprovals.keys.removeAll {
+                        it.hostId == hostId && it.appServerGeneration == generation
+                    }
                     mutableState.update {
-                        it.withCommandApprovals(
-                            it.commandApprovals.connectionLost(hostId, generation),
+                        it.withApprovals(
+                            commandApprovals = it.commandApprovals.connectionLost(hostId, generation),
+                            fileApprovals = it.fileApprovals.connectionLost(hostId, generation),
                         )
                     }
                 }
@@ -411,20 +421,27 @@ class DealerConnectionService : Service() {
     private suspend fun settleApprovalsForDisconnect(hostId: String) {
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
         val generation = hostGenerations[hostId] ?: return
-        val current = mutableState.value.commandApprovals.unresolved(hostId)
+        val currentCommands = mutableState.value.commandApprovals.unresolved(hostId)
+            .filter { it.locator.appServerGeneration == generation }
+        val currentFiles = mutableState.value.fileApprovals.unresolved(hostId)
             .filter { it.locator.appServerGeneration == generation }
         val interruptedTurns = mutableSetOf<String>()
-        current.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
+        currentCommands.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
             if (CommandApprovalDecision.CANCEL in request.offeredDecisions) {
                 mutableState.update {
-                    it.withCommandApprovals(
-                        it.commandApprovals.begin(request.locator, CommandApprovalDecision.CANCEL),
+                    it.withApprovals(
+                        commandApprovals = it.commandApprovals.begin(
+                            request.locator,
+                            CommandApprovalDecision.CANCEL,
+                        ),
                     )
                 }
                 val wire = wireCommandApprovals[request.locator]
                 if (wire == null) {
                     mutableState.update {
-                        it.withCommandApprovals(it.commandApprovals.unknown(request.locator))
+                        it.withApprovals(
+                            commandApprovals = it.commandApprovals.unknown(request.locator),
+                        )
                     }
                 } else {
                     runCatching {
@@ -434,30 +451,68 @@ class DealerConnectionService : Service() {
                         )
                     }.onFailure {
                         mutableState.update { state ->
-                            state.withCommandApprovals(
-                                state.commandApprovals.unknown(request.locator),
+                            state.withApprovals(
+                                commandApprovals = state.commandApprovals.unknown(request.locator),
                             )
                         }
                     }
                 }
             } else if (interruptedTurns.add(request.turnId)) {
                 mutableState.update {
-                    it.withCommandApprovals(it.commandApprovals.unknown(request.locator))
+                    it.withApprovals(
+                        commandApprovals = it.commandApprovals.unknown(request.locator),
+                    )
                 }
                 runCatching { appServer.turnInterrupt(request.thread.threadId, request.turnId) }
             }
         }
-        if (current.any { it.resolution in DISCONNECT_WAIT_STATES }) {
+        currentFiles.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
+            mutableState.update {
+                it.withApprovals(
+                    fileApprovals = it.fileApprovals.begin(
+                        request.locator,
+                        FileApprovalDecision.CANCEL,
+                    ),
+                )
+            }
+            val wire = wireFileApprovals[request.locator]
+            if (wire == null) {
+                mutableState.update {
+                    it.withApprovals(
+                        fileApprovals = it.fileApprovals.unknown(request.locator),
+                    )
+                }
+            } else {
+                runCatching {
+                    appServer.respond(wire, FileApprovalProtocol.response(FileApprovalDecision.CANCEL))
+                }.onFailure {
+                    mutableState.update { state ->
+                        state.withApprovals(
+                            fileApprovals = state.fileApprovals.unknown(request.locator),
+                        )
+                    }
+                }
+            }
+        }
+        if (currentCommands.any { it.resolution in DISCONNECT_WAIT_STATES } ||
+            currentFiles.any { it.resolution in DISCONNECT_WAIT_STATES }
+        ) {
             delay(DISCONNECT_RESOLUTION_WAIT_MILLIS)
         }
         mutableState.update { state ->
-            var approvals = state.commandApprovals
-            current.forEach { request ->
-                if (approvals.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
-                    approvals = approvals.unknown(request.locator)
+            var commands = state.commandApprovals
+            var files = state.fileApprovals
+            currentCommands.forEach { request ->
+                if (commands.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
+                    commands = commands.unknown(request.locator)
                 }
             }
-            state.withCommandApprovals(approvals)
+            currentFiles.forEach { request ->
+                if (files.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
+                    files = files.unknown(request.locator)
+                }
+            }
+            state.withApprovals(commands, files)
         }
     }
 
@@ -850,6 +905,10 @@ class DealerConnectionService : Service() {
         requestJobs[hostId] = scope.launch {
             while (true) {
                 val wire = appServer.receiveServerRequest() ?: return@launch
+                if (wire.method == FILE_APPROVAL_METHOD) {
+                    receiveFileApproval(hostId, generation, wire)
+                    continue
+                }
                 when (val parsed = CommandApprovalProtocol.parse(hostId, generation, wire)) {
                     is CommandApprovalParseResult.Accepted -> {
                         try {
@@ -870,6 +929,100 @@ class DealerConnectionService : Service() {
                         appServer.reject(wire, parsed.reason)
                 }
             }
+        }
+    }
+
+    private fun receiveFileApproval(
+        hostId: String,
+        generation: Long,
+        wire: AppServerRequest,
+    ) {
+        val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
+        val initial = FileApprovalProtocol.parse(
+            hostId,
+            generation,
+            wire,
+            reviewCard = mutableState.value.fileReviewCard(hostId, wire),
+        )
+        when (initial) {
+            is FileApprovalParseResult.Accepted -> {
+                try {
+                    mutableState.update {
+                        it.withApprovals(
+                            fileApprovals = it.fileApprovals.receive(
+                                initial.request,
+                                sameIdReissueQualified = false,
+                            ),
+                        )
+                    }
+                    wireFileApprovals[initial.request.locator] = wire
+                } catch (failure: IllegalArgumentException) {
+                    scope.launch {
+                        appServer.reject(wire, failure.message ?: "File approval identity conflict")
+                    }
+                }
+            }
+            is FileApprovalParseResult.Incomplete -> {
+                mutableState.update {
+                    it.withApprovals(
+                        fileApprovals = it.fileApprovals.receive(
+                            initial.request,
+                            sameIdReissueQualified = false,
+                        ),
+                    )
+                }
+                wireFileApprovals[initial.request.locator] = wire
+                browseThread(initial.request.thread)
+                scope.launch {
+                    delay(INCOMPLETE_CARD_REREAD_DELAY_MILLIS)
+                    if (hostGenerations[hostId] != generation ||
+                        wireFileApprovals[initial.request.locator] != wire ||
+                        mutableState.value.fileApprovals.requests[initial.request.locator]?.resolution !=
+                        RequestResolutionState.PENDING
+                    ) {
+                        return@launch
+                    }
+                    val reparsed = FileApprovalProtocol.parse(
+                        hostId,
+                        generation,
+                        wire,
+                        reviewCard = mutableState.value.fileReviewCard(hostId, wire),
+                    )
+                    if (reparsed is FileApprovalParseResult.Accepted) {
+                        mutableState.update {
+                            it.withApprovals(
+                                fileApprovals = it.fileApprovals.receive(
+                                    reparsed.request,
+                                    sameIdReissueQualified = false,
+                                ),
+                            )
+                        }
+                    } else {
+                        val reason = "File approval diff remains incomplete after authoritative reread"
+                        runCatching { appServer.reject(wire, reason) }
+                            .onSuccess {
+                                wireFileApprovals.remove(initial.request.locator)
+                                mutableState.update {
+                                    it.withApprovals(
+                                        fileApprovals = it.fileApprovals.failClosed(
+                                            initial.request.locator,
+                                            reason,
+                                        ),
+                                    )
+                                }
+                            }
+                            .onFailure {
+                                mutableState.update {
+                                    it.withApprovals(
+                                        fileApprovals = it.fileApprovals.unknown(initial.request.locator),
+                                    )
+                                }
+                            }
+                    }
+                }
+            }
+            is FileApprovalParseResult.Rejected ->
+                scope.launch { appServer.reject(wire, initial.reason) }
         }
     }
 
@@ -918,6 +1071,51 @@ class DealerConnectionService : Service() {
         }
     }
 
+    @Synchronized
+    fun resolveFileApproval(
+        locator: ServerRequestLocator,
+        decision: FileApprovalDecision,
+    ) {
+        val state = mutableState.value
+        val request = state.fileApprovals.requests[locator] ?: return
+        if (!state.threadAttachments.hasDealerClaim(request.thread)) {
+            mutableState.update { it.copy(error = "Take control before resolving this request") }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
+        val wire = wireFileApprovals[locator]
+        if (appServer == null || hostGenerations[locator.hostId] != locator.appServerGeneration || wire == null) {
+            mutableState.update {
+                it.withApprovals(fileApprovals = it.fileApprovals.unknown(locator))
+                    .copy(error = "File approval is no longer connected; no response was replayed")
+            }
+            return
+        }
+        val responding = try {
+            state.fileApprovals.begin(locator, decision)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        if (responding == state.fileApprovals) return
+        mutableState.update { it.withApprovals(fileApprovals = responding).copy(error = null) }
+        scope.launch {
+            try {
+                appServer.respond(wire, FileApprovalProtocol.response(decision))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withApprovals(fileApprovals = it.fileApprovals.unknown(locator))
+                        .copy(
+                            error = "${failure.message ?: failure::class.java.simpleName}; " +
+                                "file approval response was not replayed",
+                        )
+                }
+            }
+        }
+    }
+
     private fun observeNotifications(hostId: String, generation: Long) {
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
         notificationJobs.remove(hostId)?.cancel()
@@ -931,9 +1129,20 @@ class DealerConnectionService : Service() {
                             it.appServerGeneration == generation &&
                             it.requestId == resolved.requestId
                     }
+                    wireFileApprovals.keys.removeAll {
+                        it.hostId == hostId &&
+                            it.appServerGeneration == generation &&
+                            it.requestId == resolved.requestId
+                    }
                     mutableState.update {
-                        it.withCommandApprovals(
-                            it.commandApprovals.resolved(
+                        it.withApprovals(
+                            commandApprovals = it.commandApprovals.resolved(
+                                hostId,
+                                generation,
+                                resolved.requestId,
+                                resolved.threadId,
+                            ),
+                            fileApprovals = it.fileApprovals.resolved(
                                 hostId,
                                 generation,
                                 resolved.requestId,
@@ -988,9 +1197,13 @@ class DealerConnectionService : Service() {
                     "turn/completed" -> {
                         turnId?.let { dealerOriginatedTurns.remove(locator to it) }
                         mutableState.update { state ->
-                            state.withCommandApprovals(
-                                turnId?.let { state.commandApprovals.turnSettled(locator, it) }
-                                    ?: state.commandApprovals,
+                            state.withApprovals(
+                                commandApprovals = turnId?.let {
+                                    state.commandApprovals.turnSettled(locator, it)
+                                } ?: state.commandApprovals,
+                                fileApprovals = turnId?.let {
+                                    state.fileApprovals.turnSettled(locator, it)
+                                } ?: state.fileApprovals,
                             ).copy(
                                 threadActions = state.threadActions.reconcileInterrupt(locator, null),
                                 threads = state.threads[locator]?.let { row ->
@@ -1491,10 +1704,17 @@ private data class RetainedCards(
     val error: String? = null,
 )
 
-private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState): DealerUiState {
-    val blocking = approvals.unresolvedThreads()
+private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState): DealerUiState =
+    withApprovals(commandApprovals = approvals)
+
+internal fun DealerUiState.withApprovals(
+    commandApprovals: CommandApprovalState = this.commandApprovals,
+    fileApprovals: FileApprovalState = this.fileApprovals,
+): DealerUiState {
+    val blocking = commandApprovals.unresolvedThreads() + fileApprovals.unresolvedThreads()
     return copy(
-        commandApprovals = approvals,
+        commandApprovals = commandApprovals,
+        fileApprovals = fileApprovals,
         knownBlockingRequestThreads = blocking,
         threads = threads.mapValues { (locator, thread) ->
             when {
@@ -1510,6 +1730,17 @@ private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState):
             }
         },
     )
+}
+
+private fun DealerUiState.fileReviewCard(hostId: String, wire: AppServerRequest): Card? {
+    val params = wire.params as? JsonObject ?: return null
+    val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull ?: return null
+    val itemId = (params["itemId"] as? JsonPrimitive)?.contentOrNull ?: return null
+    return cards.singleOrNull {
+        it.conversationId == "$hostId/$threadId" &&
+            it.id == itemId &&
+            it.source == CardSource.CODEX_FILE_CHANGE
+    }
 }
 
 private fun Card.reviewMaterialPresent(): Boolean = when (source) {
@@ -1548,6 +1779,7 @@ data class DealerUiState(
     val threadAttachments: ThreadAttachmentState = ThreadAttachmentState(),
     val threadActions: ThreadActionState = ThreadActionState(),
     val commandApprovals: CommandApprovalState = CommandApprovalState(),
+    val fileApprovals: FileApprovalState = FileApprovalState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),

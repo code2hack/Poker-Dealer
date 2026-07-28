@@ -1,0 +1,12 @@
+{
+  "id": "file-approval-1",
+  "method": "item/fileChange/requestApproval",
+  "params": {
+    "threadId": "thr-file",
+    "turnId": "turn-file",
+    "itemId": "file-item",
+    "reason": "Allow the reviewed changes",
+    "grantRoot": "/work/repo",
+    "startedAtMs": 1785283204000
+  }
+}

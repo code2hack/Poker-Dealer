@@ -51,7 +51,10 @@ class InitializedHostSessionConnector(
                 CodexAppServerSession(
                     WebSocketJsonRpcPeer(
                         socket,
-                        supportedServerRequests = setOf(COMMAND_APPROVAL_METHOD),
+                        supportedServerRequests = setOf(
+                            COMMAND_APPROVAL_METHOD,
+                            FILE_APPROVAL_METHOD,
+                        ),
                     ),
                     requestTimeoutMs = configured.timeouts.appServerRequestMs,
                     turnInactivityTimeoutMs = configured.timeouts.turnInactivityMs,
