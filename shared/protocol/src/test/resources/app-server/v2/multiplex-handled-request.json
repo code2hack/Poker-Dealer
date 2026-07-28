@@ -1,0 +1,8 @@
+{
+  "id": 40,
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thread-1",
+    "command": "printf hello"
+  }
+}

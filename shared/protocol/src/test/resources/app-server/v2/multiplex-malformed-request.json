@@ -1,0 +1,9 @@
+{
+  "id": 42,
+  "method": {
+    "invalid": true
+  },
+  "params": {
+    "value": 1
+  }
+}

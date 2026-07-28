@@ -2,7 +2,17 @@ package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
 import com.code2hack.pokerdealer.protocol.host.withConnectionPhaseTimeout
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -15,6 +25,9 @@ import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 private val WebSocketRandom = SecureRandom()
 private fun SecureRandom.bytes(size: Int): ByteArray = ByteArray(size).also(::nextBytes)
@@ -245,53 +258,70 @@ data class AppServerNotification(
     val raw: JsonObject? = null,
 )
 
+data class AppServerRequest(
+    val id: JsonElement,
+    val method: String,
+    val params: JsonElement = JsonObject(emptyMap()),
+    val raw: JsonObject? = null,
+)
+
 interface JsonRpcPeer {
     suspend fun request(method: String, params: JsonElement = JsonObject(emptyMap())): JsonElement
     suspend fun notify(method: String, params: JsonElement? = null)
     suspend fun receiveNotification(): AppServerNotification?
+    suspend fun receiveServerRequest(): AppServerRequest? = null
+    suspend fun respond(request: AppServerRequest, result: JsonElement) {
+        error("Server requests are not supported by this peer")
+    }
+    suspend fun awaitClose(): Nothing = awaitCancellation()
     suspend fun close()
 }
 
 class WebSocketJsonRpcPeer(
     private val socket: AppServerWebSocket,
     private val maxPendingNotifications: Int = 1_024,
+    private val maxPendingServerRequests: Int = 64,
+    private val supportedServerRequests: Set<String> = emptySet(),
     private val onRejectedServerRequest: (String) -> Unit = {},
+    private val onDiagnostic: (JsonObject) -> Unit = {},
 ) : JsonRpcPeer {
-    private var nextId = 1L
-    private val pending = ArrayDeque<AppServerNotification>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val nextId = AtomicLong(1)
+    private val closed = AtomicBoolean()
+    private val writeMutex = Mutex()
+    private val pendingResponses = ConcurrentHashMap<JsonElement, PendingResponse>()
+    private val pendingServerRequests = ConcurrentHashMap<JsonElement, AppServerRequest>()
+    private val closeFailure = CompletableDeferred<Throwable>()
+    private val notifications = Channel<AppServerNotification>(maxPendingNotifications)
+    private val serverRequests = Channel<AppServerRequest>(maxPendingServerRequests)
+    private val reader = scope.launch { readLoop() }
 
     init {
         require(maxPendingNotifications > 0) { "Pending notification limit must be positive" }
+        require(maxPendingServerRequests > 0) { "Pending server-request limit must be positive" }
     }
 
     override suspend fun request(method: String, params: JsonElement): JsonElement {
-        val id = JsonPrimitive(nextId++)
-        send(
-            buildJsonObject {
-                put("id", id)
-                put("method", JsonPrimitive(method))
-                put("params", params)
-            },
-        )
-        while (true) {
-            when (val inbound = readInbound() ?: error("Connection closed before $method response")) {
-                is Inbound.Response -> {
-                    require(inbound.id == id) {
-                        "Unexpected app-server response ${inbound.id}; waiting for $id"
-                    }
-                    inbound.error?.let { error("app-server $method failed: $it") }
-                    return inbound.result ?: JsonNull
-                }
-                is Inbound.Notification -> {
-                    require(pending.size < maxPendingNotifications) { "Too many pending app-server notifications" }
-                    pending += AppServerNotification(inbound.method, inbound.params ?: JsonObject(emptyMap()), inbound.raw)
-                }
-                is Inbound.ServerRequest -> reject(inbound)
-            }
+        check(!closed.get()) { "app-server connection is closed" }
+        val id = JsonPrimitive(nextId.getAndIncrement())
+        val response = CompletableDeferred<JsonElement>()
+        pendingResponses[id] = PendingResponse(method, response)
+        try {
+            send(
+                buildJsonObject {
+                    put("id", id)
+                    put("method", JsonPrimitive(method))
+                    put("params", params)
+                },
+            )
+            return response.await()
+        } finally {
+            pendingResponses.remove(id)
         }
     }
 
     override suspend fun notify(method: String, params: JsonElement?) {
+        check(!closed.get()) { "app-server connection is closed" }
         send(
             buildJsonObject {
                 put("method", JsonPrimitive(method))
@@ -300,40 +330,135 @@ class WebSocketJsonRpcPeer(
         )
     }
 
-    override suspend fun receiveNotification(): AppServerNotification? {
-        if (pending.isNotEmpty()) return pending.removeFirst()
-        while (true) {
-            when (val inbound = readInbound() ?: return null) {
-                is Inbound.Notification ->
-                    return AppServerNotification(inbound.method, inbound.params ?: JsonObject(emptyMap()), inbound.raw)
-                is Inbound.ServerRequest -> reject(inbound)
-                is Inbound.Response -> error("Unexpected app-server response ${inbound.id}")
-            }
+    override suspend fun receiveNotification(): AppServerNotification? =
+        notifications.receiveCatching().getOrThrow()
+
+    override suspend fun receiveServerRequest(): AppServerRequest? =
+        serverRequests.receiveCatching().getOrThrow()
+
+    override suspend fun respond(request: AppServerRequest, result: JsonElement) {
+        require(pendingServerRequests.remove(request.id, request)) {
+            "Server request ${request.id} is no longer pending"
         }
+        send(buildJsonObject {
+            put("id", request.id)
+            put("result", result)
+        })
     }
 
     override suspend fun close() {
-        socket.close()
+        terminate(IllegalStateException("app-server connection closed"))
+    }
+
+    override suspend fun awaitClose(): Nothing = throw closeFailure.await()
+
+    private suspend fun readLoop() {
+        var failure: Throwable = IllegalStateException("app-server connection closed")
+        try {
+            while (true) {
+                when (val inbound = readInbound() ?: break) {
+                    is Inbound.Response -> {
+                        val pending = pendingResponses.remove(inbound.id)
+                        if (pending == null) {
+                            runCatching { onDiagnostic(inbound.raw) }
+                        } else if (inbound.error != null) {
+                            pending.result.completeExceptionally(
+                                IllegalStateException("app-server ${pending.method} failed: ${inbound.error}"),
+                            )
+                        } else {
+                            pending.result.complete(inbound.result ?: JsonNull)
+                        }
+                    }
+                    is Inbound.Notification -> {
+                        check(
+                            notifications.trySend(
+                                AppServerNotification(
+                                    inbound.method,
+                                    inbound.params ?: JsonObject(emptyMap()),
+                                    inbound.raw,
+                                ),
+                            ).isSuccess,
+                        ) { "Too many pending app-server notifications" }
+                    }
+                    is Inbound.ServerRequest -> dispatch(inbound)
+                    is Inbound.MalformedServerRequest -> reject(inbound.id, null, inbound.raw, "Malformed server request")
+                }
+            }
+        } catch (caught: Throwable) {
+            failure = caught
+        } finally {
+            terminate(failure)
+        }
+    }
+
+    private suspend fun dispatch(inbound: Inbound.ServerRequest) {
+        if (inbound.method !in supportedServerRequests) {
+            reject(
+                inbound.id,
+                inbound.method,
+                inbound.raw,
+                "Dealer cannot handle server request '${inbound.method}'",
+            )
+            return
+        }
+        val request = AppServerRequest(
+            inbound.id,
+            inbound.method,
+            inbound.params ?: JsonObject(emptyMap()),
+            inbound.raw,
+        )
+        pendingServerRequests[inbound.id] = request
+        if (serverRequests.trySend(request).isFailure) {
+            pendingServerRequests.remove(inbound.id)
+            reject(inbound.id, inbound.method, inbound.raw, "Dealer server-request queue is full")
+        }
+    }
+
+    private suspend fun terminate(failure: Throwable) {
+        if (!closed.compareAndSet(false, true)) return
+        closeFailure.complete(failure)
+        withContext(NonCancellable) {
+            try {
+                socket.close()
+            } catch (closeFailure: Throwable) {
+                failure.addSuppressed(closeFailure)
+            }
+            pendingResponses.values.forEach { it.result.completeExceptionally(failure) }
+            pendingResponses.clear()
+            pendingServerRequests.clear()
+            notifications.close(failure)
+            serverRequests.close(failure)
+            scope.cancel()
+        }
     }
 
     private suspend fun send(message: JsonObject) {
-        socket.sendText(AppServerJson.encodeToString(JsonElement.serializer(), message))
+        try {
+            writeMutex.withLock {
+                check(!closed.get()) { "app-server connection is closed" }
+                socket.sendText(AppServerJson.encodeToString(JsonElement.serializer(), message))
+            }
+        } catch (failure: Throwable) {
+            terminate(failure)
+            throw failure
+        }
     }
 
-    private suspend fun reject(request: Inbound.ServerRequest) {
+    private suspend fun reject(id: JsonElement, method: String?, raw: JsonObject, message: String) {
         send(
             buildJsonObject {
-                put("id", request.id)
+                put("id", id)
                 put(
                     "error",
                     buildJsonObject {
-                        put("code", JsonPrimitive(-32601))
-                        put("message", JsonPrimitive("Dealer cannot handle server request '${request.method}'"))
+                        put("code", JsonPrimitive(if (method == null) -32600 else -32601))
+                        put("message", JsonPrimitive(message))
                     },
                 )
             },
         )
-        onRejectedServerRequest(request.method)
+        if (method != null) runCatching { onRejectedServerRequest(method) }
+        if (method != "config/read") runCatching { onDiagnostic(raw) }
     }
 
     private suspend fun readInbound(): Inbound? {
@@ -345,13 +470,24 @@ class WebSocketJsonRpcPeer(
         return when {
             method != null && id != null -> Inbound.ServerRequest(id, method, message["params"], message)
             method != null -> Inbound.Notification(method, message["params"], message)
-            id != null -> Inbound.Response(id, message["result"], message["error"])
+            id != null && "method" in message -> Inbound.MalformedServerRequest(id, message)
+            id != null -> Inbound.Response(id, message["result"], message["error"], message)
             else -> error("Invalid JSON-RPC message: $message")
         }
     }
 
+    private data class PendingResponse(
+        val method: String,
+        val result: CompletableDeferred<JsonElement>,
+    )
+
     private sealed interface Inbound {
-        data class Response(val id: JsonElement, val result: JsonElement?, val error: JsonElement?) : Inbound
+        data class Response(
+            val id: JsonElement,
+            val result: JsonElement?,
+            val error: JsonElement?,
+            val raw: JsonObject,
+        ) : Inbound
         data class Notification(val method: String, val params: JsonElement?, val raw: JsonObject) : Inbound
         data class ServerRequest(
             val id: JsonElement,
@@ -359,5 +495,6 @@ class WebSocketJsonRpcPeer(
             val params: JsonElement?,
             val raw: JsonObject,
         ) : Inbound
+        data class MalformedServerRequest(val id: JsonElement, val raw: JsonObject) : Inbound
     }
 }
