@@ -6,6 +6,9 @@ import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
+import com.code2hack.pokerdealer.domain.ThreadStartCatalog
+import com.code2hack.pokerdealer.domain.ThreadStartSelection
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
 import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
@@ -179,5 +182,51 @@ class DealerUiStateTest {
         )
 
         assertEquals(true, termuxState.hasDealerControl(termuxConfig))
+    }
+
+    @Test
+    fun threadCreationFailureKeepsReviewedSettingsWithoutAttachingAnything() {
+        val state = DealerUiState(
+            newThread = NewThreadUiState(
+                hostId = "u4090",
+                observedWorkingDirectories = listOf("/work/repo"),
+                workingDirectory = "/work/repo",
+                catalog = ThreadStartCatalog("/work/repo"),
+                creating = true,
+            ),
+        ).withThreadCreationFailure("invalid provider")
+
+        assertEquals("invalid provider", state.newThread?.error)
+        assertFalse(state.newThread?.creating ?: true)
+        assertEquals(emptySet<CodexThreadLocator>(), state.threadAttachments.attached)
+        assertEquals(emptySet<CodexThreadLocator>(), state.threadAttachments.dealerClaims)
+    }
+
+    @Test
+    fun createdEmptyThreadIsAttachedReadyControlledAndOpensItsComposer() {
+        val locator = CodexThreadLocator("u4090", "new-thread")
+        val state = DealerUiState(
+            newThread = NewThreadUiState(
+                hostId = "u4090",
+                observedWorkingDirectories = listOf("/work/repo"),
+                workingDirectory = "/work/repo",
+            ),
+        ).withCreatedThread(
+            locator = locator,
+            name = null,
+            preview = "",
+            selection = ThreadStartSelection(
+                workingDirectory = "/work/repo",
+                reasoningEffort = "high",
+            ),
+        )
+
+        assertEquals(setOf(locator), state.threadAttachments.attached)
+        assertEquals(setOf(locator), state.threadAttachments.dealerClaims)
+        assertEquals(ThreadWorkState.READY, state.threads.getValue(locator).workState)
+        assertEquals(ControlSurface.DEALER, state.threads.getValue(locator).intendedControlSurface)
+        assertEquals("high", state.threadActions.pendingReasoningEfforts[locator])
+        assertEquals(locator, state.browsedThread)
+        assertEquals(null, state.newThread)
     }
 }

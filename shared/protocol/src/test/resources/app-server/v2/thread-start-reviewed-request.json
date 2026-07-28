@@ -1,0 +1,11 @@
+{
+  "method": "thread/start",
+  "params": {
+    "cwd": "/work/repo",
+    "modelProvider": "custom-id",
+    "model": "exact-wire-model",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user"
+  }
+}

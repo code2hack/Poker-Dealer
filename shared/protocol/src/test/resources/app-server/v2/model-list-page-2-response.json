@@ -1,0 +1,17 @@
+{
+  "result": {
+    "data": [
+      {
+        "id": "second-id",
+        "model": "second-wire-model",
+        "displayName": "Second Model",
+        "description": "Fixture model",
+        "hidden": false,
+        "isDefault": false,
+        "defaultReasoningEffort": "medium",
+        "supportedReasoningEfforts": []
+      }
+    ],
+    "nextCursor": null
+  }
+}

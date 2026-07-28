@@ -17,7 +17,7 @@ import java.util.List;
         DealerDatabase.ThreadDraft.class,
         DealerDatabase.PendingThreadAction.class
     },
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 public abstract class DealerDatabase extends RoomDatabase {
@@ -41,11 +41,18 @@ public abstract class DealerDatabase extends RoomDatabase {
         @NonNull public final String hostId;
         @NonNull public final String threadId;
         @NonNull public final String text;
+        public final String reasoningEffort;
 
-        public ThreadDraft(@NonNull String hostId, @NonNull String threadId, @NonNull String text) {
+        public ThreadDraft(
+            @NonNull String hostId,
+            @NonNull String threadId,
+            @NonNull String text,
+            String reasoningEffort
+        ) {
             this.hostId = hostId;
             this.threadId = threadId;
             this.text = text;
+            this.reasoningEffort = reasoningEffort;
         }
     }
 
@@ -94,6 +101,9 @@ public abstract class DealerDatabase extends RoomDatabase {
 
         @Insert(onConflict = OnConflictStrategy.REPLACE)
         void upsert(ThreadDraft draft);
+
+        @Query("SELECT * FROM thread_drafts WHERE hostId = :hostId AND threadId = :threadId")
+        ThreadDraft read(String hostId, String threadId);
 
         @Query("DELETE FROM thread_drafts WHERE hostId = :hostId AND threadId = :threadId")
         void delete(String hostId, String threadId);

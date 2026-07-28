@@ -24,6 +24,7 @@ data class ThreadActionState(
     val drafts: Map<CodexThreadLocator, String> = emptyMap(),
     val pendingInputs: Map<CodexThreadLocator, PendingThreadInput> = emptyMap(),
     val pendingInterrupts: Map<CodexThreadLocator, String> = emptyMap(),
+    val pendingReasoningEfforts: Map<CodexThreadLocator, String> = emptyMap(),
 ) {
     fun editDraft(locator: CodexThreadLocator, text: String): ThreadActionState =
         copy(drafts = if (text.isEmpty()) drafts - locator else drafts + (locator to text))
@@ -54,6 +55,11 @@ data class ThreadActionState(
         return copy(
             drafts = if (drafts[locator] == pending.draftText) drafts - locator else drafts,
             pendingInputs = pendingInputs - locator,
+            pendingReasoningEfforts = if (pending.action == ComposerAction.START) {
+                pendingReasoningEfforts - locator
+            } else {
+                pendingReasoningEfforts
+            },
         )
     }
 
@@ -92,4 +98,15 @@ data class ThreadActionState(
         } else {
             this
         }
+
+    fun setPendingReasoningEffort(
+        locator: CodexThreadLocator,
+        effort: String?,
+    ): ThreadActionState = copy(
+        pendingReasoningEfforts = if (effort == null) {
+            pendingReasoningEfforts - locator
+        } else {
+            pendingReasoningEfforts + (locator to effort)
+        },
+    )
 }

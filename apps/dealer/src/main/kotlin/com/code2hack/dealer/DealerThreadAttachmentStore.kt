@@ -16,7 +16,7 @@ class DealerThreadAttachmentStore(context: Context) {
         context.applicationContext,
         DealerDatabase::class.java,
         "dealer.db",
-    ).addMigrations(MIGRATION_1_2).build()
+    ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     private val dao = database.attachedThreads()
     private val drafts = database.threadDrafts()
     private val actions = database.pendingThreadActions()
@@ -38,12 +38,37 @@ class DealerThreadAttachmentStore(context: Context) {
     }
 
     suspend fun writeDraft(locator: CodexThreadLocator, text: String) = withContext(Dispatchers.IO) {
-        if (text.isEmpty()) {
+        val current = drafts.read(locator.hostId, locator.threadId)
+        if (text.isEmpty() && current?.reasoningEffort == null) {
             drafts.delete(locator.hostId, locator.threadId)
         } else {
-            drafts.upsert(DealerDatabase.ThreadDraft(locator.hostId, locator.threadId, text))
+            drafts.upsert(
+                DealerDatabase.ThreadDraft(
+                    locator.hostId,
+                    locator.threadId,
+                    text,
+                    current?.reasoningEffort,
+                ),
+            )
         }
     }
+
+    suspend fun writeReasoningEffort(locator: CodexThreadLocator, effort: String?) =
+        withContext(Dispatchers.IO) {
+            val current = drafts.read(locator.hostId, locator.threadId)
+            if (effort == null && current?.text.isNullOrEmpty()) {
+                drafts.delete(locator.hostId, locator.threadId)
+            } else {
+                drafts.upsert(
+                    DealerDatabase.ThreadDraft(
+                        locator.hostId,
+                        locator.threadId,
+                        current?.text.orEmpty(),
+                        effort,
+                    ),
+                )
+            }
+        }
 
     suspend fun readActions(): ThreadActionState = withContext(Dispatchers.IO) {
         val pendingInputs = mutableMapOf<CodexThreadLocator, PendingThreadInput>()
@@ -71,6 +96,11 @@ class DealerThreadAttachmentStore(context: Context) {
             drafts = readDrafts(),
             pendingInputs = pendingInputs,
             pendingInterrupts = pendingInterrupts,
+            pendingReasoningEfforts = drafts.readAll().mapNotNull { row ->
+                row.reasoningEffort?.let {
+                    CodexThreadLocator(row.hostId, row.threadId) to it
+                }
+            }.toMap(),
         )
     }
 
@@ -126,6 +156,11 @@ class DealerThreadAttachmentStore(context: Context) {
                         "`clientId` TEXT, `expectedTurnId` TEXT, `draftText` TEXT, " +
                         "PRIMARY KEY(`hostId`, `threadId`))",
                 )
+            }
+        }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `thread_drafts` ADD COLUMN `reasoningEffort` TEXT")
             }
         }
 
