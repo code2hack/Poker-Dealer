@@ -153,11 +153,13 @@ Git history may contain these designs. History is evidence only, not current gui
 
 ## Immediate next slice
 
-M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`. The pre-M1T lifecycle hardening tracked in GitHub issue #5 adds bounded cancellation, capability-aware fallback, truthful one-shot states, and user-message delivery reconciliation; see `docs/evidence/u4090-m1-hardening-2026-07-27.md`.
+M1 was proven on u4090 through trusted-LAN SSH on 2026-07-27. See `docs/evidence/u4090-m1-2026-07-27.md`. M1T completed on the real Fold6 on 2026-07-28 with direct and genuine DERP-relayed turns, third-party-VPN coexistence, lifecycle and cancellation recovery, route fallback, and unplugged battery observations; see `docs/evidence/fold6-m1t-routing-2026-07-28.md` and `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`.
 
-Unless a newer committed plan says otherwise, implement M1T: the embedded-tsnet Android spike. Keep the existing route-neutral SSH, WebSocket, and app-server layers unchanged. Package pinned Go/Tailscale dependencies behind a narrow Android boundary, enroll a Dealer-owned userspace node without `VpnService`, expose only Dealer-owned workstation connections, and record real Fold6 direct/DERP, VPN-coexistence, reconnect, foreground-service, and battery evidence.
+The current M2 workstation slice proves Spark and u4090 through the same daemon-backed app-server stack, including explicit soft control and LAN-to-embedded-tailnet fallback. Mixed-version proof remains separate M2 work; see `docs/evidence/workstations-m2-2026-07-28.md`.
 
-Do not start Poker networking, Morse, ASR, a terminal, broad experimental app-server APIs, or Termux-specific lifecycle work in M1T.
+Unless a newer committed plan says otherwise, implement M2T: the Fold6 Termux host. Reuse the route-neutral SSH, WebSocket, app-server, projection, delivery-reconciliation, and reconnect layers. Add only the loopback SSH route and the distribution-aware lifecycle behavior needed to qualify a tested community Termux build.
+
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, start Poker networking, Morse, ASR, a terminal, or broad experimental app-server APIs in M2T.
 
 ## Completion discipline
 

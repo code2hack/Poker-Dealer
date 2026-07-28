@@ -65,4 +65,3 @@ Expanded route diagnostics pushed the fixed-height form below the phone viewport
 - Exercise differing supported Codex versions on the two workstations; both were `0.145.0` during these live tests.
 - External-Tailscale fallback remains explicitly disabled rather than proven.
 - The soft control claim is process-local pending the planned host/thread Room persistence.
-- M1T's real DERP-relayed and controlled physical battery evidence remains open.

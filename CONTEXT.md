@@ -71,6 +71,8 @@ For Fold6 development diagnostics, keep wireless ADB enabled and prefer it over 
 
 The same LAN app-server slice now passes against daemon-backed local-TUI threads on both Spark and u4090, and Dealer requires an explicit host-qualified soft control claim before sending; see `docs/evidence/workstations-m2-2026-07-28.md`. A Fold6 run retained a VPN-routed LAN failure, selected embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Both hosts ran Codex `0.145.0`, so live mixed-version behavior remains partial M2 evidence rather than M2 completion.
 
+M2T is the immediate next slice: qualify Fold6 Termux through loopback SSH and the shared app-server stack, prove local-TUI coexistence and one turn, then prove Android suspension recovery. The remaining M2 mixed-version proof stays separate.
+
 ## Core identity
 
 A durable Poker–Dealer conversation reference is:

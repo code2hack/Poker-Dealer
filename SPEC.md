@@ -1,7 +1,7 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 7
-**Date:** 2026-07-27  
+**Status:** Normative implementation contract, revision 8
+**Date:** 2026-07-28
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
 **Product names:** **Dealer** = Android phone client; **Poker** = Rokid glasses client
@@ -795,6 +795,8 @@ Complete when:
 - direct and DERP-relayed behavior is recorded;
 - foreground-service, battery, reconnect, and route-fallback behavior is recorded.
 
+M1T completed on the real Fold6 on 2026-07-28. Direct routing and third-party-VPN coexistence are recorded in `docs/evidence/fold6-m1t-routing-2026-07-28.md`; lifecycle, fallback, cancellation, genuine DERP relay, and unplugged idle/direct/relayed battery observations are recorded in `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`. The evidence retains its documented single-device and short-duration limits.
+
 ### M2 — remaining workstation and route continuity
 
 Complete when:
@@ -805,6 +807,8 @@ Complete when:
 - host-local TUI and Dealer observe the same daemon-backed thread;
 - Dealer exposes safe take-control behavior;
 - host versions may differ without breaking core use.
+
+The shared workstation slice now works against daemon-backed local-TUI threads on Spark and u4090, including LAN-to-embedded-tailnet fallback and host-qualified soft control. See `docs/evidence/workstations-m2-2026-07-28.md`. Both hosts used Codex `0.145.0`, so mixed-version proof remains outstanding M2 work and does not block the independent M2T host slice.
 
 ### M2T — Fold6 Termux host
 
@@ -836,6 +840,8 @@ Complete when:
 
 ## 17. Immediate next job
 
-A fresh Codex worker MUST begin with M1T, the embedded-tsnet Android spike defined above. It MUST reuse the M1 route-neutral stream, SSH, proxy WebSocket, app-server, projection, and reconnect implementation without introducing transport dependencies above the dialer boundary.
+A fresh Codex worker MUST begin with M2T, the Fold6 Termux host slice defined above. It MUST reuse the existing route-neutral stream, SSH, proxy WebSocket, app-server, projection, delivery reconciliation, and reconnect implementation. The new host path is loopback SSH plus `codex app-server proxy`, with distribution-specific daemon behavior kept behind the lifecycle boundary.
 
-The worker MUST NOT implement a system VPN, restore a bridge, integrate tmux as backend, add Poker networking, build a terminal, or start Termux-specific lifecycle behavior during M1T.
+The worker MUST capability-test the installed community Termux build and record real-Fold6 evidence for daemon lifecycle, Unix-socket binding, proxy and initialization, required thread/turn APIs, local-TUI coexistence, one turn, reconnect, and Android suspension recovery.
+
+The worker MUST NOT access Termux-private files or Unix sockets directly, route the Termux host through embedded tsnet, assume upstream Linux installation or update behavior, restore a bridge or tmux backend, add Poker networking, or build a terminal.

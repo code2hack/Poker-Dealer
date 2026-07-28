@@ -153,19 +153,15 @@ The phone-local host is useful for developing and debugging Poker/Dealer and oth
 
 The repository uses Codex host/thread terminology throughout. The old Rust tmux bridge and scratch planning tree were removed. The previous SSH-supervised WebRTC/tmux proposal is closed as superseded.
 
-M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`. Fold6 embedded-tsnet direct routing and Karing coexistence are recorded in `docs/evidence/fold6-m1t-routing-2026-07-28.md`; short lifecycle, fallback, interruption, and cancellation checks are in `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`. A real DERP-relayed run and controlled physical battery measurements remain unproven.
+M1 is complete on u4090 through trusted-LAN SSH. The original proof is in `docs/evidence/u4090-m1-2026-07-27.md`; pre-M1T lifecycle hardening is recorded in `docs/evidence/u4090-m1-hardening-2026-07-27.md`. M1T completed on the real Fold6 with direct and genuine DERP-relayed turns, Karing coexistence, lifecycle and cancellation recovery, route fallback, and unplugged battery observations; see `docs/evidence/fold6-m1t-routing-2026-07-28.md` and `docs/evidence/fold6-m1t-lifecycle-2026-07-28.md`.
 
 The shared LAN live test also passes against daemon-backed host-local TUI threads on Spark and u4090; see `docs/evidence/workstations-m2-2026-07-28.md`. Dealer can select either workstation and requires an explicit host/thread-specific soft control claim before sending. A Fold6 run also preserved a VPN-routed LAN failure, fell through to embedded tsnet, completed a Spark turn, and reconciled one delivered user card. Live mixed-version proof remains outstanding.
 
-Dealer's M1 screen accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn. The UI and notification can cancel the run, one-shot completion reports `Completed` or `Recovered`, and the submitted user card shows pending, accepted, delivered, or unknown delivery state.
+Dealer's workstation screen selects Spark or u4090 and accepts the LAN endpoint, SSH user, thread ID, and turn text. It imports an unencrypted SSH private key and pinned `known_hosts` data through Android's document picker, keeps that material in memory only, and renders history plus live card revisions from the shared M1 stack. An active run is owned by a foreground service so Activity recreation does not cancel an accepted turn. The UI and notification can cancel the run, one-shot completion reports `Completed` or `Recovered`, and the submitted user card shows pending, accepted, delivered, or unknown delivery state.
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-The next implementation sequence is:
-
-1. Add the embedded-tsnet Android spike without rewriting SSH or app-server code.
-2. Add the remaining workstation host.
-3. Add Fold6 Termux through the same app-server adapter.
+The next implementation slice is M2T: add Fold6 Termux through loopback SSH and the same app-server adapter, prove coexistence with its daemon-backed local TUI and one turn, then prove Android suspension recovery. Mixed-version workstation proof remains separate M2 work.
 
 ## Build and test
 
