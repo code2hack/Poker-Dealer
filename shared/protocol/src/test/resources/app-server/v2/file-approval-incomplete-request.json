@@ -1,0 +1,12 @@
+{
+  "id": "file-approval-incomplete",
+  "method": "item/fileChange/requestApproval",
+  "params": {
+    "threadId": "thr-file",
+    "turnId": "turn-file",
+    "itemId": "missing-file-item",
+    "reason": null,
+    "grantRoot": null,
+    "startedAtMs": 1785283204001
+  }
+}

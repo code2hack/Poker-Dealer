@@ -1,0 +1,10 @@
+{
+  "id": "file-approval-reissued",
+  "method": "item/fileChange/requestApproval",
+  "params": {
+    "threadId": "thr-file",
+    "turnId": "turn-file",
+    "itemId": "file-item",
+    "startedAtMs": 1785283204002
+  }
+}

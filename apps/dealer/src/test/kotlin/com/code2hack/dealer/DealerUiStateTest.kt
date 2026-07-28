@@ -5,7 +5,10 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
+import com.code2hack.pokerdealer.domain.FileApprovalRequest
+import com.code2hack.pokerdealer.domain.FileApprovalState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
@@ -131,6 +134,40 @@ class DealerUiStateTest {
                 cards = listOf(pending.copy(delivery = DeliveryState.UNKNOWN)),
             ).hasUnsettledAction(locator),
         )
+    }
+
+    @Test
+    fun incompleteFileApprovalFailsClosedWithoutChangingAnUnrelatedBusyTurn() {
+        val fileThread = CodexThreadLocator("u4090", "file-thread")
+        val busyThread = CodexThreadLocator("u4090", "busy-thread")
+        val request = FileApprovalRequest(
+            locator = ServerRequestLocator("u4090", 1, "file-request"),
+            thread = fileThread,
+            turnId = "file-turn",
+            itemId = "file-item",
+            reason = null,
+            grantRoot = null,
+            fileChanges = emptyList(),
+            wireFingerprint = "wire-file",
+            fingerprint = "file",
+            createdAtMs = 1,
+        )
+        val pending = FileApprovalState().receive(request, sameIdReissueQualified = false)
+        val state = DealerUiState(
+            threads = mapOf(
+                fileThread to discovered(fileThread, "file-turn"),
+                busyThread to discovered(busyThread, "busy-turn"),
+            ),
+        ).withApprovals(fileApprovals = pending)
+
+        assertEquals(ThreadWorkState.ATTENTION_REQUIRED, state.threads[fileThread]?.workState)
+        assertEquals(ThreadWorkState.BUSY, state.threads[busyThread]?.workState)
+
+        val failed = state.withApprovals(
+            fileApprovals = pending.failClosed(request.locator, "diff incomplete"),
+        )
+        assertEquals(ThreadWorkState.BUSY, failed.threads[fileThread]?.workState)
+        assertEquals(ThreadWorkState.BUSY, failed.threads[busyThread]?.workState)
     }
 
     @Test
@@ -444,4 +481,15 @@ class DealerUiStateTest {
             },
         )
     }
+
+    private fun discovered(locator: CodexThreadLocator, turnId: String) = DiscoveredThread(
+        locator = locator,
+        name = null,
+        preview = null,
+        workingDirectory = "/work",
+        updatedAtSeconds = 1,
+        status = "active",
+        workState = ThreadWorkState.BUSY,
+        activeTurnId = turnId,
+    )
 }
