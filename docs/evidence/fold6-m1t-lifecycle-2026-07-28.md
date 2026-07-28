@@ -37,6 +37,13 @@ same session again reused the identity and connected without enrollment.
 These are induced short-duration checks, not evidence that Android will preserve Dealer through
 arbitrary OEM process killing or long unattended doze.
 
+A later unplugged observation used wireless ADB and left the screen off without forcing Android
+idle state. After an initial charger/fuel-gauge transition, the clean interval ran for 27 minutes
+54 seconds, from 12:53:49 to 13:21:43 local time. Android remained unpowered and discharging; the
+screen was dozing and light idle was `IDLE` at the end. Dealer retained PID 27818, its foreground
+service, notification ID 4090, and the embedded node. Spark reported `dealer-fold6` online while
+there was no active peer connection. After wake, the same PID remained.
+
 ## Turn, interruption, fallback, and cancellation checks
 
 After process restart, a full embedded-route M1 turn completed in 14 seconds. It performed the
@@ -64,9 +71,14 @@ Android 13+ notification permission was missing before this run, which hid the f
 notification action on the Fold6. Dealer now declares and requests `POST_NOTIFICATIONS` when the
 Activity is first created. With permission granted before starting the node, Android recorded a
 posted foreground notification with one `Cancel` service `PendingIntent`. The Samsung notification
-shade displayed the Dealer notification. Automated tapping of the expanded action was not completed;
-the action target remains the same `ACTION_CANCEL` path that cancels the run and stops the embedded
-node.
+shade displayed the Dealer notification.
+
+A later wireless-ADB run expanded that real Samsung notification and tapped its visible `Cancel`
+action end-to-end. Dealer changed the embedded node from `Connected` to `Stopped`, removed its
+foreground notification, and left no active host run. This used the same `ACTION_CANCEL` service
+path as UI cancellation. The tested APK included the subsequent M2 workstation UI changes and had
+SHA-256 `11df7f20d42d23ca0a7d28e82f562e624f39457cfc808f1540f32216f7fc471e`;
+the notification action implementation itself was unchanged.
 
 ## Battery observation and limitation
 
@@ -80,23 +92,59 @@ on-battery screen-off/doze CPU estimate was 0.0457 mAh; nearly all remaining est
 while physically powered and while the UI, builds, installs, and tests were active. This sample
 cannot be assigned to idle tsnet or an active connection and is rejected as an M1T battery result.
 
-A repeatable idle-node and active-connection battery run still requires:
+The later measurements used wireless ADB with physical USB, AC, and wireless charging all
+disconnected. They recorded the physical charge counter and fixed the screen and probe conditions
+within each interval. No battery threshold is inferred from any sample.
 
-1. physical USB disconnection after establishing wireless diagnostics or a timestamped manual
-   procedure;
-2. fixed screen, radio, Karing, thermal, and battery-start conditions;
-3. separate idle and active intervals long enough for useful charge-counter or BatteryStats
-   resolution;
-4. direct and real DERP-relayed active intervals measured separately.
+The later unplugged idle-node interval above used Android's physical charge counter. It fell from
+3,449,925 µAh to 3,287,475 µAh, an observed 162.45 mAh over 27 minutes 54 seconds; the displayed
+battery level fell from 81% to 77% and temperature from 36.4°C to 31.8°C. Conditions were cellular
+data, Karing connected, wireless ADB connected, screen off/dozing, Dealer foreground service
+running, embedded node online, and no active tailnet peer path. This is one observation, not an
+isolated estimate of Dealer or `tsnet` consumption, because Android, Karing, cellular, Wi-Fi, and
+wireless ADB remained active.
 
-No battery threshold is inferred from the rejected sample.
+Immediately after wake, Spark made three real relayed probes to the same embedded node. All three
+used `DERP(sin)` in 202–361 ms and Tailscale reported that a direct connection was not established.
+A later pre-turn probe used `DERP(sfo)` in 523 ms, again without establishing a direct connection.
+
+Dealer then ran a full Spark turn. Trusted LAN failed first, Dealer selected
+`SSH_EMBEDDED_TSNET`, and the optional external route remained `DISABLED`. During the SSH,
+app-server, and turn traffic, Spark continuously reported the Dealer peer active with no direct
+address and relay `sfo`; peer byte counters increased from 5,644/6,908 to 19,948/57,060 bytes.
+The host recorded one user message at 13:31:37 local time, the exact response
+`DERP12-20260728` at 13:31:42, and task completion one second later. Dealer reported `Completed`
+with the user card `COMMITTED | DELIVERED`. This is the real DERP-relayed full-turn proof that was
+missing from the earlier routing evidence.
+
+For a relayed-active observation, the Fold6 was again unplugged with cellular data, Karing,
+wireless ADB, screen off, and the embedded node running. Spark sent a low-rate peer probe every
+few seconds, and every successful probe used `DERP(sfo)` with direct connection unavailable. The
+clean measured interval ran for 6 minutes 3 seconds, from 13:35:42 through the last successful
+probe at 13:41:41. The physical charge counter fell from 3,137,850 µAh to 3,073,725 µAh, an
+observed 64.125 mAh; displayed battery fell from 74% to 72% and temperature from 34.5°C to 34.1°C.
+The first timeout four seconds later ended the active interval. Dealer retained PID 27818 and
+foreground notification ID 4090. Waking the Fold6 restored the same relayed peer on the first
+probe without restarting Dealer or re-enrolling the node. This is a low-rate probe-active
+observation, not a sustained bulk-transfer or isolated Dealer-only energy estimate.
+
+For a comparable direct-active observation, Karing was stopped and the embedded node restarted.
+Spark then reached Dealer at its direct IPv6 endpoint, normally in 30–80 ms. With the Fold6
+unplugged, cellular data and wireless ADB active, screen off, and the same low-rate probe pattern,
+the clean measured interval ran for 5 minutes 1 second from 13:45:06 to 13:50:07. Every successful
+probe was direct. The physical charge counter fell from 3,039,525 µAh to 3,013,875 µAh, an observed
+25.65 mAh; displayed battery remained 71% and temperature fell from 34.0°C to 32.9°C. This is also
+a short probe-active whole-device observation, not a sustained transfer or isolated component
+estimate. After the observation, Karing was restored and validated as Android's active VPN,
+Dealer's embedded node was stopped, and wireless ADB remained enabled for diagnostics.
 
 ## Remaining limits
 
-- A real DERP-relayed full M1 turn remains unproven; every working peer path was direct.
-- Notification cancellation is posted and wired but was not tapped end-to-end in the Samsung shade.
-- Long unattended background/doze, OEM process killing, and user-visible recovery remain unproven.
-- Idle, direct-active, and DERP-active physical battery observations remain incomplete.
+- Longer unattended background/doze and OEM process killing remain unproven beyond the natural
+  28-minute observation and the observed wake-to-recover behavior.
+- The battery observations are short, include cellular, hotspot/wireless ADB, Android, and other
+  running apps, and do not establish a production threshold or isolate Dealer consumption.
 - Results cover only the device, versions, VPN profile, tailnet, and Codex build listed above.
 
-Issue #12 must remain open until those remaining hardware observations are recorded.
+These limitations do not invalidate the issue #12 observations; they bound what the recorded
+results prove.
