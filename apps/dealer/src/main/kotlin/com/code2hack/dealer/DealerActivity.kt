@@ -116,6 +116,8 @@ class DealerActivity : ComponentActivity() {
                         onReviewNewThread = { hostId, cwd -> service?.reviewNewThread(hostId, cwd) },
                         onCreateThread = { service?.createThread(it) },
                         onDismissNewThread = { service?.dismissNewThread() },
+                        onRenameThread = { locator, name -> service?.renameThread(locator, name) },
+                        onBeginForkThread = { service?.beginForkThread(it) },
                         onBrowseThread = { service?.browseThread(it) },
                         onAttachThread = { service?.attachThread(it) },
                         onDetachThread = { service?.detachThread(it) },
@@ -285,6 +287,8 @@ private fun DealerApp(
     onReviewNewThread: (String, String) -> Unit,
     onCreateThread: (ThreadStartSelection) -> Unit,
     onDismissNewThread: () -> Unit,
+    onRenameThread: (CodexThreadLocator, String) -> Unit,
+    onBeginForkThread: (CodexThreadLocator) -> Unit,
     onBrowseThread: (CodexThreadLocator) -> Unit,
     onAttachThread: (CodexThreadLocator) -> Unit,
     onDetachThread: (CodexThreadLocator) -> Unit,
@@ -567,6 +571,8 @@ private fun DealerApp(
                     onDetachThread = onDetachThread,
                     onTakeControl = onTakeControl,
                     onYieldControl = onYieldControl,
+                    onRenameThread = onRenameThread,
+                    onBeginForkThread = onBeginForkThread,
                 )
             }
             if (isTermux) {
@@ -801,7 +807,15 @@ private fun NewThreadDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New thread on ${review.hostId}") },
+        title = {
+            Text(
+                if (review.sourceLocator == null) {
+                    "New thread on ${review.hostId}"
+                } else {
+                    "Fork thread on ${review.hostId}"
+                },
+            )
+        },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -934,7 +948,13 @@ private fun NewThreadDialog(
                     !review.loading &&
                     !review.creating,
             ) {
-                Text(if (review.creating) "Creating…" else "Create empty thread")
+                Text(
+                    when {
+                        review.creating -> "Creating…"
+                        review.sourceLocator != null -> "Fork thread"
+                        else -> "Create empty thread"
+                    },
+                )
             }
         },
         dismissButton = {
@@ -953,7 +973,11 @@ private fun ThreadRow(
     onDetachThread: (CodexThreadLocator) -> Unit,
     onTakeControl: (String, String) -> Unit,
     onYieldControl: (String, String) -> Unit,
+    onRenameThread: (CodexThreadLocator, String) -> Unit,
+    onBeginForkThread: (CodexThreadLocator) -> Unit,
 ) {
+    var renaming by remember(thread.locator) { mutableStateOf(false) }
+    var name by remember(thread.locator, thread.name) { mutableStateOf(thread.name.orEmpty()) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -991,6 +1015,15 @@ private fun ThreadRow(
             OutlinedButton(onClick = { onBrowseThread(thread.locator) }) {
                 Text("Browse history")
             }
+            OutlinedButton(onClick = { renaming = true }) {
+                Text("Rename")
+            }
+            OutlinedButton(
+                onClick = { onBeginForkThread(thread.locator) },
+                enabled = thread.canFork(),
+            ) {
+                Text("Fork")
+            }
             if (thread.attached) {
                 OutlinedButton(onClick = { onDetachThread(thread.locator) }) {
                     Text("Detach")
@@ -1018,6 +1051,35 @@ private fun ThreadRow(
                 }
             }
         }
+    }
+    if (renaming) {
+        AlertDialog(
+            onDismissRequest = { renaming = false },
+            title = { Text("Rename thread") },
+            text = {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Thread name") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        renaming = false
+                        onRenameThread(thread.locator, name)
+                    },
+                ) {
+                    Text("Rename")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { renaming = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

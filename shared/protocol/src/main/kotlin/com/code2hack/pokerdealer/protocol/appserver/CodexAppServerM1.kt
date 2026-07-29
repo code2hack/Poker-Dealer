@@ -279,11 +279,33 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
-    suspend fun threadStart(selection: ThreadStartSelection): JsonObject {
+    suspend fun threadStart(selection: ThreadStartSelection): JsonObject =
+        threadWithReviewedSettings("thread/start", null, selection)
+
+    suspend fun threadFork(threadId: String, selection: ThreadStartSelection): JsonObject =
+        threadWithReviewedSettings("thread/fork", threadId, selection)
+
+    suspend fun threadNameSet(threadId: String, name: String) {
+        checkInitialized()
+        actionRequest(
+            "thread/name/set",
+            buildJsonObject {
+                put("threadId", JsonPrimitive(threadId))
+                put("name", JsonPrimitive(name))
+            },
+        )
+    }
+
+    private suspend fun threadWithReviewedSettings(
+        method: String,
+        threadId: String?,
+        selection: ThreadStartSelection,
+    ): JsonObject {
         checkInitialized()
         val response = actionRequest(
-            "thread/start",
+            method,
             buildJsonObject {
+                threadId?.let { put("threadId", JsonPrimitive(it)) }
                 put("cwd", JsonPrimitive(selection.workingDirectory))
                 selection.providerOverride?.let { put("modelProvider", JsonPrimitive(it)) }
                 selection.modelOverride?.let { put("model", JsonPrimitive(it)) }
@@ -297,26 +319,26 @@ class CodexAppServerSession(
             },
         ).jsonObject
         require(response.string("cwd") == selection.workingDirectory) {
-            "thread/start did not apply the selected working directory"
+            "$method did not apply the selected working directory"
         }
         selection.providerOverride?.let {
             require(response.string("modelProvider") == it) {
-                "thread/start did not apply the selected provider"
+                "$method did not apply the selected provider"
             }
         }
         selection.modelOverride?.let {
             require(response.string("model") == it) {
-                "thread/start did not apply the selected model"
+                "$method did not apply the selected model"
             }
         }
         selection.permissionPreset.approvalPolicy?.let {
             require(response.string("approvalPolicy") == it) {
-                "thread/start did not apply the selected approval policy"
+                "$method did not apply the selected approval policy"
             }
         }
         selection.permissionPreset.approvalsReviewer?.let {
             require(response.string("approvalsReviewer") == it) {
-                "thread/start did not apply the selected approvals reviewer"
+                "$method did not apply the selected approvals reviewer"
             }
         }
         selection.permissionPreset.sandbox?.let { expected ->
@@ -327,7 +349,7 @@ class CodexAppServerSession(
                 else -> null
             }
             require(actual == expected || actual == expected.toCamelCase()) {
-                "thread/start did not apply the selected sandbox"
+                "$method did not apply the selected sandbox"
             }
         }
         return response

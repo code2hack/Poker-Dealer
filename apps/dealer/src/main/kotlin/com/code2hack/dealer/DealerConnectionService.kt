@@ -660,13 +660,48 @@ class DealerConnectionService : Service() {
             .distinct()
             .sorted()
             .toList()
-        val workingDirectory = observed.firstOrNull().orEmpty()
+        beginThreadReview(hostId, null, observed, observed.firstOrNull().orEmpty())
+    }
+
+    fun beginForkThread(locator: CodexThreadLocator) {
+        val source = mutableState.value.threads[locator]
+        if (source == null) {
+            mutableState.update { it.copy(error = "Unknown thread ${locator.threadId}") }
+            return
+        }
+        if (!source.canFork()) {
+            mutableState.update { it.copy(error = "Only a READY thread can be forked") }
+            return
+        }
+        val workingDirectory = source.workingDirectory
+        if (workingDirectory == null) {
+            mutableState.update { it.copy(error = "Refresh the thread working directory before forking") }
+            return
+        }
+        val observed = mutableState.value.threads.values
+            .asSequence()
+            .filter { it.locator.hostId == locator.hostId }
+            .mapNotNull(DiscoveredThread::workingDirectory)
+            .plus(workingDirectory)
+            .distinct()
+            .sorted()
+            .toList()
+        beginThreadReview(locator.hostId, locator, observed, workingDirectory)
+    }
+
+    private fun beginThreadReview(
+        hostId: String,
+        sourceLocator: CodexThreadLocator?,
+        observedWorkingDirectories: List<String>,
+        workingDirectory: String,
+    ) {
         mutableState.update {
             it.copy(
                 newThread = NewThreadUiState(
                     hostId = hostId,
-                    observedWorkingDirectories = observed,
+                    observedWorkingDirectories = observedWorkingDirectories,
                     workingDirectory = workingDirectory,
+                    sourceLocator = sourceLocator,
                 ),
                 error = null,
             )
@@ -742,6 +777,13 @@ class DealerConnectionService : Service() {
     fun createThread(selection: ThreadStartSelection) {
         val review = mutableState.value.newThread ?: return
         if (review.creating) return
+        val sourceLocator = review.sourceLocator
+        if (sourceLocator != null && mutableState.value.threads[sourceLocator]?.canFork() != true) {
+            mutableState.update {
+                it.copy(newThread = it.newThread?.copy(error = "Only a READY thread can be forked"))
+            }
+            return
+        }
         val catalog = review.catalog ?: run {
             mutableState.update {
                 it.copy(newThread = it.newThread?.copy(error = "Review host settings before creating"))
@@ -765,17 +807,22 @@ class DealerConnectionService : Service() {
         mutableState.update { it.copy(newThread = it.newThread?.copy(creating = true, error = null)) }
         scope.launch {
             try {
-                val response = appServer.threadStart(validated)
+                val response = sourceLocator?.let {
+                    appServer.threadFork(it.threadId, validated)
+                } ?: appServer.threadStart(validated)
                 val thread = response["thread"] as? JsonObject
-                    ?: error("thread/start response did not include a thread")
+                    ?: error("Thread operation response did not include a thread")
                 require(AppServerThreadProjection.authoritativeState(response).workState == ThreadWorkState.READY) {
-                    "thread/start did not return a READY thread"
+                    "Thread operation did not return a READY thread"
                 }
-                require(AppServerThreadProjection.cards(response, "").isEmpty()) {
+                require(sourceLocator != null || AppServerThreadProjection.cards(response, "").isEmpty()) {
                     "thread/start did not return an empty thread"
                 }
                 val threadId = (thread["id"] as? JsonPrimitive)?.contentOrNull
-                    ?: error("thread/start response did not include a thread ID")
+                    ?: error("Thread operation response did not include a thread ID")
+                require(threadId != sourceLocator?.threadId) {
+                    "thread/fork did not return a new thread"
+                }
                 val locator = CodexThreadLocator(review.hostId, threadId)
                 attachmentMutex.withLock {
                     try {
@@ -800,6 +847,29 @@ class DealerConnectionService : Service() {
             } catch (failure: Throwable) {
                 mutableState.update {
                     it.withThreadCreationFailure(failure.message ?: failure::class.java.simpleName)
+                }
+            }
+        }
+    }
+
+    fun renameThread(locator: CodexThreadLocator, name: String) {
+        if (locator !in mutableState.value.threads) {
+            mutableState.update { it.copy(error = "Unknown thread ${locator.threadId}") }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before renaming") }
+            return
+        }
+        scope.launch {
+            try {
+                appServer.threadNameSet(locator.threadId, name)
+                mutableState.update { it.withRenamedThread(locator, name).copy(error = null) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(error = failure.message ?: failure::class.java.simpleName)
                 }
             }
         }
@@ -936,6 +1006,10 @@ class DealerConnectionService : Service() {
                 val turnId = (turn?.get("id") as? JsonPrimitive)?.contentOrNull
                     ?: (params["turnId"] as? JsonPrimitive)?.contentOrNull
                 when (notification.method) {
+                    "thread/name/updated" -> {
+                        val name = (params["threadName"] as? JsonPrimitive)?.contentOrNull
+                        mutableState.update { it.withRenamedThread(locator, name) }
+                    }
                     "turn/started" -> {
                         val clientIds = (turn?.get("items") as? kotlinx.serialization.json.JsonArray)
                             .orEmpty()
@@ -1439,6 +1513,7 @@ data class NewThreadUiState(
     val hostId: String,
     val observedWorkingDirectories: List<String>,
     val workingDirectory: String,
+    val sourceLocator: CodexThreadLocator? = null,
     val catalog: ThreadStartCatalog? = null,
     val loading: Boolean = false,
     val creating: Boolean = false,
@@ -1448,6 +1523,15 @@ data class NewThreadUiState(
 internal fun DealerUiState.withThreadCreationFailure(message: String): DealerUiState = copy(
     newThread = newThread?.copy(creating = false, error = message),
 )
+
+internal fun DealerUiState.withRenamedThread(
+    locator: CodexThreadLocator,
+    name: String?,
+): DealerUiState = copy(
+    threads = threads[locator]?.let { threads + (locator to it.copy(name = name)) } ?: threads,
+)
+
+internal fun DiscoveredThread.canFork(): Boolean = workState == ThreadWorkState.READY
 
 internal fun DealerUiState.withCreatedThread(
     locator: CodexThreadLocator,
