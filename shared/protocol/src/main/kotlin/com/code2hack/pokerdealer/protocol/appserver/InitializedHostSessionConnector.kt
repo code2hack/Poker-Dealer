@@ -20,6 +20,7 @@ data class HostSessionConnectionConfig(
     val sshClient: HostSshClient,
     val daemon: CodexDaemonLifecycle,
     val qualifiedDescendantFilterVersions: Set<String> = emptySet(),
+    val qualifiedServerRequestVersions: Map<String, Set<String>> = emptyMap(),
     val timeouts: M1Timeouts = M1Timeouts(),
 )
 
@@ -56,7 +57,10 @@ class InitializedHostSessionConnector(
                 CodexAppServerSession(
                     WebSocketJsonRpcPeer(
                         socket,
-                        supportedServerRequests = setOf(COMMAND_APPROVAL_METHOD),
+                        supportedServerRequests = supportedServerRequests(
+                            daemonVersions.appServerVersion,
+                            configured.qualifiedServerRequestVersions,
+                        ),
                     ),
                     requestTimeoutMs = configured.timeouts.appServerRequestMs,
                     turnInactivityTimeoutMs = configured.timeouts.turnInactivityMs,
@@ -153,6 +157,16 @@ internal fun descendantFilterQualified(
     appServerVersion: String?,
     qualifiedVersions: Set<String>,
 ): Boolean = appServerVersion != null && appServerVersion in qualifiedVersions
+
+internal fun supportedServerRequests(
+    appServerVersion: String?,
+    qualifiedVersions: Map<String, Set<String>>,
+): Set<String> = buildSet {
+    add(COMMAND_APPROVAL_METHOD)
+    qualifiedVersions.forEach { (method, versions) ->
+        if (appServerVersion in versions) add(method)
+    }
+}
 
 private data class RoutedSsh(
     val route: HostConnectionRoute,

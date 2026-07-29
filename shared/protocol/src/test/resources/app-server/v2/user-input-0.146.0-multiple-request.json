@@ -1,0 +1,45 @@
+{
+  "id": "question-1",
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "item-1",
+    "questions": [
+      {
+        "id": "target",
+        "header": "Target",
+        "question": "Which target should be used?",
+        "options": [
+          {
+            "label": "Spark",
+            "description": "Use the Spark host."
+          },
+          {
+            "label": "Fold6",
+            "description": "Use the Fold6 Termux host."
+          }
+        ],
+        "isOther": true,
+        "isSecret": false
+      },
+      {
+        "id": "note",
+        "header": "Note",
+        "question": "Add a short note.",
+        "options": null,
+        "isOther": false,
+        "isSecret": false
+      },
+      {
+        "id": "token",
+        "header": "Secret",
+        "question": "Enter the one-time token.",
+        "options": null,
+        "isOther": false,
+        "isSecret": true
+      }
+    ],
+    "autoResolutionMs": 60000
+  }
+}

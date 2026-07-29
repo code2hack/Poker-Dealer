@@ -1,0 +1,29 @@
+{
+  "id": 0,
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thread_spark_live_0_146_0",
+    "turnId": "turn_spark_live_0_146_0",
+    "itemId": "call_spark_live_0_146_0",
+    "autoResolutionMs": 60000,
+    "questions": [
+      {
+        "id": "host",
+        "header": "Host",
+        "question": "Which host is being qualified?",
+        "isOther": true,
+        "isSecret": false,
+        "options": [
+          {
+            "label": "Spark (Recommended)",
+            "description": "Qualify the Spark host."
+          },
+          {
+            "label": "Fold6",
+            "description": "Qualify the Fold6 host."
+          }
+        ]
+      }
+    ]
+  }
+}
