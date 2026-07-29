@@ -32,17 +32,23 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
@@ -57,12 +63,16 @@ import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.domain.UserInputOutcome
+import com.code2hack.pokerdealer.domain.UserInputQuestion
+import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -126,6 +136,10 @@ class DealerActivity : ComponentActivity() {
                         onCommandApproval = { locator, decision ->
                             service?.resolveCommandApproval(locator, decision)
                         },
+                        onUserInput = { locator, answers ->
+                            service?.resolveUserInput(locator, answers)
+                        },
+                        onUserInputNoAnswer = { service?.resolveUserInputWithoutAnswer(it) },
                         onStartTailnet = ::startEmbeddedTailnet,
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
@@ -292,6 +306,8 @@ private fun DealerApp(
     onSubmit: (CodexThreadLocator) -> Unit,
     onInterrupt: (CodexThreadLocator) -> Unit,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+    onUserInput: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onUserInputNoAnswer: (ServerRequestLocator) -> Unit,
     onStartTailnet: () -> Unit,
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
@@ -748,19 +764,31 @@ private fun DealerApp(
                     it.thread == browsed
                 } ?: (it.thread.hostId == selectedHostId)
             },
+            state.userInputRequests.requests.values.filter {
+                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
+                    it.thread == browsed
+                } ?: (it.thread.hostId == selectedHostId)
+            },
+            state.threadAttachments.dealerClaims,
             onCommandApproval,
+            onUserInput,
+            onUserInputNoAnswer,
             Modifier.weight(1f),
         )
     }
     confirmDisconnectHostId?.let { hostId ->
-        val affected = state.commandApprovals.unresolved(hostId)
+        val affectedApprovals = state.commandApprovals.unresolved(hostId)
+        val affectedQuestions = state.userInputRequests.unresolved(hostId)
         AlertDialog(
             onDismissRequest = { confirmDisconnectHostId = null },
             title = { Text("Disconnect $hostId?") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Dealer will cancel each request at most once where supported, wait briefly, then disconnect.")
-                    affected.forEach { request ->
+                    affectedApprovals.forEach { request ->
+                        Text(request.disconnectScope(), fontFamily = FontFamily.Monospace)
+                    }
+                    affectedQuestions.forEach { request ->
                         Text(request.disconnectScope(), fontFamily = FontFamily.Monospace)
                     }
                 }
@@ -893,7 +921,11 @@ internal fun DealerUiState.hasUnsettledAction(locator: CodexThreadLocator): Bool
 private fun DealerCards(
     cards: List<Card>,
     approvals: List<CommandApprovalRequest>,
+    userInputs: List<UserInputRequest>,
+    dealerClaims: Set<CodexThreadLocator>,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
+    onUserInput: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onUserInputNoAnswer: (ServerRequestLocator) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     LazyColumn(modifier = modifier.fillMaxWidth()) {
@@ -973,6 +1005,15 @@ private fun DealerCards(
             CommandApprovalCard(request, onCommandApproval)
             HorizontalDivider()
         }
+        items(userInputs, key = { "user-input:${it.locator}" }) { request ->
+            UserInputCard(
+                request,
+                request.thread in dealerClaims,
+                onUserInput,
+                onUserInputNoAnswer,
+            )
+            HorizontalDivider()
+        }
     }
 }
 
@@ -1040,12 +1081,182 @@ private fun CommandApprovalCard(
     }
 }
 
+@Composable
+private fun UserInputCard(
+    request: UserInputRequest,
+    canAnswer: Boolean,
+    onAnswer: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onNoAnswer: (ServerRequestLocator) -> Unit,
+) {
+    val answers = remember(request.locator) { mutableStateMapOf<String, String>() }
+    val otherAnswers = remember(request.locator) { mutableStateMapOf<String, String>() }
+    val useOther = remember(request.locator) { mutableStateMapOf<String, Boolean>() }
+    fun clearSecrets() {
+        request.questions.filter(UserInputQuestion::isSecret).forEach { question ->
+            answers.remove(question.id)
+            otherAnswers.remove(question.id)
+            useOther.remove(question.id)
+        }
+    }
+    LaunchedEffect(request.resolution) {
+        if (request.resolution != RequestResolutionState.PENDING) clearSecrets()
+    }
+    val response = request.questions.associate { question ->
+        val answer = if (useOther[question.id] == true) {
+            otherAnswers[question.id].orEmpty()
+        } else {
+            answers[question.id].orEmpty()
+        }
+        question.id to listOf(answer)
+    }
+    val complete = response.values.all { values -> values.single().isNotBlank() }
+    val remainingMs by produceState<Long?>(
+        request.deadlineAtMs?.let {
+            (it - System.currentTimeMillis()).coerceAtLeast(0)
+        },
+        request.deadlineAtMs,
+        request.resolution,
+    ) {
+        val deadlineAtMs = request.deadlineAtMs ?: return@produceState
+        while (request.resolution == RequestResolutionState.PENDING && value != 0L) {
+            delay(1_000)
+            value = (deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            "USER INPUT | ${request.resolution}",
+            style = MaterialTheme.typography.labelSmall,
+            color = Color(0xFF56616D),
+        )
+        remainingMs?.let {
+            Text("Auto no-answer in ${(it + 999) / 1_000}s", style = MaterialTheme.typography.labelSmall)
+        }
+        request.questions.forEach { question ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(question.header, style = MaterialTheme.typography.labelMedium)
+                Text(question.question)
+                question.options?.forEach { option ->
+                    Row {
+                        RadioButton(
+                            selected = useOther[question.id] != true &&
+                                answers[question.id] == option.label,
+                            onClick = {
+                                useOther[question.id] = false
+                                answers[question.id] = option.label
+                            },
+                            enabled = request.resolution == RequestResolutionState.PENDING,
+                        )
+                        Column {
+                            Text(option.label)
+                            if (option.description.isNotEmpty()) {
+                                Text(option.description, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+                if (question.options != null && question.isOther) {
+                    Row {
+                        RadioButton(
+                            selected = useOther[question.id] == true,
+                            onClick = { useOther[question.id] = true },
+                            enabled = request.resolution == RequestResolutionState.PENDING,
+                        )
+                        Text("Other")
+                    }
+                }
+                if (question.options == null || useOther[question.id] == true) {
+                    val value = if (useOther[question.id] == true) {
+                        otherAnswers[question.id].orEmpty()
+                    } else {
+                        answers[question.id].orEmpty()
+                    }
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = {
+                            if (useOther[question.id] == true) {
+                                otherAnswers[question.id] = it
+                            } else {
+                                answers[question.id] = it
+                            }
+                        },
+                        label = { Text(if (question.isSecret) "Secret answer" else "Answer") },
+                        enabled = request.resolution == RequestResolutionState.PENDING,
+                        visualTransformation = if (question.isSecret) {
+                            PasswordVisualTransformation()
+                        } else {
+                            VisualTransformation.None
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+        Text(
+            "turn ${request.turnId} | item ${request.itemId}",
+            style = MaterialTheme.typography.labelSmall,
+        )
+        when (request.resolution) {
+            RequestResolutionState.PENDING -> {
+                Button(
+                    onClick = {
+                        onAnswer(request.locator, response)
+                        clearSecrets()
+                    },
+                    enabled = canAnswer && complete,
+                ) {
+                    Text("Send answers")
+                }
+                OutlinedButton(
+                    onClick = {
+                        onNoAnswer(request.locator)
+                        clearSecrets()
+                    },
+                ) {
+                    Text("No answer")
+                }
+                if (!canAnswer) {
+                    Text("Take control to send entered answers.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            RequestResolutionState.RESPONDING ->
+                Text("Sending response; controls are locked.")
+            RequestResolutionState.UNKNOWN ->
+                Text(
+                    "Response acceptance is unknown; Dealer will not replay it.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            RequestResolutionState.RESOLVED ->
+                Text(
+                    if (request.resolvedElsewhere) {
+                        "Resolved elsewhere"
+                    } else {
+                        request.outcome?.label() ?: "Resolved"
+                    },
+                )
+        }
+    }
+}
+
 private fun CommandApprovalDecision.label(): String = when (this) {
     CommandApprovalDecision.ACCEPT -> "Accept once"
     CommandApprovalDecision.ACCEPT_FOR_SESSION -> "Accept for session"
     CommandApprovalDecision.ACCEPT_WITH_EXECPOLICY_AMENDMENT -> "Accept exact execpolicy amendment"
     CommandApprovalDecision.DECLINE -> "Decline"
     CommandApprovalDecision.CANCEL -> "Cancel turn"
+}
+
+private fun UserInputOutcome.label(): String = when (this) {
+    UserInputOutcome.ANSWERED -> "Answered"
+    UserInputOutcome.NO_ANSWER -> "No answer"
+    UserInputOutcome.AUTO_RESOLVED -> "Auto-resolved with no answer"
 }
 
 private fun CommandApprovalRequest.disconnectScope(): String = buildString {
@@ -1056,3 +1267,6 @@ private fun CommandApprovalRequest.disconnectScope(): String = buildString {
         append(" | ").append(scope.networkProtocol).append("://").append(scope.networkHost)
     }
 }
+
+private fun UserInputRequest.disconnectScope(): String =
+    "${thread.threadId}: ${questions.joinToString { it.header }}"

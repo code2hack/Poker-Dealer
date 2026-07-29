@@ -19,6 +19,7 @@ data class HostSessionConnectionConfig(
     val dialer: HostTcpDialer,
     val sshClient: HostSshClient,
     val daemon: CodexDaemonLifecycle,
+    val qualifiedServerRequestVersions: Map<String, Set<String>> = emptyMap(),
     val timeouts: M1Timeouts = M1Timeouts(),
 )
 
@@ -32,7 +33,7 @@ class InitializedHostSessionConnector(
         var proxy: DuplexByteStream? = null
         var appServer: CodexAppServerSession? = null
         try {
-            phase(HostSessionPhase.DAEMON, routed.diagnostics) {
+            val daemonVersions = phase(HostSessionPhase.DAEMON, routed.diagnostics) {
                 withConnectionPhaseTimeout("daemon status/start", configured.timeouts.daemonCommandMs) {
                     configured.daemon.ensureRunning(routed.ssh)
                 }
@@ -51,7 +52,10 @@ class InitializedHostSessionConnector(
                 CodexAppServerSession(
                     WebSocketJsonRpcPeer(
                         socket,
-                        supportedServerRequests = setOf(COMMAND_APPROVAL_METHOD),
+                        supportedServerRequests = supportedServerRequests(
+                            daemonVersions.appServerVersion,
+                            configured.qualifiedServerRequestVersions,
+                        ),
                     ),
                     requestTimeoutMs = configured.timeouts.appServerRequestMs,
                     turnInactivityTimeoutMs = configured.timeouts.turnInactivityMs,
@@ -138,6 +142,16 @@ class InitializedHostSessionConnector(
         throw cancelled
     } catch (failure: Throwable) {
         throw HostSessionConnectionException(phase, diagnostics, cause = failure)
+    }
+}
+
+internal fun supportedServerRequests(
+    appServerVersion: String?,
+    qualifiedVersions: Map<String, Set<String>>,
+): Set<String> = buildSet {
+    add(COMMAND_APPROVAL_METHOD)
+    qualifiedVersions.forEach { (method, versions) ->
+        if (appServerVersion in versions) add(method)
     }
 }
 

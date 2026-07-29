@@ -32,6 +32,9 @@ import com.code2hack.pokerdealer.domain.ThreadActionState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.domain.UserInputOutcome
+import com.code2hack.pokerdealer.domain.UserInputRequest
+import com.code2hack.pokerdealer.domain.UserInputRequestState
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
 import com.code2hack.pokerdealer.protocol.appserver.M1FailurePhase
@@ -50,11 +53,15 @@ import com.code2hack.pokerdealer.protocol.appserver.AppServerStructuredCardProje
 import com.code2hack.pokerdealer.protocol.appserver.AppServerRequest
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalParseResult
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalProtocol
+import com.code2hack.pokerdealer.protocol.appserver.COMMAND_APPROVAL_METHOD
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
 import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.RetainedCardStore
+import com.code2hack.pokerdealer.protocol.appserver.USER_INPUT_REQUEST_METHOD
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
+import com.code2hack.pokerdealer.protocol.appserver.UserInputParseResult
+import com.code2hack.pokerdealer.protocol.appserver.UserInputProtocol
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
@@ -107,6 +114,8 @@ class DealerConnectionService : Service() {
     private val requestJobs = mutableMapOf<String, Job>()
     private val hostGenerations = mutableMapOf<String, Long>()
     private val wireCommandApprovals = mutableMapOf<ServerRequestLocator, AppServerRequest>()
+    private val wireUserInputs = mutableMapOf<ServerRequestLocator, AppServerRequest>()
+    private val userInputTimeoutJobs = mutableMapOf<ServerRequestLocator, Job>()
     private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
     private var connectedHostIds = emptySet<String>()
 
@@ -178,9 +187,17 @@ class DealerConnectionService : Service() {
                     wireCommandApprovals.keys.removeAll {
                         it.hostId == hostId && it.appServerGeneration == generation
                     }
+                    wireUserInputs.keys.removeAll {
+                        it.hostId == hostId && it.appServerGeneration == generation
+                    }
+                    userInputTimeoutJobs.keys
+                        .filter { it.hostId == hostId && it.appServerGeneration == generation }
+                        .forEach { userInputTimeoutJobs.remove(it)?.cancel() }
                     mutableState.update {
                         it.withCommandApprovals(
                             it.commandApprovals.connectionLost(hostId, generation),
+                        ).withUserInputRequests(
+                            it.userInputRequests.connectionLost(hostId, generation),
                         )
                     }
                 }
@@ -384,7 +401,7 @@ class DealerConnectionService : Service() {
 
     fun disableHost(hostId: String) {
         scope.launch {
-            settleApprovalsForDisconnect(hostId)
+            settleRequestsForDisconnect(hostId)
             hostSessions.setEnabled(hostId, false)
             synchronized(hostSessionConfigs) {
                 hostSessionConfigs.remove(hostId)
@@ -408,13 +425,15 @@ class DealerConnectionService : Service() {
         }
     }
 
-    private suspend fun settleApprovalsForDisconnect(hostId: String) {
+    private suspend fun settleRequestsForDisconnect(hostId: String) {
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
         val generation = hostGenerations[hostId] ?: return
-        val current = mutableState.value.commandApprovals.unresolved(hostId)
+        val currentApprovals = mutableState.value.commandApprovals.unresolved(hostId)
+            .filter { it.locator.appServerGeneration == generation }
+        val currentQuestions = mutableState.value.userInputRequests.unresolved(hostId)
             .filter { it.locator.appServerGeneration == generation }
         val interruptedTurns = mutableSetOf<String>()
-        current.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
+        currentApprovals.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
             if (CommandApprovalDecision.CANCEL in request.offeredDecisions) {
                 mutableState.update {
                     it.withCommandApprovals(
@@ -447,17 +466,49 @@ class DealerConnectionService : Service() {
                 runCatching { appServer.turnInterrupt(request.thread.threadId, request.turnId) }
             }
         }
-        if (current.any { it.resolution in DISCONNECT_WAIT_STATES }) {
+        currentQuestions.filter { it.resolution == RequestResolutionState.PENDING }.forEach { request ->
+            userInputTimeoutJobs.remove(request.locator)?.cancel()
+            mutableState.update {
+                it.withUserInputRequests(
+                    it.userInputRequests.begin(request.locator, UserInputOutcome.NO_ANSWER),
+                )
+            }
+            val wire = wireUserInputs[request.locator]
+            if (wire == null) {
+                mutableState.update {
+                    it.withUserInputRequests(it.userInputRequests.unknown(request.locator))
+                }
+            } else {
+                runCatching {
+                    appServer.respond(wire, UserInputProtocol.response(request, emptyMap()))
+                }.onFailure {
+                    mutableState.update { state ->
+                        state.withUserInputRequests(
+                            state.userInputRequests.unknown(request.locator),
+                        )
+                    }
+                }
+            }
+        }
+        if (currentApprovals.any { it.resolution in DISCONNECT_WAIT_STATES } ||
+            currentQuestions.any { it.resolution in DISCONNECT_WAIT_STATES }
+        ) {
             delay(DISCONNECT_RESOLUTION_WAIT_MILLIS)
         }
         mutableState.update { state ->
             var approvals = state.commandApprovals
-            current.forEach { request ->
+            currentApprovals.forEach { request ->
                 if (approvals.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
                     approvals = approvals.unknown(request.locator)
                 }
             }
-            state.withCommandApprovals(approvals)
+            var questions = state.userInputRequests
+            currentQuestions.forEach { request ->
+                if (questions.requests[request.locator]?.resolution != RequestResolutionState.RESOLVED) {
+                    questions = questions.unknown(request.locator)
+                }
+            }
+            state.withCommandApprovals(approvals).withUserInputRequests(questions)
         }
     }
 
@@ -850,24 +901,77 @@ class DealerConnectionService : Service() {
         requestJobs[hostId] = scope.launch {
             while (true) {
                 val wire = appServer.receiveServerRequest() ?: return@launch
-                when (val parsed = CommandApprovalProtocol.parse(hostId, generation, wire)) {
-                    is CommandApprovalParseResult.Accepted -> {
-                        try {
-                            mutableState.update {
-                                it.withCommandApprovals(
-                                    it.commandApprovals.receive(
-                                        parsed.request,
-                                        sameIdReissueQualified = false,
-                                    ),
-                                )
+                when (wire.method) {
+                    COMMAND_APPROVAL_METHOD -> {
+                        when (val parsed = CommandApprovalProtocol.parse(hostId, generation, wire)) {
+                            is CommandApprovalParseResult.Accepted -> {
+                                try {
+                                    mutableState.update {
+                                        it.withCommandApprovals(
+                                            it.commandApprovals.receive(
+                                                parsed.request,
+                                                sameIdReissueQualified = false,
+                                            ),
+                                        )
+                                    }
+                                    wireCommandApprovals[parsed.request.locator] = wire
+                                } catch (failure: IllegalArgumentException) {
+                                    appServer.reject(
+                                        wire,
+                                        failure.message ?: "Command approval identity conflict",
+                                    )
+                                }
                             }
-                            wireCommandApprovals[parsed.request.locator] = wire
-                        } catch (failure: IllegalArgumentException) {
-                            appServer.reject(wire, failure.message ?: "Command approval identity conflict")
+                            is CommandApprovalParseResult.Rejected ->
+                                appServer.reject(wire, parsed.reason)
                         }
                     }
-                    is CommandApprovalParseResult.Rejected ->
-                        appServer.reject(wire, parsed.reason)
+                    USER_INPUT_REQUEST_METHOD -> {
+                        when (
+                            val parsed = UserInputProtocol.parse(
+                                hostId,
+                                generation,
+                                wire,
+                                System.currentTimeMillis(),
+                            )
+                        ) {
+                            is UserInputParseResult.Accepted -> {
+                                val existing = mutableState.value.userInputRequests
+                                    .requests[parsed.request.locator]
+                                if (existing != null) {
+                                    appServer.reject(
+                                        wire,
+                                        if (existing.fingerprint == parsed.request.fingerprint) {
+                                            "Duplicate user-input request"
+                                        } else {
+                                            "User-input request identity conflict"
+                                        },
+                                    )
+                                    continue
+                                }
+                                try {
+                                    mutableState.update {
+                                        it.withUserInputRequests(
+                                            it.userInputRequests.receive(
+                                                parsed.request,
+                                                sameIdReissueQualified = false,
+                                            ),
+                                        )
+                                    }
+                                    wireUserInputs[parsed.request.locator] = wire
+                                    scheduleUserInputTimeout(parsed.request)
+                                } catch (failure: IllegalArgumentException) {
+                                    appServer.reject(
+                                        wire,
+                                        failure.message ?: "User-input request identity conflict",
+                                    )
+                                }
+                            }
+                            is UserInputParseResult.Rejected ->
+                                appServer.reject(wire, parsed.reason)
+                        }
+                    }
+                    else -> appServer.reject(wire, "Unsupported server request")
                 }
             }
         }
@@ -918,6 +1022,85 @@ class DealerConnectionService : Service() {
         }
     }
 
+    fun resolveUserInput(
+        locator: ServerRequestLocator,
+        answers: Map<String, List<String>>,
+    ) {
+        respondUserInput(locator, answers, UserInputOutcome.ANSWERED, requireControl = true)
+    }
+
+    fun resolveUserInputWithoutAnswer(locator: ServerRequestLocator) {
+        respondUserInput(locator, emptyMap(), UserInputOutcome.NO_ANSWER, requireControl = false)
+    }
+
+    private fun scheduleUserInputTimeout(request: UserInputRequest) {
+        val deadlineAtMs = request.deadlineAtMs ?: return
+        userInputTimeoutJobs.remove(request.locator)?.cancel()
+        userInputTimeoutJobs[request.locator] = scope.launch {
+            delay((deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(0))
+            respondUserInput(
+                request.locator,
+                emptyMap(),
+                UserInputOutcome.AUTO_RESOLVED,
+                requireControl = false,
+            )
+        }
+    }
+
+    @Synchronized
+    private fun respondUserInput(
+        locator: ServerRequestLocator,
+        answers: Map<String, List<String>>,
+        outcome: UserInputOutcome,
+        requireControl: Boolean,
+    ) {
+        val state = mutableState.value
+        val request = state.userInputRequests.requests[locator] ?: return
+        if (requireControl && !state.threadAttachments.hasDealerClaim(request.thread)) {
+            mutableState.update { it.copy(error = "Take control before answering this request") }
+            return
+        }
+        val response = try {
+            UserInputProtocol.response(request, answers)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
+        val wire = wireUserInputs[locator]
+        if (appServer == null ||
+            hostGenerations[locator.hostId] != locator.appServerGeneration ||
+            wire == null
+        ) {
+            mutableState.update {
+                it.withUserInputRequests(it.userInputRequests.unknown(locator))
+                    .copy(error = "User-input request is no longer connected; no response was replayed")
+            }
+            return
+        }
+        val responding = state.userInputRequests.begin(locator, outcome)
+        if (responding == state.userInputRequests) return
+        userInputTimeoutJobs.remove(locator)?.let {
+            if (outcome != UserInputOutcome.AUTO_RESOLVED) it.cancel()
+        }
+        mutableState.update { it.withUserInputRequests(responding).copy(error = null) }
+        scope.launch {
+            try {
+                appServer.respond(wire, response)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withUserInputRequests(it.userInputRequests.unknown(locator))
+                        .copy(
+                            error = "${failure.message ?: failure::class.java.simpleName}; " +
+                                "user-input response was not replayed",
+                        )
+                }
+            }
+        }
+    }
+
     private fun observeNotifications(hostId: String, generation: Long) {
         val appServer = hostSessions.connectedSession(hostId)?.appServer ?: return
         notificationJobs.remove(hostId)?.cancel()
@@ -931,9 +1114,26 @@ class DealerConnectionService : Service() {
                             it.appServerGeneration == generation &&
                             it.requestId == resolved.requestId
                     }
+                    wireUserInputs.keys
+                        .filter {
+                            it.hostId == hostId &&
+                                it.appServerGeneration == generation &&
+                                it.requestId == resolved.requestId
+                        }
+                        .forEach { locator ->
+                            wireUserInputs.remove(locator)
+                            userInputTimeoutJobs.remove(locator)?.cancel()
+                        }
                     mutableState.update {
                         it.withCommandApprovals(
                             it.commandApprovals.resolved(
+                                hostId,
+                                generation,
+                                resolved.requestId,
+                                resolved.threadId,
+                            ),
+                        ).withUserInputRequests(
+                            it.userInputRequests.resolved(
                                 hostId,
                                 generation,
                                 resolved.requestId,
@@ -987,10 +1187,19 @@ class DealerConnectionService : Service() {
                     }
                     "turn/completed" -> {
                         turnId?.let { dealerOriginatedTurns.remove(locator to it) }
+                        userInputTimeoutJobs.keys
+                            .filter { requestLocator ->
+                                val request = mutableState.value.userInputRequests.requests[requestLocator]
+                                request?.thread == locator && request.turnId == turnId
+                            }
+                            .forEach { userInputTimeoutJobs.remove(it)?.cancel() }
                         mutableState.update { state ->
                             state.withCommandApprovals(
                                 turnId?.let { state.commandApprovals.turnSettled(locator, it) }
                                     ?: state.commandApprovals,
+                            ).withUserInputRequests(
+                                turnId?.let { state.userInputRequests.turnSettled(locator, it) }
+                                    ?: state.userInputRequests,
                             ).copy(
                                 threadActions = state.threadActions.reconcileInterrupt(locator, null),
                                 threads = state.threads[locator]?.let { row ->
@@ -1219,6 +1428,11 @@ class DealerConnectionService : Service() {
                 TermuxCommunityCodexDaemon()
             } else {
                 UpstreamCodexDaemon()
+            },
+            qualifiedServerRequestVersions = if (host == InitialCodexHosts.spark) {
+                mapOf(USER_INPUT_REQUEST_METHOD to setOf("0.146.0"))
+            } else {
+                emptyMap()
             },
         )
     }
@@ -1492,9 +1706,16 @@ private data class RetainedCards(
 )
 
 private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState): DealerUiState {
-    val blocking = approvals.unresolvedThreads()
+    return copy(commandApprovals = approvals).withBlockingRequests()
+}
+
+private fun DealerUiState.withUserInputRequests(requests: UserInputRequestState): DealerUiState {
+    return copy(userInputRequests = requests).withBlockingRequests()
+}
+
+private fun DealerUiState.withBlockingRequests(): DealerUiState {
+    val blocking = commandApprovals.unresolvedThreads() + userInputRequests.unresolvedThreads()
     return copy(
-        commandApprovals = approvals,
         knownBlockingRequestThreads = blocking,
         threads = threads.mapValues { (locator, thread) ->
             when {
@@ -1548,6 +1769,7 @@ data class DealerUiState(
     val threadAttachments: ThreadAttachmentState = ThreadAttachmentState(),
     val threadActions: ThreadActionState = ThreadActionState(),
     val commandApprovals: CommandApprovalState = CommandApprovalState(),
+    val userInputRequests: UserInputRequestState = UserInputRequestState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),

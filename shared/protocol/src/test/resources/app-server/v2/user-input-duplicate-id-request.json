@@ -1,0 +1,23 @@
+{
+  "id": "duplicate-question",
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thr-3",
+    "turnId": "turn-3",
+    "itemId": "item-3",
+    "questions": [
+      {
+        "id": "same",
+        "header": "First",
+        "question": "First question?",
+        "options": null
+      },
+      {
+        "id": "same",
+        "header": "Second",
+        "question": "Second question?",
+        "options": null
+      }
+    ]
+  }
+}

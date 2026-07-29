@@ -188,7 +188,7 @@ data class ResolvedServerRequest(
     val threadId: String,
 )
 
-private fun JsonElement.requestIdKey(): String = when (this) {
+internal fun JsonElement.requestIdKey(): String = when (this) {
     is JsonPrimitive -> if (isString) "s:$content" else "n:$content"
     else -> AppServerJson.encodeToString(JsonElement.serializer(), this)
 }
