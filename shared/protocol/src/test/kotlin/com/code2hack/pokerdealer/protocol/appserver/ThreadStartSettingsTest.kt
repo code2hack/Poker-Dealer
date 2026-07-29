@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -77,6 +78,54 @@ class ThreadStartSettingsTest {
         session.turnStart("thr_new", "first prompt", "client-new", effort = "high")
 
         assertEquals(listOf("turn-start-reasoning-request.json"), peer.checkedFixtures)
+    }
+
+    @Test
+    fun `rename and fork use stable methods and reviewed settings`() = runTest {
+        val peer = StartFixturePeer(
+            "thread-name-set-request.json" to "thread-name-set-response.json",
+            "thread-fork-reviewed-request.json" to "thread-fork-reviewed-response.json",
+        )
+        val session = CodexAppServerSession(peer).also { it.initialize() }
+        val selection = ThreadStartSelection(
+            workingDirectory = "/work/repo",
+            providerOverride = "custom-id",
+            modelOverride = "exact-wire-model",
+            reasoningEffort = "high",
+            permissionPreset = PermissionPreset.ASK_ON_PHONE,
+        )
+
+        session.threadNameSet("thr_source", "Shared name")
+        val response = session.threadFork("thr_source", selection)
+
+        assertEquals("thr_fork", response["thread"]?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull)
+        assertEquals(
+            listOf("thread-name-set-request.json", "thread-fork-reviewed-request.json"),
+            peer.checkedFixtures,
+        )
+    }
+
+    @Test
+    fun `fork rejects silent server fallback`() {
+        val peer = StartFixturePeer(
+            "thread-fork-reviewed-request.json" to "thread-start-mismatched-response.json",
+        )
+        val session = CodexAppServerSession(peer)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                session.initialize()
+                session.threadFork(
+                    "thr_source",
+                    ThreadStartSelection(
+                        "/work/repo",
+                        "custom-id",
+                        "exact-wire-model",
+                        permissionPreset = PermissionPreset.ASK_ON_PHONE,
+                    ),
+                )
+            }
+        }
     }
 
     @Test

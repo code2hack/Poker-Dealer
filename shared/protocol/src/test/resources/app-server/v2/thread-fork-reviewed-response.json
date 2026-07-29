@@ -1,0 +1,40 @@
+{
+  "result": {
+    "thread": {
+      "id": "thr_fork",
+      "preview": "Existing prompt",
+      "cwd": "/work/repo",
+      "status": {
+        "type": "idle"
+      },
+      "source": "appServer",
+      "turns": [
+        {
+          "id": "turn_existing",
+          "status": "completed",
+          "items": [
+            {
+              "id": "item_user_existing",
+              "type": "userMessage",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Existing prompt"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "model": "exact-wire-model",
+    "modelProvider": "custom-id",
+    "cwd": "/work/repo",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": {
+      "type": "workspaceWrite"
+    },
+    "reasoningEffort": null
+  }
+}

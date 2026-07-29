@@ -307,4 +307,66 @@ class DealerUiStateTest {
         assertEquals(setOf(locator), controlled.threadAttachments.dealerClaims)
         assertEquals(ControlSurface.DEALER, controlled.threads.getValue(locator).intendedControlSurface)
     }
+
+    @Test
+    fun renameWorksInEveryKnownWorkStateAndAllowsSameNames() {
+        val locators = listOf(
+            CodexThreadLocator("spark", "ready"),
+            CodexThreadLocator("spark", "busy"),
+            CodexThreadLocator("spark", "attention"),
+        )
+        val states = listOf(
+            ThreadWorkState.READY,
+            ThreadWorkState.BUSY,
+            ThreadWorkState.ATTENTION_REQUIRED,
+        )
+        val initial = DealerUiState(
+            threads = locators.zip(states).associate { (locator, workState) ->
+                locator to DiscoveredThread(locator, name = locator.threadId, workState = workState)
+            },
+        )
+
+        val renamed = locators.fold(initial) { state, locator ->
+            state.withRenamedThread(locator, "Shared name")
+        }
+
+        assertEquals(locators.toSet(), renamed.threads.keys)
+        assertEquals(setOf("Shared name"), renamed.threads.values.mapNotNull { it.name }.toSet())
+    }
+
+    @Test
+    fun forkIsGatedToReadyAndCreatesAControlledSameHostLocator() {
+        val source = CodexThreadLocator("spark", "source")
+        val fork = CodexThreadLocator("spark", "fork")
+        assertEquals(true, DiscoveredThread(source, workState = ThreadWorkState.READY).canFork())
+        assertEquals(false, DiscoveredThread(source, workState = ThreadWorkState.BUSY).canFork())
+        assertEquals(false, DiscoveredThread(source, workState = ThreadWorkState.ATTENTION_REQUIRED).canFork())
+
+        val state = DealerUiState(
+            threads = mapOf(
+                source to DiscoveredThread(
+                    locator = source,
+                    workingDirectory = "/work/repo",
+                    workState = ThreadWorkState.READY,
+                ),
+            ),
+            newThread = NewThreadUiState(
+                hostId = "spark",
+                observedWorkingDirectories = listOf("/work/repo"),
+                workingDirectory = "/work/repo",
+                sourceLocator = source,
+            ),
+        ).withCreatedThread(
+            locator = fork,
+            name = null,
+            preview = "Existing prompt",
+            selection = ThreadStartSelection("/work/repo", reasoningEffort = "high"),
+        )
+
+        assertEquals(ThreadWorkState.READY, state.threads.getValue(source).workState)
+        assertEquals(setOf(fork), state.threadAttachments.attached)
+        assertEquals(setOf(fork), state.threadAttachments.dealerClaims)
+        assertEquals(ControlSurface.DEALER, state.threads.getValue(fork).intendedControlSurface)
+        assertEquals(fork, state.browsedThread)
+    }
 }

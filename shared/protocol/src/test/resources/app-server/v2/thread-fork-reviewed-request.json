@@ -1,0 +1,12 @@
+{
+  "method": "thread/fork",
+  "params": {
+    "threadId": "thr_source",
+    "cwd": "/work/repo",
+    "modelProvider": "custom-id",
+    "model": "exact-wire-model",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user"
+  }
+}

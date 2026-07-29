@@ -291,13 +291,34 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
-    suspend fun threadStart(selection: ThreadStartSelection): JsonObject {
+    suspend fun threadStart(selection: ThreadStartSelection): JsonObject =
+        threadWithReviewedSettings("thread/start", null, selection)
+
+    suspend fun threadFork(threadId: String, selection: ThreadStartSelection): JsonObject =
+        threadWithReviewedSettings("thread/fork", threadId, selection)
+
+    suspend fun threadNameSet(threadId: String, name: String) {
+        checkInitialized()
+        actionRequest(
+            "thread/name/set",
+            buildJsonObject {
+                put("threadId", JsonPrimitive(threadId))
+                put("name", JsonPrimitive(name))
+            },
+        )
+    }
+
+    private suspend fun threadWithReviewedSettings(
+        method: String,
+        threadId: String?,
+        selection: ThreadStartSelection,
+    ): JsonObject {
         checkInitialized()
         val response = actionRequest(
-            "thread/start",
-            threadSettingsParams(selection),
+            method,
+            threadSettingsParams(selection, threadId),
         ).jsonObject
-        verifyThreadSettings(response, selection, "thread/start")
+        verifyThreadSettings(response, selection, method)
         return response
     }
 
