@@ -4,6 +4,7 @@ import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -11,6 +12,9 @@ import java.nio.file.Files
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+
+class CorruptRetainedCardCacheException(cause: Throwable) :
+    IllegalStateException("Discarded corrupt retained-card cache", cause)
 
 class RetainedCardStore(
     private val root: File,
@@ -23,7 +27,16 @@ class RetainedCardStore(
 
     suspend fun read(locator: CodexThreadLocator): List<Card> = withContext(Dispatchers.IO) {
         val file = file(locator)
-        if (!file.exists()) emptyList() else json.decodeFromString(serializer, file.readText())
+        if (!file.exists()) {
+            emptyList()
+        } else {
+            try {
+                json.decodeFromString(serializer, file.readText())
+            } catch (failure: SerializationException) {
+                check(file.delete()) { "Unable to discard corrupt retained-card cache" }
+                throw CorruptRetainedCardCacheException(failure)
+            }
+        }
     }
 
     suspend fun write(locator: CodexThreadLocator, cards: List<Card>) = withContext(Dispatchers.IO) {

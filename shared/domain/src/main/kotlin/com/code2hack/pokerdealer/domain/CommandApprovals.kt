@@ -1,11 +1,15 @@
 package com.code2hack.pokerdealer.domain
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class ServerRequestLocator(
     val hostId: String,
     val appServerGeneration: Long,
     val requestId: String,
 )
 
+@Serializable
 enum class RequestResolutionState {
     PENDING,
     RESPONDING,
@@ -13,6 +17,7 @@ enum class RequestResolutionState {
     UNKNOWN,
 }
 
+@Serializable
 enum class CommandApprovalDecision(val wireName: String) {
     ACCEPT("accept"),
     ACCEPT_FOR_SESSION("acceptForSession"),
@@ -21,6 +26,7 @@ enum class CommandApprovalDecision(val wireName: String) {
     CANCEL("cancel"),
 }
 
+@Serializable
 data class CommandApprovalScope(
     val command: String?,
     val workingDirectory: String?,
@@ -28,6 +34,7 @@ data class CommandApprovalScope(
     val networkProtocol: String?,
 )
 
+@Serializable
 data class CommandApprovalRequest(
     val locator: ServerRequestLocator,
     val thread: CodexThreadLocator,
@@ -44,6 +51,7 @@ data class CommandApprovalRequest(
     val resolvedElsewhere: Boolean = false,
 )
 
+@Serializable
 data class CommandApprovalState(
     val requests: Map<ServerRequestLocator, CommandApprovalRequest> = emptyMap(),
 ) {
