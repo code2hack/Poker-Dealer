@@ -3,6 +3,7 @@ import java.util.zip.ZipFile
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 val embeddedTailnetAar = rootProject.layout.projectDirectory.file(

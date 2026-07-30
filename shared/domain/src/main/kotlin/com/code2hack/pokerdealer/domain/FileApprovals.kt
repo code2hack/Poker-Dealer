@@ -1,5 +1,8 @@
 package com.code2hack.pokerdealer.domain
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 enum class FileApprovalDecision(val wireName: String) {
     ACCEPT("accept"),
     ACCEPT_FOR_SESSION("acceptForSession"),
@@ -7,6 +10,7 @@ enum class FileApprovalDecision(val wireName: String) {
     CANCEL("cancel"),
 }
 
+@Serializable
 data class FileApprovalRequest(
     val locator: ServerRequestLocator,
     val thread: CodexThreadLocator,
@@ -25,6 +29,7 @@ data class FileApprovalRequest(
     val failureReason: String? = null,
 )
 
+@Serializable
 data class FileApprovalState(
     val requests: Map<ServerRequestLocator, FileApprovalRequest> = emptyMap(),
 ) {

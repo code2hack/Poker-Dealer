@@ -1,10 +1,14 @@
 package com.code2hack.pokerdealer.domain
 
+import kotlinx.serialization.Serializable
+
+@Serializable
 data class UserInputOption(
     val label: String,
     val description: String,
 )
 
+@Serializable
 data class UserInputQuestion(
     val id: String,
     val header: String,
@@ -14,12 +18,14 @@ data class UserInputQuestion(
     val isSecret: Boolean,
 )
 
+@Serializable
 enum class UserInputOutcome {
     ANSWERED,
     NO_ANSWER,
     AUTO_RESOLVED,
 }
 
+@Serializable
 data class UserInputRequest(
     val locator: ServerRequestLocator,
     val thread: CodexThreadLocator,
@@ -39,6 +45,7 @@ data class UserInputRequest(
         }
 }
 
+@Serializable
 data class UserInputRequestState(
     val requests: Map<ServerRequestLocator, UserInputRequest> = emptyMap(),
 ) {

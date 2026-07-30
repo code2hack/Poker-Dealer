@@ -88,6 +88,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -114,8 +116,10 @@ class DealerConnectionService : Service() {
     private lateinit var hostConnectionProfiles: DealerHostConnectionProfileStore
     private lateinit var threadAttachmentStore: DealerThreadAttachmentStore
     private lateinit var retainedCardStore: RetainedCardStore
+    private lateinit var stateRecoveryStore: DealerStateRecoveryStore
     private val attachmentMutex = Mutex()
     private val draftMutex = Mutex()
+    private val pendingRequestPersistenceMutex = Mutex()
     private val notificationJobs = mutableMapOf<String, Job>()
     private val requestJobs = mutableMapOf<String, Job>()
     private val hostGenerations = mutableMapOf<String, Long>()
@@ -128,6 +132,7 @@ class DealerConnectionService : Service() {
     private val threadNotificationTargets = mutableMapOf<String, CodexThreadLocator>()
     private var connectedHostIds = emptySet<String>()
     private var activityVisible = false
+    private var pendingRequestPersistenceAvailable = true
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -146,6 +151,7 @@ class DealerConnectionService : Service() {
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
         retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
+        stateRecoveryStore = DealerStateRecoveryStore(noBackupFilesDir.resolve("recovery"))
         hostSessions = HostSessionManager(
             hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
             intentStore = HostConnectionIntentDataStore(this),
@@ -156,34 +162,31 @@ class DealerConnectionService : Service() {
             scope = scope,
         )
         scope.launch {
+            val restoreErrors = mutableListOf<String>()
             val (restoredAttachments, restoredActions) = try {
                 threadAttachmentStore.read() to threadAttachmentStore.readActions()
             } catch (failure: Throwable) {
-                mutableState.update {
-                    it.copy(error = "Unable to restore Dealer thread state: ${failure.message}")
-                }
+                restoreErrors += "Unable to restore Dealer thread state: ${failure.message}"
                 emptySet<CodexThreadLocator>() to ThreadActionState()
             }
+            val recovered = stateRecoveryStore.read()
+            restoreErrors += recovered.errors
             val restoredCards = restoredAttachments.flatMap { locator ->
                 runCatching { retainedCardStore.read(locator) }
                     .onFailure { failure ->
-                        mutableState.update {
-                            it.copy(error = "Unable to restore retained cards: ${failure.message}")
-                        }
+                        restoreErrors += "Unable to restore retained cards: ${failure.message}"
                     }
                     .getOrDefault(emptyList())
             }
-            mutableState.update {
-                it.copy(
-                    threadAttachments = ThreadAttachmentState(
-                        attached = restoredAttachments,
-                        dealerClaims = it.threadAttachments.dealerClaims.intersect(restoredAttachments),
-                    ),
-                    threadActions = restoredActions,
-                    cards = (it.cards + restoredCards)
-                        .distinctBy { card -> card.conversationId to card.id },
-                )
-            }
+            mutableState.value = DealerUiState().restoreAfterProcessDeath(
+                attachments = restoredAttachments,
+                actions = restoredActions,
+                cards = restoredCards,
+                projection = recovered.projection,
+                pendingRequests = recovered.pendingRequests,
+                error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
+            )
+            startRecoveryPersistence(recovered.pendingRequestsWritable)
             hostSessions.start()
             hostSessions.state.collect { sessions ->
                 mutableState.update { it.copy(hostSessions = sessions) }
@@ -469,6 +472,7 @@ class DealerConnectionService : Service() {
                     }
                 } else {
                     runCatching {
+                        persistPendingRequestState()
                         appServer.respond(
                             wire,
                             CommandApprovalProtocol.response(request, CommandApprovalDecision.CANCEL),
@@ -508,6 +512,7 @@ class DealerConnectionService : Service() {
                 }
             } else {
                 runCatching {
+                    persistPendingRequestState()
                     appServer.respond(wire, FileApprovalProtocol.response(FileApprovalDecision.CANCEL))
                 }.onFailure {
                     mutableState.update { state ->
@@ -532,6 +537,7 @@ class DealerConnectionService : Service() {
                 }
             } else {
                 runCatching {
+                    persistPendingRequestState()
                     appServer.respond(wire, UserInputProtocol.response(request, emptyMap()))
                 }.onFailure {
                     mutableState.update { state ->
@@ -1171,6 +1177,15 @@ class DealerConnectionService : Service() {
         mutableState.update { it.withCommandApprovals(responding).copy(error = null) }
         scope.launch {
             try {
+                persistPendingRequestState()
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withCommandApprovals(it.commandApprovals.unknown(locator))
+                        .copy(error = "Approval was not sent because recovery storage failed: ${failure.message}")
+                }
+                return@launch
+            }
+            try {
                 appServer.respond(wire, CommandApprovalProtocol.response(request, decision))
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1250,6 +1265,15 @@ class DealerConnectionService : Service() {
         mutableState.update { it.withUserInputRequests(responding).copy(error = null) }
         scope.launch {
             try {
+                persistPendingRequestState()
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withUserInputRequests(it.userInputRequests.unknown(locator))
+                        .copy(error = "Response was not sent because recovery storage failed: ${failure.message}")
+                }
+                return@launch
+            }
+            try {
                 appServer.respond(wire, response)
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1294,6 +1318,15 @@ class DealerConnectionService : Service() {
         if (responding == state.fileApprovals) return
         mutableState.update { it.withApprovals(fileApprovals = responding).copy(error = null) }
         scope.launch {
+            try {
+                persistPendingRequestState()
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.withApprovals(fileApprovals = it.fileApprovals.unknown(locator))
+                        .copy(error = "Approval was not sent because recovery storage failed: ${failure.message}")
+                }
+                return@launch
+            }
             try {
                 appServer.respond(wire, FileApprovalProtocol.response(decision))
             } catch (cancelled: CancellationException) {
@@ -1604,6 +1637,69 @@ class DealerConnectionService : Service() {
                 },
                 error = "Unable to retain complete command/file content: $message",
             )
+        }
+    }
+
+    private fun startRecoveryPersistence(pendingRequestsWritable: Boolean) {
+        pendingRequestPersistenceAvailable = pendingRequestsWritable
+        scope.launch {
+            mutableState
+                .map { state ->
+                    DurableDealerState(
+                        projection = DealerProjectionSnapshot(
+                            threads = state.threadAttachments.attached
+                                .mapNotNull(state.threads::get)
+                                .map {
+                                    it.copy(
+                                        attached = true,
+                                        intendedControlSurface = ControlSurface.NONE,
+                                    )
+                                }
+                                .sortedWith(
+                                    compareBy<DiscoveredThread>(
+                                        { it.locator.hostId },
+                                        { it.locator.threadId },
+                                    ),
+                                ),
+                        ),
+                        pendingRequests = state.pendingRequestSnapshot(),
+                    )
+                }
+                .distinctUntilChanged()
+                .collect { durable ->
+                    val failures = mutableListOf<String>()
+                    runCatching { stateRecoveryStore.writeProjection(durable.projection) }
+                        .onFailure {
+                            failures += "Unable to retain cached thread projection: ${it.message}"
+                        }
+                    if (pendingRequestPersistenceAvailable) {
+                        runCatching {
+                            pendingRequestPersistenceMutex.withLock {
+                                stateRecoveryStore.writePendingRequests(durable.pendingRequests)
+                            }
+                        }.onFailure {
+                            pendingRequestPersistenceAvailable = false
+                            failures += "Unable to retain pending request state: ${it.message}"
+                        }
+                    }
+                    if (failures.isNotEmpty()) {
+                        mutableState.update { it.copy(error = failures.joinToString("; ")) }
+                    }
+                }
+        }
+    }
+
+    private suspend fun persistPendingRequestState() {
+        check(pendingRequestPersistenceAvailable) {
+            "Pending request recovery storage is unavailable"
+        }
+        try {
+            pendingRequestPersistenceMutex.withLock {
+                stateRecoveryStore.writePendingRequests(mutableState.value.pendingRequestSnapshot())
+            }
+        } catch (failure: Throwable) {
+            pendingRequestPersistenceAvailable = false
+            throw failure
         }
     }
 
@@ -2044,6 +2140,75 @@ class DealerConnectionService : Service() {
 private data class RetainedCards(
     val cards: List<Card>,
     val error: String? = null,
+)
+
+private data class DurableDealerState(
+    val projection: DealerProjectionSnapshot,
+    val pendingRequests: DealerPendingRequestSnapshot,
+)
+
+private fun DealerUiState.pendingRequestSnapshot() = DealerPendingRequestSnapshot(
+    commandApprovals = commandApprovals,
+    fileApprovals = fileApprovals,
+    userInputRequests = userInputRequests,
+)
+
+internal fun DealerUiState.restoreAfterProcessDeath(
+    attachments: Set<CodexThreadLocator>,
+    actions: ThreadActionState,
+    cards: List<Card>,
+    projection: DealerProjectionSnapshot,
+    pendingRequests: DealerPendingRequestSnapshot,
+    error: String? = null,
+): DealerUiState {
+    val threads = projection.threads
+        .filter { it.locator in attachments }
+        .associate {
+            it.locator to it.copy(
+                attached = true,
+                intendedControlSurface = ControlSurface.NONE,
+            )
+        }
+    return DealerUiState(
+        cards = cards.distinctBy { it.conversationId to it.id },
+        threadAttachments = ThreadAttachmentState(attached = attachments),
+        threadActions = actions,
+        commandApprovals = pendingRequests.commandApprovals.afterProcessDeath(),
+        userInputRequests = pendingRequests.userInputRequests.afterProcessDeath(),
+        fileApprovals = pendingRequests.fileApprovals.afterProcessDeath(),
+        threads = threads,
+        error = error,
+    ).withBlockingRequests()
+}
+
+private fun CommandApprovalState.afterProcessDeath(): CommandApprovalState = copy(
+    requests = requests.mapValues { (_, request) ->
+        if (request.resolution == RequestResolutionState.RESOLVED) {
+            request
+        } else {
+            request.copy(resolution = RequestResolutionState.UNKNOWN)
+        }
+    },
+)
+
+private fun FileApprovalState.afterProcessDeath(): FileApprovalState = copy(
+    requests = requests.mapValues { (_, request) ->
+        if (request.resolution == RequestResolutionState.RESOLVED) {
+            request
+        } else {
+            request.copy(resolution = RequestResolutionState.UNKNOWN)
+        }
+    },
+)
+
+private fun UserInputRequestState.afterProcessDeath(): UserInputRequestState = copy(
+    requests = requests.mapValues { (_, request) ->
+        if (request.resolution == RequestResolutionState.RESOLVED) {
+            request
+        } else {
+            request.copy(resolution = RequestResolutionState.UNKNOWN)
+        }
+    },
 )
 
 private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState): DealerUiState {

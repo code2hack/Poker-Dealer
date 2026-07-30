@@ -102,6 +102,11 @@ It does not migrate a live thread among DGX Spark, u4090, and Fold6 Termux. Cros
 
 Multiple clients may observe one thread. Poker–Dealer follows a **one active human-control surface per thread** rule to avoid conflicting input or duplicate approval decisions.
 
+Dealer restores enabled host intent, attachments, drafts, recent attached-thread projections, unread
+state, and uncertain actions from private no-backup storage when the user reopens it after process
+death or a same-phone reboot. Uninstall, Clear data, factory reset, unrecoverable storage failure, or
+phone loss removes that Dealer-only state; host-retained Codex threads remain rediscoverable.
+
 ## Embedded-tailnet boundaries
 
 - The embedded node has its own tailnet identity, expected to be named similarly to `dealer-fold6`.

@@ -300,6 +300,11 @@ class DealerActivity : ComponentActivity() {
     }
 }
 
+internal const val DEALER_RECOVERY_LOSS_BOUNDARY =
+    "Dealer recovery is private to this phone and excluded from backup. Uninstall, Clear data, " +
+        "factory reset, storage failure, or phone loss removes Dealer-only drafts and uncertain " +
+        "actions; host-retained threads remain rediscoverable."
+
 private enum class CredentialKind {
     PRIVATE_KEY,
     KNOWN_HOSTS,
@@ -781,6 +786,11 @@ private fun DealerApp(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
+            Text(
+                DEALER_RECOVERY_LOSS_BOUNDARY,
+                color = Color(0xFF56616D),
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
 
         HorizontalDivider()

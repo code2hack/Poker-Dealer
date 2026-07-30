@@ -171,6 +171,21 @@ class StructuredCardProjectionTest {
         assertTrue(failure?.message.orEmpty().contains("retained-card storage"))
     }
 
+    @Test
+    fun `corrupt derived card cache is discarded for authoritative rebuild`(
+        @TempDir directory: Path,
+    ) = runTest {
+        val locator = CodexThreadLocator("u4090", "thr_cards")
+        val store = RetainedCardStore(directory.toFile())
+        store.write(locator, listOf(commandCard("complete")))
+        Files.writeString(Files.list(directory).use { it.findFirst().orElseThrow() }, "{")
+
+        val failure = runCatching { store.read(locator) }.exceptionOrNull()
+
+        assertTrue(failure is CorruptRetainedCardCacheException)
+        assertEquals(0, Files.list(directory).use { it.count() })
+    }
+
     private fun commandCard(content: String) = Card(
         id = "cmd_1",
         conversationId = CONVERSATION,
