@@ -10,6 +10,7 @@ import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
 import android.os.Binder
 import android.os.IBinder
+import android.os.PowerManager
 import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
@@ -123,7 +124,10 @@ class DealerConnectionService : Service() {
     private val userInputTimeoutJobs = mutableMapOf<ServerRequestLocator, Job>()
     private val wireFileApprovals = mutableMapOf<ServerRequestLocator, AppServerRequest>()
     private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
+    private val threadNotificationTracker = ThreadTransitionNotificationTracker()
+    private val threadNotificationTargets = mutableMapOf<String, CodexThreadLocator>()
     private var connectedHostIds = emptySet<String>()
+    private var activityVisible = false
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -214,6 +218,7 @@ class DealerConnectionService : Service() {
                 (connected - connectedHostIds).forEach { hostId ->
                     val generation = hostGenerations.getOrDefault(hostId, 0) + 1
                     hostGenerations[hostId] = generation
+                    threadNotificationTracker.beginReconciliation(hostId)
                     observeNotifications(hostId, generation)
                     observeServerRequests(hostId, generation)
                     restoreAttachments(hostId)
@@ -672,6 +677,7 @@ class DealerConnectionService : Service() {
                         error = null,
                     )
                 }
+                recordThreadTransition(locator)
                 if (clearAcceptedDraft) {
                     val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
                     runCatching {
@@ -834,6 +840,10 @@ class DealerConnectionService : Service() {
                 mutableState.update {
                     it.copy(refreshingThreadHosts = it.refreshingThreadHosts - hostId)
                 }
+                threadNotificationTracker.reconciled(
+                    hostId,
+                    mutableState.value.threads.values,
+                )
             }
         }
     }
@@ -970,6 +980,7 @@ class DealerConnectionService : Service() {
                                         )
                                     }
                                     wireCommandApprovals[parsed.request.locator] = wire
+                                    recordThreadTransition(parsed.request.thread)
                                 } catch (failure: IllegalArgumentException) {
                                     appServer.reject(
                                         wire,
@@ -1015,6 +1026,7 @@ class DealerConnectionService : Service() {
                                     }
                                     wireUserInputs[parsed.request.locator] = wire
                                     scheduleUserInputTimeout(parsed.request)
+                                    recordThreadTransition(parsed.request.thread)
                                 } catch (failure: IllegalArgumentException) {
                                     appServer.reject(
                                         wire,
@@ -1056,6 +1068,7 @@ class DealerConnectionService : Service() {
                         )
                     }
                     wireFileApprovals[initial.request.locator] = wire
+                    recordThreadTransition(initial.request.thread)
                 } catch (failure: IllegalArgumentException) {
                     scope.launch {
                         appServer.reject(wire, failure.message ?: "File approval identity conflict")
@@ -1072,6 +1085,7 @@ class DealerConnectionService : Service() {
                     )
                 }
                 wireFileApprovals[initial.request.locator] = wire
+                recordThreadTransition(initial.request.thread)
                 browseThread(initial.request.thread)
                 scope.launch {
                     delay(INCOMPLETE_CARD_REREAD_DELAY_MILLIS)
@@ -1110,6 +1124,7 @@ class DealerConnectionService : Service() {
                                         ),
                                     )
                                 }
+                                recordThreadTransition(initial.request.thread)
                             }
                             .onFailure {
                                 mutableState.update {
@@ -1346,6 +1361,7 @@ class DealerConnectionService : Service() {
                             ),
                         )
                     }
+                    recordThreadTransition(CodexThreadLocator(hostId, resolved.threadId))
                     continue
                 }
                 val params = notification.params as? JsonObject ?: continue
@@ -1423,6 +1439,7 @@ class DealerConnectionService : Service() {
                                 } ?: state.threads,
                             )
                         }
+                        recordThreadTransition(locator)
                         scope.launch {
                             draftMutex.withLock {
                                 threadAttachmentStore.writePendingInterrupt(locator, null)
@@ -1460,9 +1477,16 @@ class DealerConnectionService : Service() {
                 } ?: state.threads,
             )
         }
+        recordThreadTransition(locator)
     }
 
-    fun browseThread(locator: CodexThreadLocator) {
+    fun browseThread(locator: CodexThreadLocator, request: ServerRequestLocator? = null) {
+        mutableState.update {
+            it.copy(
+                browsedThread = locator,
+                browsedRequest = request,
+            )
+        }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: return
         scope.launch {
             try {
@@ -1522,6 +1546,7 @@ class DealerConnectionService : Service() {
                             )
                         } ?: state.threads,
                         browsedThread = locator,
+                        browsedRequest = request,
                         threadDiscoveryErrors = state.threadDiscoveryErrors - locator.hostId,
                         error = retained.error,
                     )
@@ -1687,6 +1712,25 @@ class DealerConnectionService : Service() {
     }
 
     @Synchronized
+    fun setActivityVisible(visible: Boolean) {
+        activityVisible = visible
+        if (visible && isScreenInteractive()) {
+            val manager = getSystemService(NotificationManager::class.java)
+            threadNotificationTargets.keys.forEach {
+                manager.cancel(it, THREAD_NOTIFICATION_ID)
+            }
+            threadNotificationTargets.clear()
+        }
+    }
+
+    @Synchronized
+    fun openThreadNotification(key: String): Boolean {
+        val locator = threadNotificationTargets[key] ?: return false
+        browseThread(locator, mutableState.value.unresolvedRequest(locator))
+        return true
+    }
+
+    @Synchronized
     fun startEmbeddedTailnet(): Boolean {
         if (tailnetJob != null || mutableState.value.tailnet.active) return false
         ensureForeground()
@@ -1831,6 +1875,87 @@ class DealerConnectionService : Service() {
         super.onDestroy()
     }
 
+    private fun recordThreadTransition(locator: CodexThreadLocator) {
+        val state = mutableState.value
+        val thread = state.threads[locator] ?: return
+        val hostLabel = InitialCodexHosts.all.firstOrNull { it.id == locator.hostId }?.displayName ?: return
+        val alert = threadNotificationTracker.transition(
+            thread = thread,
+            hostLabel = hostLabel,
+            request = state.unresolvedRequest(locator),
+            activityVisible = activityVisible,
+            screenInteractive = isScreenInteractive(),
+        )
+        if (alert == null) {
+            if (thread.workState == ThreadWorkState.BUSY) cancelThreadNotification(locator)
+            return
+        }
+        threadNotificationTargets[alert.key] = alert.target.thread
+        postThreadNotification(alert)
+    }
+
+    private fun postThreadNotification(alert: ThreadTransitionNotification) {
+        val manager = getSystemService(NotificationManager::class.java)
+        val channelId = when (alert.priority) {
+            ThreadNotificationPriority.HIGH -> THREAD_ATTENTION_CHANNEL
+            ThreadNotificationPriority.NORMAL -> THREAD_READY_CHANNEL
+        }
+        manager.createNotificationChannel(
+            NotificationChannel(
+                channelId,
+                if (alert.priority == ThreadNotificationPriority.HIGH) {
+                    "Dealer attention required"
+                } else {
+                    "Dealer thread ready"
+                },
+                if (alert.priority == ThreadNotificationPriority.HIGH) {
+                    NotificationManager.IMPORTANCE_HIGH
+                } else {
+                    NotificationManager.IMPORTANCE_DEFAULT
+                },
+            ).apply {
+                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            },
+        )
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, DealerActivity::class.java)
+                .setAction("$ACTION_OPEN_THREAD_NOTIFICATION.${alert.key}")
+                .putExtra(EXTRA_THREAD_NOTIFICATION_KEY, alert.key)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val publicNotification = Notification.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_dealer_connection)
+            .setContentTitle(alert.content.publicTitle)
+            .setContentText(alert.content.publicText)
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .build()
+        val notification = Notification.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_dealer_connection)
+            .setContentTitle(alert.content.title)
+            .setContentText(alert.content.text)
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setOngoing(false)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification)
+            .build()
+        manager.notify(alert.key, THREAD_NOTIFICATION_ID, notification)
+    }
+
+    private fun cancelThreadNotification(locator: CodexThreadLocator) {
+        val key = threadNotificationKey(locator)
+        if (threadNotificationTargets.remove(key) != null) {
+            getSystemService(NotificationManager::class.java).cancel(key, THREAD_NOTIFICATION_ID)
+        }
+    }
+
+    private fun isScreenInteractive(): Boolean =
+        getSystemService(PowerManager::class.java).isInteractive
+
     private fun ensureForeground() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
@@ -1883,9 +2008,15 @@ class DealerConnectionService : Service() {
     companion object {
         internal const val ACTION_START_TAILNET = "com.code2hack.dealer.action.START_TAILNET"
         internal const val ACTION_RESET_TAILNET = "com.code2hack.dealer.action.RESET_TAILNET"
+        internal const val ACTION_OPEN_THREAD_NOTIFICATION =
+            "com.code2hack.dealer.action.OPEN_THREAD_NOTIFICATION"
+        internal const val EXTRA_THREAD_NOTIFICATION_KEY = "threadNotificationKey"
 
         const val NOTIFICATION_CHANNEL = "dealer-host-connection"
+        const val THREAD_ATTENTION_CHANNEL = "dealer-thread-attention"
+        const val THREAD_READY_CHANNEL = "dealer-thread-ready"
         const val NOTIFICATION_ID = 4090
+        const val THREAD_NOTIFICATION_ID = 29
         const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
         const val TAILNET_STATUS_INTERVAL_MILLIS = 1_000L
         const val INCOMPLETE_CARD_REREAD_DELAY_MILLIS = 500L
@@ -1953,6 +2084,18 @@ private fun DealerUiState.withBlockingRequests(): DealerUiState {
     )
 }
 
+private fun DealerUiState.unresolvedRequest(thread: CodexThreadLocator): ServerRequestLocator? = buildList {
+    commandApprovals.unresolved()
+        .filter { it.thread == thread }
+        .forEach { add(it.createdAtMs to it.locator) }
+    fileApprovals.unresolved()
+        .filter { it.thread == thread }
+        .forEach { add(it.createdAtMs to it.locator) }
+    userInputRequests.unresolved()
+        .filter { it.thread == thread }
+        .forEach { add(it.receivedAtMs to it.locator) }
+}.minByOrNull(Pair<Long, ServerRequestLocator>::first)?.second
+
 private fun DealerUiState.fileReviewCard(hostId: String, wire: AppServerRequest): Card? {
     val params = wire.params as? JsonObject ?: return null
     val threadId = (params["threadId"] as? JsonPrimitive)?.contentOrNull ?: return null
@@ -2009,6 +2152,7 @@ data class DealerUiState(
     val refreshingThreadHosts: Set<String> = emptySet(),
     val threadDiscoveryErrors: Map<String, String> = emptyMap(),
     val browsedThread: CodexThreadLocator? = null,
+    val browsedRequest: ServerRequestLocator? = null,
     val error: String? = null,
 ) {
     val running: Boolean

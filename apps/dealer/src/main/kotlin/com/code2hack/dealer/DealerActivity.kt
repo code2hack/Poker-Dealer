@@ -87,12 +87,17 @@ class DealerActivity : ComponentActivity() {
     private var knownHosts: ByteArray? = null
     private var service: DealerConnectionService? = null
     private var serviceStateJob: Job? = null
+    private var pendingThreadNotificationKey: String? = null
     private var bound = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val connected = (binder as DealerConnectionService.LocalBinder).service
             service = connected
+            pendingThreadNotificationKey?.let {
+                if (connected.openThreadNotification(it)) pendingThreadNotificationKey = null
+            }
+            connected.setActivityVisible(true)
             setupState.update { it.copy(serviceReady = true, error = null) }
             serviceStateJob?.cancel()
             serviceStateJob = lifecycleScope.launch {
@@ -112,6 +117,7 @@ class DealerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        openThreadNotification(intent)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -166,6 +172,7 @@ class DealerActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        service?.setActivityVisible(false)
         serviceStateJob?.cancel()
         serviceStateJob = null
         service = null
@@ -173,6 +180,12 @@ class DealerActivity : ComponentActivity() {
         bound = false
         setupState.update { it.copy(serviceReady = false) }
         super.onStop()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openThreadNotification(intent)
     }
 
     override fun onDestroy() {
@@ -277,6 +290,14 @@ class DealerActivity : ComponentActivity() {
                 .setAction(DealerConnectionService.ACTION_RESET_TAILNET),
         )
     }
+
+    private fun openThreadNotification(intent: Intent?) {
+        val key = intent?.getStringExtra(DealerConnectionService.EXTRA_THREAD_NOTIFICATION_KEY) ?: return
+        pendingThreadNotificationKey = key
+        service?.let {
+            if (it.openThreadNotification(key)) pendingThreadNotificationKey = null
+        }
+    }
 }
 
 private enum class CredentialKind {
@@ -319,7 +340,9 @@ private fun DealerApp(
     onResetTailnet: () -> Unit,
     onLoginTailnet: (String) -> Unit,
 ) {
-    var selectedHostId by remember(state.hostId) { mutableStateOf(state.hostId ?: "u4090") }
+    var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
+        mutableStateOf(state.browsedThread?.hostId ?: state.hostId ?: "u4090")
+    }
     var lanHost by remember { mutableStateOf("") }
     var tailnetHost by remember { mutableStateOf("") }
     var loopbackSshPort by remember { mutableStateOf("") }
@@ -761,27 +784,19 @@ private fun DealerApp(
         }
 
         HorizontalDivider()
+        val browsed = state.browsedThread?.takeIf { it.hostId == selectedHostId }
+        fun requestVisible(request: ServerRequestLocator, thread: CodexThreadLocator): Boolean =
+            (state.browsedRequest == null || request == state.browsedRequest) &&
+                (browsed?.let { thread == it } ?: (thread.hostId == selectedHostId))
         DealerCards(
             state.cards.filter {
-                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
-                    it.conversationId == "${browsed.hostId}/${browsed.threadId}"
-                } ?: (it.conversationId.substringBefore('/') == selectedHostId)
+                state.browsedRequest == null &&
+                    (browsed?.let { thread -> it.conversationId == "${thread.hostId}/${thread.threadId}" }
+                        ?: (it.conversationId.substringBefore('/') == selectedHostId))
             },
-            state.commandApprovals.requests.values.filter {
-                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
-                    it.thread == browsed
-                } ?: (it.thread.hostId == selectedHostId)
-            },
-            state.userInputRequests.requests.values.filter {
-                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
-                    it.thread == browsed
-                } ?: (it.thread.hostId == selectedHostId)
-            },
-            state.fileApprovals.requests.values.filter {
-                state.browsedThread?.takeIf { browsed -> browsed.hostId == selectedHostId }?.let { browsed ->
-                    it.thread == browsed
-                } ?: (it.thread.hostId == selectedHostId)
-            },
+            state.commandApprovals.requests.values.filter { requestVisible(it.locator, it.thread) },
+            state.userInputRequests.requests.values.filter { requestVisible(it.locator, it.thread) },
+            state.fileApprovals.requests.values.filter { requestVisible(it.locator, it.thread) },
             state.threadAttachments.dealerClaims,
             onCommandApproval,
             onUserInput,
