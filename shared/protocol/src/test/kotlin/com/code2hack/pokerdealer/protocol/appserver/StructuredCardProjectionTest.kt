@@ -157,6 +157,20 @@ class StructuredCardProjectionTest {
     }
 
     @Test
+    fun `delete removes only the selected host qualified retained projection`(@TempDir directory: Path) = runTest {
+        val deleted = CodexThreadLocator("u4090", "same")
+        val retained = CodexThreadLocator("spark", "same")
+        val store = RetainedCardStore(directory.toFile())
+        store.write(deleted, listOf(commandCard("delete")))
+        store.write(retained, listOf(commandCard("keep")))
+
+        store.delete(deleted)
+
+        assertEquals(emptyList<Card>(), store.read(deleted))
+        assertEquals("keep", store.read(retained).single().fullText)
+    }
+
+    @Test
     fun `retained card storage failure is explicit`(@TempDir directory: Path) = runTest {
         val notDirectory = directory.resolve("blocked")
         Files.writeString(notDirectory, "not a directory")

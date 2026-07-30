@@ -46,6 +46,8 @@ data class HostSessionState(
     val failedAttempts: Int = 0,
     val retryInMs: Long? = null,
     val diagnostics: List<RouteDiagnostic> = emptyList(),
+    val appServerVersion: String? = null,
+    val descendantFilterQualified: Boolean = false,
     val error: String? = null,
 )
 
@@ -85,6 +87,10 @@ interface HostSession {
     val appServer: CodexAppServerSession?
     val route: HostConnectionRoute?
     val diagnostics: List<RouteDiagnostic>
+    val appServerVersion: String?
+        get() = null
+    val descendantFilterQualified: Boolean
+        get() = false
     suspend fun awaitDisconnect(): Nothing
     suspend fun close()
 }
@@ -182,6 +188,8 @@ class HostSessionManager(
                             phase = HostSessionPhase.CONNECTED,
                             route = session.route,
                             diagnostics = session.diagnostics,
+                            appServerVersion = session.appServerVersion,
+                            descendantFilterQualified = session.descendantFilterQualified,
                         ),
                     )
                     session.awaitDisconnect()

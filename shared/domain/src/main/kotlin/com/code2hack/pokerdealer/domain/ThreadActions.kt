@@ -109,4 +109,11 @@ data class ThreadActionState(
             pendingReasoningEfforts + (locator to effort)
         },
     )
+
+    fun purge(locators: Set<CodexThreadLocator>): ThreadActionState = copy(
+        drafts = drafts - locators,
+        pendingInputs = pendingInputs - locators,
+        pendingInterrupts = pendingInterrupts - locators,
+        pendingReasoningEfforts = pendingReasoningEfforts - locators,
+    )
 }

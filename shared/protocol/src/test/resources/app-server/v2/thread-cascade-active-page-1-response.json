@@ -1,0 +1,15 @@
+{
+  "id": 2,
+  "result": {
+    "data": [
+      {
+        "id": "thr_child",
+        "parentThreadId": "thr_root",
+        "source": "subAgentThreadSpawn",
+        "status": {"type": "notLoaded"},
+        "ephemeral": false
+      }
+    ],
+    "nextCursor": "cascade-page-2"
+  }
+}

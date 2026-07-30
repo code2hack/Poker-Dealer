@@ -1,0 +1,7 @@
+{
+  "id": 1,
+  "method": "thread/read",
+  "params": {
+    "threadId": "thr_root"
+  }
+}

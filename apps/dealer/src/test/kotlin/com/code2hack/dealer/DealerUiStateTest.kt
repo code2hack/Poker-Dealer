@@ -369,4 +369,79 @@ class DealerUiStateTest {
         assertEquals(ControlSurface.DEALER, state.threads.getValue(fork).intendedControlSurface)
         assertEquals(fork, state.browsedThread)
     }
+
+    @Test
+    fun archiveNotificationsDetachOnlyTheThreadsTheServerReports() {
+        val root = CodexThreadLocator("spark", "root")
+        val child = CodexThreadLocator("spark", "child")
+        val unrelated = CodexThreadLocator("spark", "unrelated")
+        val initial = lifecycleState(root, child, unrelated)
+
+        val archived = initial.withArchivedThreads(setOf(root, child))
+
+        assertEquals(setOf(unrelated), archived.threadAttachments.attached)
+        assertEquals(setOf(unrelated), archived.threadAttachments.dealerClaims)
+        assertEquals(true, archived.threads.getValue(root).archived)
+        assertEquals(true, archived.threads.getValue(child).archived)
+        assertEquals(false, archived.threads.getValue(unrelated).archived)
+        assertEquals(initial.threadActions, archived.threadActions)
+        assertEquals(initial.cards, archived.cards)
+    }
+
+    @Test
+    fun restoreNotificationRestoresOnlyTheSelectedThreadAndKeepsItDetached() {
+        val selected = CodexThreadLocator("spark", "selected")
+        val descendant = CodexThreadLocator("spark", "descendant")
+        val initial = lifecycleState(selected, descendant).withArchivedThreads(setOf(selected, descendant))
+
+        val restored = initial.withRestoredThread(selected)
+
+        assertEquals(false, restored.threads.getValue(selected).archived)
+        assertEquals(true, restored.threads.getValue(descendant).archived)
+        assertEquals(emptySet<CodexThreadLocator>(), restored.threadAttachments.attached)
+        assertEquals(emptySet<CodexThreadLocator>(), restored.threadAttachments.dealerClaims)
+    }
+
+    @Test
+    fun deleteNotificationsPurgeOnlyExactHostQualifiedLocalState() {
+        val root = CodexThreadLocator("spark", "same-id")
+        val child = CodexThreadLocator("spark", "child")
+        val otherHost = CodexThreadLocator("u4090", "same-id")
+        val initial = lifecycleState(root, child, otherHost)
+
+        val deleted = initial.withDeletedThreads(setOf(root, child))
+
+        assertEquals(setOf(otherHost), deleted.threads.keys)
+        assertEquals(setOf(otherHost), deleted.threadAttachments.attached)
+        assertEquals(mapOf(otherHost to "draft-u4090"), deleted.threadActions.drafts)
+        assertEquals(listOf("u4090/same-id"), deleted.cards.map { it.conversationId })
+        assertEquals(setOf(otherHost), deleted.knownBlockingRequestThreads)
+    }
+
+    private fun lifecycleState(vararg locators: CodexThreadLocator): DealerUiState {
+        val attachments = locators.fold(ThreadAttachmentState()) { state, locator ->
+            state.attach(locator).claim(locator)
+        }
+        val actions = locators.fold(com.code2hack.pokerdealer.domain.ThreadActionState()) { state, locator ->
+            state.editDraft(locator, "draft-${locator.hostId}")
+        }
+        return DealerUiState(
+            threadAttachments = attachments,
+            threadActions = actions,
+            knownBlockingRequestThreads = locators.toSet(),
+            threads = locators.associateWith { locator ->
+                DiscoveredThread(
+                    locator = locator,
+                    workState = ThreadWorkState.READY,
+                    ephemeral = false,
+                    attached = true,
+                    intendedControlSurface = ControlSurface.DEALER,
+                )
+            },
+            cards = locators.mapIndexed { index, locator ->
+                M1TurnInput("turn", locator.threadId, "client-$index")
+                    .pendingUserCard("${locator.hostId}/${locator.threadId}", index.toLong())
+            },
+        )
+    }
 }

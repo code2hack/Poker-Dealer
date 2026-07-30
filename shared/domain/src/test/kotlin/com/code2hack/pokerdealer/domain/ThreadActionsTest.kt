@@ -80,4 +80,18 @@ class ThreadActionsTest {
         assertEquals(null, starting.inputAccepted(thread, start.clientId).pendingReasoningEfforts[thread])
         assertEquals("high", steering.inputAccepted(thread, steer.clientId).pendingReasoningEfforts[thread])
     }
+
+    @Test
+    fun `purge removes only deleted host qualified thread state`() {
+        val retained = CodexThreadLocator("spark", "thread")
+        val state = ThreadActionState(
+            drafts = mapOf(thread to "delete", retained to "keep"),
+            pendingInterrupts = mapOf(thread to "turn-delete", retained to "turn-keep"),
+            pendingReasoningEfforts = mapOf(thread to "high", retained to "low"),
+        ).purge(setOf(thread))
+
+        assertEquals(mapOf(retained to "keep"), state.drafts)
+        assertEquals(mapOf(retained to "turn-keep"), state.pendingInterrupts)
+        assertEquals(mapOf(retained to "low"), state.pendingReasoningEfforts)
+    }
 }

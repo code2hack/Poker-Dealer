@@ -28,6 +28,8 @@ import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.RevisionApplication
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
 import com.code2hack.pokerdealer.domain.ThreadActionState
+import com.code2hack.pokerdealer.domain.ThreadCascadePreflight
+import com.code2hack.pokerdealer.domain.ThreadLifecycleAction
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
 import com.code2hack.pokerdealer.protocol.appserver.M1ConnectionPhase
@@ -41,6 +43,7 @@ import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import com.code2hack.pokerdealer.protocol.appserver.HostThreadDiscovery
+import com.code2hack.pokerdealer.protocol.appserver.HostThreadLifecycle
 import com.code2hack.pokerdealer.protocol.appserver.HostThreadStartSettings
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.AppServerThreadProjection
@@ -891,6 +894,176 @@ class DealerConnectionService : Service() {
         }
     }
 
+    fun beginThreadLifecycle(action: ThreadLifecycleAction, locator: CodexThreadLocator) {
+        val state = mutableState.value
+        val thread = state.threads[locator] ?: run {
+            mutableState.update { it.copy(error = "Unknown thread ${locator.threadId}") }
+            return
+        }
+        val session = hostSessions.connectedSession(locator.hostId) ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before changing thread lifecycle") }
+            return
+        }
+        if (!session.descendantFilterQualified) {
+            mutableState.update {
+                it.copy(
+                    error = "Archive/Delete unavailable: descendant filtering is not qualified " +
+                        "for ${locator.hostId} app-server ${session.appServerVersion ?: "unknown"}",
+                )
+            }
+            return
+        }
+        if (action == ThreadLifecycleAction.ARCHIVE && thread.archived) {
+            mutableState.update { it.copy(error = "The selected thread is already archived") }
+            return
+        }
+        val appServer = session.appServer ?: return
+        mutableState.update {
+            it.copy(
+                lifecycleReview = ThreadLifecycleReviewUiState(
+                    action = action,
+                    locator = locator,
+                    loading = true,
+                ),
+                error = null,
+            )
+        }
+        scope.launch {
+            try {
+                val preflight = HostThreadLifecycle(appServer, descendantFilterQualified = true)
+                    .preflight(locator.hostId, locator.threadId, thread.archived)
+                mutableState.update { current ->
+                    if (current.lifecycleReview?.locator == locator &&
+                        current.lifecycleReview.action == action
+                    ) {
+                        current.copy(
+                            lifecycleReview = current.lifecycleReview.copy(
+                                preflight = preflight,
+                                loading = false,
+                            ),
+                        )
+                    } else {
+                        current
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        lifecycleReview = it.lifecycleReview?.takeIf { review ->
+                            review.locator == locator && review.action == action
+                        }?.copy(
+                            loading = false,
+                            error = failure.message ?: failure::class.java.simpleName,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun confirmThreadLifecycle() {
+        val review = mutableState.value.lifecycleReview ?: return
+        val reviewed = review.preflight ?: return
+        if (review.committing || !reviewed.eligible) return
+        val session = hostSessions.connectedSession(review.locator.hostId) ?: run {
+            mutableState.update {
+                it.copy(lifecycleReview = it.lifecycleReview?.copy(error = "Host disconnected before confirmation"))
+            }
+            return
+        }
+        if (!session.descendantFilterQualified) {
+            mutableState.update {
+                it.copy(
+                    lifecycleReview = it.lifecycleReview?.copy(
+                        error = "Descendant filtering is no longer qualified for this connection",
+                    ),
+                )
+            }
+            return
+        }
+        val appServer = session.appServer ?: return
+        mutableState.update {
+            it.copy(lifecycleReview = it.lifecycleReview?.copy(committing = true, error = null))
+        }
+        scope.launch {
+            try {
+                val fresh = HostThreadLifecycle(appServer, descendantFilterQualified = true)
+                    .preflight(
+                        review.locator.hostId,
+                        review.locator.threadId,
+                        reviewed.selected.archived,
+                    )
+                require(fresh.eligible) { fresh.blockingReason ?: "Thread lifecycle action is unavailable" }
+                if (!reviewed.safetyMatches(fresh)) {
+                    mutableState.update {
+                        it.copy(
+                            lifecycleReview = review.copy(
+                                preflight = fresh,
+                                committing = false,
+                                error = "Thread state or descendant scope changed; review the confirmation again",
+                            ),
+                        )
+                    }
+                    return@launch
+                }
+                when (review.action) {
+                    ThreadLifecycleAction.ARCHIVE -> appServer.threadArchive(review.locator.threadId)
+                    ThreadLifecycleAction.DELETE -> appServer.threadDelete(review.locator.threadId)
+                }
+                mutableState.update { it.copy(lifecycleReview = null, error = null) }
+                refreshThreads(review.locator.hostId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update {
+                    it.copy(
+                        lifecycleReview = it.lifecycleReview?.copy(
+                            committing = false,
+                            error = failure.message ?: failure::class.java.simpleName,
+                        ),
+                    )
+                }
+                refreshThreads(review.locator.hostId)
+            }
+        }
+    }
+
+    fun dismissThreadLifecycle() {
+        if (mutableState.value.lifecycleReview?.committing == true) return
+        mutableState.update { it.copy(lifecycleReview = null) }
+    }
+
+    fun restoreThread(locator: CodexThreadLocator) {
+        val thread = mutableState.value.threads[locator]
+        if (thread?.archived != true) {
+            mutableState.update { it.copy(error = "Restore applies only to an archived thread") }
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before restoring") }
+            return
+        }
+        scope.launch {
+            try {
+                val restored = appServer.threadUnarchive(locator.threadId)
+                val restoredId = (restored["thread"] as? JsonObject)
+                    ?.get("id")
+                    ?.let { it as? JsonPrimitive }
+                    ?.contentOrNull
+                require(restoredId == locator.threadId) { "thread/unarchive returned a different thread" }
+                mutableState.update { it.copy(error = null) }
+                refreshThreads(locator.hostId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                mutableState.update { it.copy(error = failure.message ?: failure::class.java.simpleName) }
+                refreshThreads(locator.hostId)
+            }
+        }
+    }
+
     fun dismissNewThread() {
         if (mutableState.value.newThread?.creating == true) return
         mutableState.update { it.copy(newThread = null) }
@@ -1185,6 +1358,9 @@ class DealerConnectionService : Service() {
                     }
                 }
                 when (notification.method) {
+                    "thread/archived", "thread/unarchived", "thread/deleted" -> {
+                        reconcileThreadLifecycle(notification.method, locator)
+                    }
                     "thread/name/updated" -> {
                         val name = (params["threadName"] as? JsonPrimitive)?.contentOrNull
                         mutableState.update { it.withRenamedThread(locator, name) }
@@ -1224,6 +1400,35 @@ class DealerConnectionService : Service() {
                         browseThread(locator)
                     }
                 }
+            }
+        }
+    }
+
+    private suspend fun reconcileThreadLifecycle(
+        method: String,
+        locator: CodexThreadLocator,
+    ) {
+        attachmentMutex.withLock {
+            val persistenceFailure = when (method) {
+                "thread/deleted" -> runCatching {
+                    threadAttachmentStore.purge(locator)
+                    retainedCardStore.delete(locator)
+                }.exceptionOrNull()
+                else -> runCatching { threadAttachmentStore.detach(locator) }.exceptionOrNull()
+            }
+            mutableState.update { state ->
+                val reconciled = when (method) {
+                    "thread/archived" -> state.withArchivedThreads(setOf(locator))
+                    "thread/unarchived" -> state.withRestoredThread(locator)
+                    "thread/deleted" -> state.withDeletedThreads(setOf(locator))
+                    else -> state
+                }
+                reconciled.copy(
+                    error = persistenceFailure?.let {
+                        "Host confirmed ${method.substringAfter('/')} but local cleanup failed: " +
+                            (it.message ?: it::class.java.simpleName)
+                    } ?: reconciled.error,
+                )
             }
         }
     }
@@ -1431,6 +1636,11 @@ class DealerConnectionService : Service() {
                 TermuxCommunityCodexDaemon()
             } else {
                 UpstreamCodexDaemon()
+            },
+            qualifiedDescendantFilterVersions = if (host == InitialCodexHosts.spark) {
+                setOf("0.146.0")
+            } else {
+                emptySet()
             },
         )
     }
@@ -1742,6 +1952,7 @@ data class DealerUiState(
     val browsedThread: CodexThreadLocator? = null,
     val newThread: NewThreadUiState? = null,
     val resumeThread: ResumeThreadUiState? = null,
+    val lifecycleReview: ThreadLifecycleReviewUiState? = null,
     val error: String? = null,
 ) {
     val running: Boolean
@@ -1767,6 +1978,15 @@ data class ResumeThreadUiState(
     val controlClaimed: Boolean = false,
     val loading: Boolean = false,
     val resuming: Boolean = false,
+    val error: String? = null,
+)
+
+data class ThreadLifecycleReviewUiState(
+    val action: ThreadLifecycleAction,
+    val locator: CodexThreadLocator,
+    val preflight: ThreadCascadePreflight? = null,
+    val loading: Boolean = false,
+    val committing: Boolean = false,
     val error: String? = null,
 )
 
@@ -1807,6 +2027,52 @@ internal fun DealerUiState.withRenamedThread(
 )
 
 internal fun DiscoveredThread.canFork(): Boolean = workState == ThreadWorkState.READY
+
+internal fun DealerUiState.withArchivedThreads(
+    locators: Set<CodexThreadLocator>,
+): DealerUiState = copy(
+    threadAttachments = locators.fold(threadAttachments) { state, locator -> state.detach(locator) },
+    threads = threads.mapValues { (locator, thread) ->
+        if (locator in locators) {
+            thread.copy(
+                archived = true,
+                attached = false,
+                intendedControlSurface = ControlSurface.NONE,
+            )
+        } else {
+            thread
+        }
+    },
+    browsedThread = browsedThread?.takeUnless { it in locators },
+)
+
+internal fun DealerUiState.withRestoredThread(locator: CodexThreadLocator): DealerUiState = copy(
+    threadAttachments = threadAttachments.detach(locator),
+    threads = threads[locator]?.let {
+        threads + (
+            locator to it.copy(
+                archived = false,
+                attached = false,
+                intendedControlSurface = ControlSurface.NONE,
+            )
+        )
+    } ?: threads,
+    browsedThread = browsedThread?.takeUnless { it == locator },
+)
+
+internal fun DealerUiState.withDeletedThreads(
+    locators: Set<CodexThreadLocator>,
+): DealerUiState {
+    val conversationIds = locators.mapTo(mutableSetOf()) { "${it.hostId}/${it.threadId}" }
+    return copy(
+        threadAttachments = locators.fold(threadAttachments) { state, locator -> state.detach(locator) },
+        threadActions = threadActions.purge(locators),
+        knownBlockingRequestThreads = knownBlockingRequestThreads - locators,
+        threads = threads - locators,
+        cards = cards.filterNot { it.conversationId in conversationIds },
+        browsedThread = browsedThread?.takeUnless { it in locators },
+    )
+}
 
 internal fun DealerUiState.withCreatedThread(
     locator: CodexThreadLocator,
