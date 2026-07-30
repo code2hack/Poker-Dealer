@@ -71,4 +71,24 @@ class ThreadAttachmentStoreTest {
 
         assertEquals("high", restored.pendingReasoningEfforts[locator])
     }
+
+    @Test
+    fun permanentDeletePurgesOnlyItsAttachmentDraftAndPendingAction() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val deleted = CodexThreadLocator("u4090", "purged")
+        val retained = CodexThreadLocator("spark", "retained")
+        val store = DealerThreadAttachmentStore(context)
+        listOf(deleted, retained).forEach {
+            store.attach(it)
+            store.writeDraft(it, it.hostId)
+            store.writePendingInterrupt(it, "turn")
+        }
+
+        store.purge(deleted)
+        val actions = store.readActions()
+
+        assertEquals(setOf(retained), store.read().intersect(setOf(deleted, retained)))
+        assertEquals(mapOf(retained to "spark"), actions.drafts.filterKeys { it in setOf(deleted, retained) })
+        assertEquals(mapOf(retained to "turn"), actions.pendingInterrupts.filterKeys { it in setOf(deleted, retained) })
+    }
 }

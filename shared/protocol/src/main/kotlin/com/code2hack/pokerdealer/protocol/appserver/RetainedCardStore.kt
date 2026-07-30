@@ -48,6 +48,10 @@ class RetainedCardStore(
         }
     }
 
+    suspend fun delete(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
+        Files.deleteIfExists(file(locator).toPath())
+    }
+
     private fun file(locator: CodexThreadLocator): File {
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("${locator.hostId}\u0000${locator.threadId}".toByteArray())

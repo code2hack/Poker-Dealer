@@ -19,6 +19,7 @@ data class HostSessionConnectionConfig(
     val dialer: HostTcpDialer,
     val sshClient: HostSshClient,
     val daemon: CodexDaemonLifecycle,
+    val qualifiedDescendantFilterVersions: Set<String> = emptySet(),
     val timeouts: M1Timeouts = M1Timeouts(),
 )
 
@@ -32,11 +33,15 @@ class InitializedHostSessionConnector(
         var proxy: DuplexByteStream? = null
         var appServer: CodexAppServerSession? = null
         try {
-            phase(HostSessionPhase.DAEMON, routed.diagnostics) {
+            val daemonVersions = phase(HostSessionPhase.DAEMON, routed.diagnostics) {
                 withConnectionPhaseTimeout("daemon status/start", configured.timeouts.daemonCommandMs) {
                     configured.daemon.ensureRunning(routed.ssh)
                 }
             }
+            val descendantFilterQualified = descendantFilterQualified(
+                daemonVersions.appServerVersion,
+                configured.qualifiedDescendantFilterVersions,
+            )
             proxy = phase(HostSessionPhase.PROXY, routed.diagnostics) {
                 withConnectionPhaseTimeout("app-server proxy start", configured.timeouts.proxyStartMs) {
                     routed.ssh.execStream(configured.daemon.appServerProxyCommand)
@@ -52,6 +57,7 @@ class InitializedHostSessionConnector(
                     WebSocketJsonRpcPeer(socket),
                     requestTimeoutMs = configured.timeouts.appServerRequestMs,
                     turnInactivityTimeoutMs = configured.timeouts.turnInactivityMs,
+                    experimentalApi = descendantFilterQualified,
                 )
             }
             phase(HostSessionPhase.INITIALIZE, routed.diagnostics) { appServer.initialize() }
@@ -61,6 +67,8 @@ class InitializedHostSessionConnector(
                 appServer,
                 routed.route,
                 routed.diagnostics,
+                daemonVersions.appServerVersion,
+                descendantFilterQualified,
             )
         } catch (failure: Throwable) {
             withContext(NonCancellable) {
@@ -138,6 +146,11 @@ class InitializedHostSessionConnector(
     }
 }
 
+internal fun descendantFilterQualified(
+    appServerVersion: String?,
+    qualifiedVersions: Set<String>,
+): Boolean = appServerVersion != null && appServerVersion in qualifiedVersions
+
 private data class RoutedSsh(
     val route: HostConnectionRoute,
     val tcp: DuplexByteStream,
@@ -151,6 +164,8 @@ private class ConnectedHostSession(
     override val appServer: CodexAppServerSession,
     override val route: HostConnectionRoute,
     override val diagnostics: List<RouteDiagnostic>,
+    override val appServerVersion: String?,
+    override val descendantFilterQualified: Boolean,
 ) : HostSession {
     override suspend fun awaitDisconnect(): Nothing = try {
         appServer.awaitClose()

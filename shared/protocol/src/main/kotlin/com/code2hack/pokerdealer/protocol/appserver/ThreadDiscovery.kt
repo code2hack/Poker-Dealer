@@ -54,10 +54,11 @@ class HostThreadDiscovery(
                         updatedAtSeconds = thread.long("updatedAt"),
                         status = status,
                         archived = archived,
+                        ephemeral = thread.boolean("ephemeral"),
                         loaded = threadId in loaded,
                         workState = when (status) {
                             "active" -> ThreadWorkState.BUSY
-                            "idle" -> ThreadWorkState.READY
+                            "idle", "notLoaded" -> ThreadWorkState.READY
                             else -> null
                         },
                         attached = local.attached,
@@ -83,6 +84,8 @@ private fun JsonObject?.loadedThreadIds(): Set<String> =
 
 private fun JsonObject.string(name: String): String? = (this[name] as? JsonPrimitive)?.contentOrNull
 private fun JsonObject.long(name: String): Long? = (this[name] as? JsonPrimitive)?.contentOrNull?.toLongOrNull()
+private fun JsonObject.boolean(name: String): Boolean? =
+    (this[name] as? JsonPrimitive)?.contentOrNull?.toBooleanStrictOrNull()
 private fun JsonObject.status(): String? = when (val value = this["status"]) {
     is JsonPrimitive -> value.contentOrNull
     is JsonObject -> value.string("type")

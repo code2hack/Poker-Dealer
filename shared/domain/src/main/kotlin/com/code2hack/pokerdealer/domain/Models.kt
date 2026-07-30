@@ -96,6 +96,7 @@ data class DiscoveredThread(
     val updatedAtSeconds: Long? = null,
     val status: String? = null,
     val archived: Boolean = false,
+    val ephemeral: Boolean? = null,
     val loaded: Boolean = false,
     val workState: ThreadWorkState? = null,
     val activeTurnId: String? = null,

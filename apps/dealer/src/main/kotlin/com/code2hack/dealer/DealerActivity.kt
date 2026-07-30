@@ -54,6 +54,7 @@ import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.PermissionPreset
+import com.code2hack.pokerdealer.domain.ThreadLifecycleAction
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
@@ -119,6 +120,12 @@ class DealerActivity : ComponentActivity() {
                         onDismissNewThread = { service?.dismissNewThread() },
                         onRenameThread = { locator, name -> service?.renameThread(locator, name) },
                         onBeginForkThread = { service?.beginForkThread(it) },
+                        onBeginThreadLifecycle = { action, locator ->
+                            service?.beginThreadLifecycle(action, locator)
+                        },
+                        onConfirmThreadLifecycle = { service?.confirmThreadLifecycle() },
+                        onDismissThreadLifecycle = { service?.dismissThreadLifecycle() },
+                        onRestoreThread = { service?.restoreThread(it) },
                         onBrowseThread = { service?.browseThread(it) },
                         onAttachThread = { service?.attachThread(it) },
                         onDetachThread = { service?.detachThread(it) },
@@ -290,6 +297,10 @@ private fun DealerApp(
     onDismissNewThread: () -> Unit,
     onRenameThread: (CodexThreadLocator, String) -> Unit,
     onBeginForkThread: (CodexThreadLocator) -> Unit,
+    onBeginThreadLifecycle: (ThreadLifecycleAction, CodexThreadLocator) -> Unit,
+    onConfirmThreadLifecycle: () -> Unit,
+    onDismissThreadLifecycle: () -> Unit,
+    onRestoreThread: (CodexThreadLocator) -> Unit,
     onBrowseThread: (CodexThreadLocator) -> Unit,
     onAttachThread: (CodexThreadLocator) -> Unit,
     onDetachThread: (CodexThreadLocator) -> Unit,
@@ -574,6 +585,11 @@ private fun DealerApp(
                     onYieldControl = onYieldControl,
                     onRenameThread = onRenameThread,
                     onBeginForkThread = onBeginForkThread,
+                    descendantFilterQualified = hostSession?.descendantFilterQualified == true,
+                    appServerVersion = hostSession?.appServerVersion,
+                    lifecycleBusy = state.lifecycleReview != null,
+                    onBeginThreadLifecycle = onBeginThreadLifecycle,
+                    onRestoreThread = onRestoreThread,
                 )
             }
             if (isTermux) {
@@ -783,6 +799,13 @@ private fun DealerApp(
             onDismiss = onDismissNewThread,
         )
     }
+    state.lifecycleReview?.let {
+        ThreadLifecycleDialog(
+            review = it,
+            onConfirm = onConfirmThreadLifecycle,
+            onDismiss = onDismissThreadLifecycle,
+        )
+    }
 }
 
 @Composable
@@ -976,9 +999,25 @@ private fun ThreadRow(
     onYieldControl: (String, String) -> Unit,
     onRenameThread: (CodexThreadLocator, String) -> Unit,
     onBeginForkThread: (CodexThreadLocator) -> Unit,
+    descendantFilterQualified: Boolean,
+    appServerVersion: String?,
+    lifecycleBusy: Boolean,
+    onBeginThreadLifecycle: (ThreadLifecycleAction, CodexThreadLocator) -> Unit,
+    onRestoreThread: (CodexThreadLocator) -> Unit,
 ) {
     var renaming by remember(thread.locator) { mutableStateOf(false) }
     var name by remember(thread.locator, thread.name) { mutableStateOf(thread.name.orEmpty()) }
+    val lifecycleUnavailable = when {
+        !descendantFilterQualified ->
+            "Archive/Delete unavailable: descendant filtering is not qualified for app-server " +
+                (appServerVersion ?: "unknown")
+        thread.workState != com.code2hack.pokerdealer.domain.ThreadWorkState.READY ->
+            "Archive/Delete unavailable until the selected thread is READY"
+        thread.ephemeral != false ->
+            "Archive/Delete unavailable because ephemeral state is " +
+                if (thread.ephemeral == true) "true" else "unknown"
+        else -> null
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1052,6 +1091,36 @@ private fun ThreadRow(
                 }
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (thread.archived) {
+                OutlinedButton(
+                    onClick = { onRestoreThread(thread.locator) },
+                    enabled = !lifecycleBusy,
+                ) {
+                    Text("Restore")
+                }
+            } else {
+                OutlinedButton(
+                    onClick = {
+                        onBeginThreadLifecycle(ThreadLifecycleAction.ARCHIVE, thread.locator)
+                    },
+                    enabled = lifecycleUnavailable == null && !lifecycleBusy,
+                ) {
+                    Text("Archive")
+                }
+            }
+            OutlinedButton(
+                onClick = {
+                    onBeginThreadLifecycle(ThreadLifecycleAction.DELETE, thread.locator)
+                },
+                enabled = lifecycleUnavailable == null && !lifecycleBusy,
+            ) {
+                Text("Delete")
+            }
+        }
+        lifecycleUnavailable?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
+        }
     }
     if (renaming) {
         AlertDialog(
@@ -1082,6 +1151,73 @@ private fun ThreadRow(
             },
         )
     }
+}
+
+@Composable
+private fun ThreadLifecycleDialog(
+    review: ThreadLifecycleReviewUiState,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val preflight = review.preflight
+    val selected = preflight?.selected
+    val action = when (review.action) {
+        ThreadLifecycleAction.ARCHIVE -> "Archive"
+        ThreadLifecycleAction.DELETE -> "Permanently delete"
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("$action thread?") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (review.loading) {
+                    Text("Checking the complete active and archived descendant scope…")
+                }
+                selected?.let { thread ->
+                    Text("Host: ${thread.locator.hostId}")
+                    Text("Thread: ${thread.name ?: thread.preview ?: "(unnamed)"}")
+                    Text("Thread ID: ${thread.locator.threadId}", fontFamily = FontFamily.Monospace)
+                    Text(
+                        "Working directory: ${thread.workingDirectory ?: "(unknown)"}",
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Text("Descendants affected: ${preflight.descendants.size}")
+                    if (preflight.descendants.isNotEmpty()) {
+                        Text("This action cascades to spawned descendants.")
+                    }
+                    if (review.action == ThreadLifecycleAction.DELETE) {
+                        Text(
+                            "This permanently deletes the selected thread and affected descendants. " +
+                                "It cannot be undone.",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    preflight.blockingReason?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                review.error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = preflight?.eligible == true && !review.loading && !review.committing,
+            ) {
+                Text(if (review.committing) "$action…" else action)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss, enabled = !review.committing) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 internal fun DealerUiState.hasUnsettledAction(locator: CodexThreadLocator): Boolean = cards.any {

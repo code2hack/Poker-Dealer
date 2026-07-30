@@ -35,6 +35,19 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlin.coroutines.cancellation.CancellationException
 
+internal val CASCADE_THREAD_SOURCE_KINDS = listOf(
+    "cli",
+    "vscode",
+    "exec",
+    "appServer",
+    "subAgent",
+    "subAgentReview",
+    "subAgentCompact",
+    "subAgentThreadSpawn",
+    "subAgentOther",
+    "unknown",
+)
+
 data class DaemonVersions(
     val status: String?,
     val cliVersion: String?,
@@ -155,6 +168,7 @@ class CodexAppServerSession(
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val requestTimeoutMs: Long = 30_000,
     private val turnInactivityTimeoutMs: Long = 5 * 60_000,
+    private val experimentalApi: Boolean = false,
 ) {
     private var initialized = false
 
@@ -176,7 +190,7 @@ class CodexAppServerSession(
                         put("version", JsonPrimitive("0.1.0-m1"))
                     },
                 )
-                put("capabilities", buildJsonObject { put("experimentalApi", JsonPrimitive(false)) })
+                put("capabilities", buildJsonObject { put("experimentalApi", JsonPrimitive(experimentalApi)) })
             },
         ).jsonObject
         notify("initialized")
@@ -221,6 +235,31 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun threadCascadeList(
+        ancestorThreadId: String,
+        archived: Boolean,
+        cursor: String? = null,
+        limit: Int = 100,
+    ): JsonObject {
+        checkInitialized()
+        check(experimentalApi) { "Descendant filtering is not qualified for this app-server connection" }
+        return actionRequest(
+            "thread/list",
+            buildJsonObject {
+                put("ancestorThreadId", JsonPrimitive(ancestorThreadId))
+                put("limit", JsonPrimitive(limit))
+                put("archived", JsonPrimitive(archived))
+                cursor?.let { put("cursor", JsonPrimitive(it)) }
+                put(
+                    "sourceKinds",
+                    buildJsonArray {
+                        CASCADE_THREAD_SOURCE_KINDS.forEach { add(JsonPrimitive(it)) }
+                    },
+                )
+            },
+        ).jsonObject
+    }
+
     suspend fun threadLoadedListOrNull(): JsonObject? {
         checkInitialized()
         return try {
@@ -259,6 +298,14 @@ class CodexAppServerSession(
         ).jsonObject
     }
 
+    suspend fun threadReadMetadata(threadId: String): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "thread/read",
+            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
+        ).jsonObject
+    }
+
     suspend fun configRead(workingDirectory: String): JsonObject {
         checkInitialized()
         return actionRequest(
@@ -294,6 +341,30 @@ class CodexAppServerSession(
                 put("threadId", JsonPrimitive(threadId))
                 put("name", JsonPrimitive(name))
             },
+        )
+    }
+
+    suspend fun threadArchive(threadId: String) {
+        checkInitialized()
+        actionRequest(
+            "thread/archive",
+            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
+        )
+    }
+
+    suspend fun threadUnarchive(threadId: String): JsonObject {
+        checkInitialized()
+        return actionRequest(
+            "thread/unarchive",
+            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
+        ).jsonObject
+    }
+
+    suspend fun threadDelete(threadId: String) {
+        checkInitialized()
+        actionRequest(
+            "thread/delete",
+            buildJsonObject { put("threadId", JsonPrimitive(threadId)) },
         )
     }
 

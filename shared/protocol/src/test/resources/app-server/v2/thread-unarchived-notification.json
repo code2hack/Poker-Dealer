@@ -1,0 +1,6 @@
+{
+  "method": "thread/unarchived",
+  "params": {
+    "threadId": "thr_root"
+  }
+}

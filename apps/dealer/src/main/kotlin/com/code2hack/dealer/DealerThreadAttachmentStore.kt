@@ -33,6 +33,14 @@ class DealerThreadAttachmentStore(context: Context) {
         dao.delete(locator.hostId, locator.threadId)
     }
 
+    suspend fun purge(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
+        database.runInTransaction {
+            dao.delete(locator.hostId, locator.threadId)
+            drafts.delete(locator.hostId, locator.threadId)
+            actions.delete(locator.hostId, locator.threadId)
+        }
+    }
+
     suspend fun readDrafts(): Map<CodexThreadLocator, String> = withContext(Dispatchers.IO) {
         drafts.readAll().associate { CodexThreadLocator(it.hostId, it.threadId) to it.text }
     }
