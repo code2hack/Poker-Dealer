@@ -171,3 +171,9 @@ Do not access Termux-private files or Unix sockets directly, route Termux throug
 - Pin native/Go dependencies and make Android ARM64 packaging reproducible.
 - Avoid claims of real-hardware, embedded-tailnet, Termux-daemon, VPN-coexistence, or multi-version compatibility without recorded evidence.
 - Leave the repository in a state where another fresh Codex session can determine the active design solely from the files on the default branch.
+
+## Privileged commands
+
+When a required command needs `sudo`, open a new tmux pane below the current pane, run the command
+there, and wait for the user to enter the password. Do not silently replace it with a user-level
+fallback.

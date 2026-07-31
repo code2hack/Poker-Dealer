@@ -172,7 +172,8 @@ Requirements:
 - JDK 21.
 - Android SDK platform 35.
 - Android NDK `23.1.7779620`.
-- `curl`, `sha256sum`, and `unzip`.
+- `curl` and `sha256sum`.
+- Docker on Linux ARM64 build hosts.
 
 Run local gates:
 
@@ -201,6 +202,17 @@ pinned in `native/embedded-tailnet/versions.env`; Tailscale is pinned by `go.mod
 verifies the Go archive SHA-256 and Go module checksums, then produces only
 `jni/arm64-v8a/libgojni.so`. `ANDROID_NDK_HOME` may point at the pinned NDK when it is not installed
 below `ANDROID_HOME`.
+
+On DGX Spark, the same build entry point runs transparently in the pinned `linux/amd64` Docker builder
+required by `gomobile` and the Android NDK's `linux-x86_64` host tools. Its preflight installs only the
+amd64 binfmt registration through a pinned privileged Docker helper when the registration is absent or
+not container-safe, including after a host reboot. The container uses host networking and forwards the
+host HTTP proxy variables so Spark's loopback proxy remains reachable. It does not use u4090 or CI
+artifacts:
+
+```sh
+ANDROID_HOME=/home/code2hack/Android/Sdk ./native/embedded-tailnet/build.sh
+```
 
 A clean native and Dealer build is:
 
