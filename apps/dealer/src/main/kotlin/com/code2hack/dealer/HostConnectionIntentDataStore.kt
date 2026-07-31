@@ -67,13 +67,24 @@ class DealerHostConnectionProfileStore(
             put("loopbackSshPort", config.loopbackSshPort)
         }.toString()
         context.hostConnectionIntentDataStore.edit {
-            it[stringPreferencesKey("profile.${config.hostId}")] = profile
+            it[profileKey(config.hostId)] = profile
         }
     }
 
+    suspend fun hasConfiguredTailnetRoute(hostId: String): Boolean =
+        context.hostConnectionIntentDataStore.data
+            .map { it[profileKey(hostId)] }
+            .first()
+            ?.let { raw ->
+                Json.parseToJsonElement(raw).jsonObject["tailnetHost"]
+                    ?.jsonPrimitive
+                    ?.content
+                    ?.isNotBlank() == true
+            } == true
+
     suspend fun load(hostId: String): StoredHostConnection {
         val raw = context.hostConnectionIntentDataStore.data
-            .map { it[stringPreferencesKey("profile.$hostId")] }
+            .map { it[profileKey(hostId)] }
             .first()
             ?: error("$hostId: connection settings unavailable")
         val profile = Json.parseToJsonElement(raw).jsonObject
@@ -149,6 +160,8 @@ class DealerHostConnectionProfileStore(
 
     private fun credentialsFile(hostId: String) =
         context.filesDir.resolve("host-connection-${hostId.replace(Regex("[^a-zA-Z0-9._-]"), "_")}.bin")
+
+    private fun profileKey(hostId: String) = stringPreferencesKey("profile.$hostId")
 
     private fun encryptionKey(): SecretKey = synchronized(KeyLock) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
