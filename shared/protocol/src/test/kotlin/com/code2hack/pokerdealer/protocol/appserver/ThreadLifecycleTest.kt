@@ -43,6 +43,25 @@ class ThreadLifecycleTest {
     }
 
     @Test
+    fun `lifecycle readback includes every source without an ancestor filter`() = runTest {
+        val peer = LifecycleFixturePeer(
+            listOf(
+                "thread-lifecycle-active-request.json" to "thread-lifecycle-active-response.json",
+                "thread-lifecycle-archived-request.json" to "thread-lifecycle-archived-response.json",
+            ),
+        )
+        val session = CodexAppServerSession(peer, experimentalApi = true)
+        session.initialize()
+
+        val rows = HostThreadLifecycle(session, descendantFilterQualified = true)
+            .discoverAllSources("spark")
+
+        assertEquals(listOf("thr_exec", "thr_subagent"), rows.map { it.locator.threadId })
+        assertEquals(listOf(false, true), rows.map { it.archived })
+        assertEquals(2, peer.checkedFixtures.size)
+    }
+
+    @Test
     fun `unqualified filter fails before sending ancestorThreadId`() = runTest {
         val peer = LifecycleFixturePeer(emptyList())
         val session = CodexAppServerSession(peer)

@@ -1,0 +1,14 @@
+{
+  "id": 1,
+  "result": {
+    "data": [
+      {
+        "id": "thr_exec",
+        "source": "exec",
+        "status": {"type": "notLoaded"},
+        "ephemeral": false
+      }
+    ],
+    "nextCursor": null
+  }
+}

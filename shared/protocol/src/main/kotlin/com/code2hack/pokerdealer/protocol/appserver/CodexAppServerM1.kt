@@ -236,7 +236,7 @@ class CodexAppServerSession(
     }
 
     suspend fun threadCascadeList(
-        ancestorThreadId: String,
+        ancestorThreadId: String?,
         archived: Boolean,
         cursor: String? = null,
         limit: Int = 100,
@@ -246,7 +246,7 @@ class CodexAppServerSession(
         return actionRequest(
             "thread/list",
             buildJsonObject {
-                put("ancestorThreadId", JsonPrimitive(ancestorThreadId))
+                ancestorThreadId?.let { put("ancestorThreadId", JsonPrimitive(it)) }
                 put("limit", JsonPrimitive(limit))
                 put("archived", JsonPrimitive(archived))
                 cursor?.let { put("cursor", JsonPrimitive(it)) }

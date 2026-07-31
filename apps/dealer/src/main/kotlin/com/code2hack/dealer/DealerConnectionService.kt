@@ -62,12 +62,12 @@ import com.code2hack.pokerdealer.protocol.appserver.AppServerStructuredCardProje
 import com.code2hack.pokerdealer.protocol.appserver.AppServerRequest
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalParseResult
 import com.code2hack.pokerdealer.protocol.appserver.CommandApprovalProtocol
+import com.code2hack.pokerdealer.protocol.appserver.CodexAppServerSession
 import com.code2hack.pokerdealer.protocol.appserver.COMMAND_APPROVAL_METHOD
 import com.code2hack.pokerdealer.protocol.appserver.FILE_APPROVAL_METHOD
 import com.code2hack.pokerdealer.protocol.appserver.FileApprovalParseResult
 import com.code2hack.pokerdealer.protocol.appserver.FileApprovalProtocol
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcRemoteException
-import com.code2hack.pokerdealer.protocol.appserver.ThreadDiscoveryLocalState
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.RetainedCardStore
 import com.code2hack.pokerdealer.protocol.appserver.USER_INPUT_REQUEST_METHOD
@@ -831,31 +831,8 @@ class DealerConnectionService : Service() {
                 )
             }
             try {
-                val discovered = HostThreadDiscovery(appServer).discover(hostId) { locator ->
-                    val state = mutableState.value
-                    val existing = state.threads[locator]
-                    ThreadDiscoveryLocalState(
-                        attached = locator in state.threadAttachments.attached,
-                        unreadCount = existing?.unreadCount ?: 0,
-                        intendedControlSurface = if (state.threadAttachments.hasDealerClaim(locator)) {
-                            ControlSurface.DEALER
-                        } else {
-                            ControlSurface.NONE
-                        },
-                    )
-                }
-                mutableState.update { state ->
-                    val rows = discovered.associateBy(DiscoveredThread::locator).mapValues { (locator, row) ->
-                        row.copy(
-                            activeTurnId = state.threads[locator]?.activeTurnId
-                                .takeIf { row.workState == ThreadWorkState.BUSY },
-                        )
-                    }
-                    state.copy(
-                        threads = state.threads.filterKeys { it.hostId != hostId } +
-                            rows,
-                    )
-                }
+                val discovered = HostThreadDiscovery(appServer).discover(hostId)
+                mutableState.update { it.withDiscoveredThreads(hostId, discovered) }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -1219,7 +1196,25 @@ class DealerConnectionService : Service() {
                     ThreadLifecycleAction.DELETE -> appServer.threadDelete(review.locator.threadId)
                 }
                 mutableState.update { it.copy(lifecycleReview = null, error = null) }
-                refreshThreads(review.locator.hostId)
+                try {
+                    reconcileThreadLifecycleReadback(
+                        review.action,
+                        fresh.affected.mapTo(mutableSetOf(), DiscoveredThread::locator),
+                        review.locator,
+                        appServer,
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    mutableState.update {
+                        it.copy(
+                            error = "Host accepted ${review.action.name.lowercase()} but " +
+                                "authoritative reconciliation failed: " +
+                                (failure.message ?: failure::class.java.simpleName),
+                        )
+                    }
+                    refreshThreads(review.locator.hostId)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -1234,6 +1229,50 @@ class DealerConnectionService : Service() {
                 refreshThreads(review.locator.hostId)
             }
         }
+    }
+
+    private suspend fun reconcileThreadLifecycleReadback(
+        action: ThreadLifecycleAction,
+        reviewedLocators: Set<CodexThreadLocator>,
+        selectedLocator: CodexThreadLocator,
+        appServer: CodexAppServerSession,
+    ) {
+        val lifecycleRows = HostThreadLifecycle(appServer, descendantFilterQualified = true)
+            .discoverAllSources(selectedLocator.hostId)
+        val confirmed = confirmedLifecycleLocators(action, reviewedLocators, lifecycleRows)
+        require(selectedLocator in confirmed) {
+            "authoritative readback did not confirm the selected thread"
+        }
+        val discovered = HostThreadDiscovery(appServer).discover(selectedLocator.hostId)
+        attachmentMutex.withLock {
+            val cleanupFailures = confirmed.mapNotNull { locator ->
+                runCatching {
+                    when (action) {
+                        ThreadLifecycleAction.ARCHIVE -> threadAttachmentStore.detach(locator)
+                        ThreadLifecycleAction.DELETE -> {
+                            threadAttachmentStore.purge(locator)
+                            retainedCardStore.delete(locator)
+                        }
+                    }
+                }.exceptionOrNull()
+            }
+            mutableState.update { state ->
+                val reconciled = when (action) {
+                    ThreadLifecycleAction.ARCHIVE -> state.withArchivedThreads(confirmed)
+                    ThreadLifecycleAction.DELETE -> state.withDeletedThreads(confirmed)
+                }.withDiscoveredThreads(selectedLocator.hostId, discovered)
+                reconciled.copy(
+                    error = cleanupFailures.firstOrNull()?.let { failure ->
+                        "Host confirmed ${action.name.lowercase()} but local cleanup failed: " +
+                            (failure.message ?: failure::class.java.simpleName)
+                    } ?: reconciled.error,
+                )
+            }
+        }
+        threadNotificationTracker.reconciled(
+            selectedLocator.hostId,
+            mutableState.value.threads.values,
+        )
     }
 
     fun dismissThreadLifecycle() {
@@ -3047,6 +3086,40 @@ internal fun DealerUiState.withDeletedThreads(
         cards = cards.filterNot { it.conversationId in conversationIds },
         browsedThread = browsedThread?.takeUnless { it in locators },
     )
+}
+
+internal fun confirmedLifecycleLocators(
+    action: ThreadLifecycleAction,
+    reviewedLocators: Set<CodexThreadLocator>,
+    discovered: List<DiscoveredThread>,
+): Set<CodexThreadLocator> {
+    val rows = discovered.associateBy(DiscoveredThread::locator)
+    return reviewedLocators.filterTo(mutableSetOf()) { locator ->
+        when (action) {
+            ThreadLifecycleAction.ARCHIVE -> rows[locator]?.archived == true
+            ThreadLifecycleAction.DELETE -> locator !in rows
+        }
+    }
+}
+
+internal fun DealerUiState.withDiscoveredThreads(
+    hostId: String,
+    discovered: List<DiscoveredThread>,
+): DealerUiState {
+    val rows = discovered.associateBy(DiscoveredThread::locator).mapValues { (locator, row) ->
+        row.copy(
+            activeTurnId = threads[locator]?.activeTurnId
+                .takeIf { row.workState == ThreadWorkState.BUSY },
+            attached = locator in threadAttachments.attached,
+            unreadCount = threads[locator]?.unreadCount ?: row.unreadCount,
+            intendedControlSurface = if (threadAttachments.hasDealerClaim(locator)) {
+                ControlSurface.DEALER
+            } else {
+                ControlSurface.NONE
+            },
+        )
+    }
+    return copy(threads = threads.filterKeys { it.hostId != hostId } + rows)
 }
 
 internal fun DealerUiState.withCreatedThread(

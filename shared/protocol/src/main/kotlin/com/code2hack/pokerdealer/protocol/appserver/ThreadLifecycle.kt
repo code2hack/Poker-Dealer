@@ -26,15 +26,25 @@ class HostThreadLifecycle(
             .toLifecycleThread(hostId, selectedArchived)
         require(selected.locator.threadId == threadId) { "thread/read returned a different thread" }
         val descendants = buildList {
-            addAll(descendantPages(hostId, threadId, archived = false))
-            addAll(descendantPages(hostId, threadId, archived = true))
+            addAll(pages(hostId, threadId, archived = false))
+            addAll(pages(hostId, threadId, archived = true))
         }.distinctBy(DiscoveredThread::locator)
         return ThreadCascadePreflight(selected, descendants)
     }
 
-    private suspend fun descendantPages(
+    suspend fun discoverAllSources(hostId: String): List<DiscoveredThread> {
+        check(descendantFilterQualified) {
+            "Lifecycle readback unavailable: all-source filtering is not qualified for this host/app-server version"
+        }
+        return buildList {
+            addAll(pages(hostId, ancestorThreadId = null, archived = false))
+            addAll(pages(hostId, ancestorThreadId = null, archived = true))
+        }.distinctBy(DiscoveredThread::locator)
+    }
+
+    private suspend fun pages(
         hostId: String,
-        ancestorThreadId: String,
+        ancestorThreadId: String?,
         archived: Boolean,
     ): List<DiscoveredThread> = buildList {
         var cursor: String? = null

@@ -10,6 +10,7 @@ import com.code2hack.pokerdealer.domain.FileApprovalState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.ThreadAttachmentState
+import com.code2hack.pokerdealer.domain.ThreadLifecycleAction
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.ThreadWorkState
@@ -453,6 +454,46 @@ class DealerUiStateTest {
         assertEquals(mapOf(otherHost to "draft-u4090"), deleted.threadActions.drafts)
         assertEquals(listOf("u4090/same-id"), deleted.cards.map { it.conversationId })
         assertEquals(setOf(otherHost), deleted.knownBlockingRequestThreads)
+    }
+
+    @Test
+    fun lifecycleReadbackReconcilesOnlyTheLocatorsTheServerActuallyChanged() {
+        val root = CodexThreadLocator("spark", "root")
+        val child = CodexThreadLocator("spark", "child")
+        val unrelated = CodexThreadLocator("spark", "unrelated")
+        val initial = lifecycleState(root, child, unrelated)
+        val afterArchive = listOf(
+            initial.threads.getValue(root).copy(archived = true),
+            initial.threads.getValue(child),
+            initial.threads.getValue(unrelated),
+        )
+        val archived = confirmedLifecycleLocators(
+            ThreadLifecycleAction.ARCHIVE,
+            setOf(root, child),
+            afterArchive,
+        )
+
+        assertEquals(setOf(root), archived)
+        assertEquals(
+            setOf(child, unrelated),
+            initial.withArchivedThreads(archived).threadAttachments.attached,
+        )
+
+        val afterDelete = listOf(
+            initial.threads.getValue(child),
+            initial.threads.getValue(unrelated),
+        )
+        val deleted = confirmedLifecycleLocators(
+            ThreadLifecycleAction.DELETE,
+            setOf(root, child),
+            afterDelete,
+        )
+
+        assertEquals(setOf(root), deleted)
+        assertEquals(
+            setOf(child, unrelated),
+            initial.withDeletedThreads(deleted).threadAttachments.attached,
+        )
     }
 
     private fun lifecycleState(vararg locators: CodexThreadLocator): DealerUiState {
