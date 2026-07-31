@@ -47,6 +47,12 @@ Poker–Dealer is a private mobile and wearable Codex client.
 - The host-local Codex TUI should use the same daemon-backed app-server.
 - A durable conversation identity is `(hostId, threadId)`.
 
+## Current host availability
+
+u4090 is unavailable and MUST NOT be used for builds, tests, artifact production, CI, fallback,
+or any other project task until the user explicitly re-enables it. Current work may use DGX Spark
+and Fold6 Termux only.
+
 ## Non-negotiable decisions
 
 Do not reopen these decisions unless the user explicitly requests an architecture change:
