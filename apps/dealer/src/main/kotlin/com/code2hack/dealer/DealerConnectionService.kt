@@ -152,9 +152,10 @@ class DealerConnectionService : Service() {
         threadAttachmentStore = DealerThreadAttachmentStore(this)
         retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
         stateRecoveryStore = DealerStateRecoveryStore(noBackupFilesDir.resolve("recovery"))
+        val hostConnectionIntents = HostConnectionIntentDataStore(this)
         hostSessions = HostSessionManager(
             hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
-            intentStore = HostConnectionIntentDataStore(this),
+            intentStore = hostConnectionIntents,
             connector = InitializedHostSessionConnector { hostId ->
                 synchronized(hostSessionConfigs) { hostSessionConfigs[hostId] }
                     ?: cacheHostSession(hostConnectionProfiles.load(hostId))
@@ -187,6 +188,12 @@ class DealerConnectionService : Service() {
                 error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
             )
             startRecoveryPersistence(recovered.pendingRequestsWritable)
+            if (hostConnectionIntents.readEnabledHostIds().any {
+                    hostConnectionProfiles.hasConfiguredTailnetRoute(it)
+                }
+            ) {
+                startEmbeddedTailnet()
+            }
             hostSessions.start()
             hostSessions.state.collect { sessions ->
                 mutableState.update { it.copy(hostSessions = sessions) }
