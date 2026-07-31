@@ -907,7 +907,11 @@ class DealerConnectionService : Service() {
         }
     }
 
-    fun resumeThread(selection: ThreadStartSelection, takeControl: Boolean) {
+    fun setResumeControlClaim(claimed: Boolean) {
+        mutableState.update { it.withResumeControlClaim(claimed) }
+    }
+
+    fun resumeThread(selection: ThreadStartSelection) {
         val review = mutableState.value.resumeThread ?: return
         if (review.resuming) return
         val catalog = review.catalog ?: run {
@@ -925,18 +929,9 @@ class DealerConnectionService : Service() {
             return
         }
         val controlBearing = validated.hasControlOverrides()
-        val currentWorkState = mutableState.value.threads[review.locator]?.workState
-        if (controlBearing && (!takeControl || currentWorkState != ThreadWorkState.READY)) {
+        mutableState.value.resumeControlError(validated)?.let { error ->
             mutableState.update {
-                it.copy(
-                    resumeThread = it.resumeThread?.copy(
-                        error = if (currentWorkState == ThreadWorkState.READY) {
-                            "Take Dealer control before applying Resume overrides"
-                        } else {
-                            "Resume overrides require a READY thread"
-                        },
-                    ),
-                )
+                it.copy(resumeThread = it.resumeThread?.copy(error = error))
             }
             return
         }
@@ -976,7 +971,7 @@ class DealerConnectionService : Service() {
                         it.withResumedThread(
                             review.locator,
                             validated,
-                            grantControl = controlBearing,
+                            grantControl = controlBearing && review.controlClaimed,
                         )
                     }
                     browseThread(review.locator)
@@ -1597,6 +1592,7 @@ data class ResumeThreadUiState(
     val observedWorkingDirectories: List<String>,
     val workingDirectory: String,
     val catalog: ThreadStartCatalog? = null,
+    val controlClaimed: Boolean = false,
     val loading: Boolean = false,
     val resuming: Boolean = false,
     val error: String? = null,
@@ -1609,6 +1605,27 @@ internal fun DealerUiState.withThreadCreationFailure(message: String): DealerUiS
 internal fun DealerUiState.withThreadResumeFailure(message: String): DealerUiState = copy(
     resumeThread = resumeThread?.copy(resuming = false, error = message),
 )
+
+internal fun DealerUiState.withResumeControlClaim(claimed: Boolean): DealerUiState {
+    val review = resumeThread ?: return this
+    val workState = threads[review.locator]?.workState
+    return if (claimed && workState != ThreadWorkState.READY) {
+        copy(resumeThread = review.copy(error = "Resume overrides require a READY thread"))
+    } else {
+        copy(resumeThread = review.copy(controlClaimed = claimed, error = null))
+    }
+}
+
+internal fun DealerUiState.resumeControlError(selection: ThreadStartSelection): String? {
+    if (!selection.hasControlOverrides()) return null
+    val review = resumeThread ?: return "Review Resume settings before attaching"
+    return when {
+        threads[review.locator]?.workState != ThreadWorkState.READY ->
+            "Resume overrides require a READY thread"
+        !review.controlClaimed -> "Take Dealer control before applying Resume overrides"
+        else -> null
+    }
+}
 
 internal fun DealerUiState.withCreatedThread(
     locator: CodexThreadLocator,

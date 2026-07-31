@@ -121,9 +121,8 @@ class DealerActivity : ComponentActivity() {
                         onReviewResumeThread = { locator, cwd ->
                             service?.reviewResumeThread(locator, cwd)
                         },
-                        onResumeThread = { selection, takeControl ->
-                            service?.resumeThread(selection, takeControl)
-                        },
+                        onSetResumeControlClaim = { service?.setResumeControlClaim(it) },
+                        onResumeThread = { service?.resumeThread(it) },
                         onDismissResumeThread = { service?.dismissResumeThread() },
                         onBrowseThread = { service?.browseThread(it) },
                         onAttachThread = { service?.attachThread(it) },
@@ -295,7 +294,8 @@ private fun DealerApp(
     onCreateThread: (ThreadStartSelection) -> Unit,
     onDismissNewThread: () -> Unit,
     onReviewResumeThread: (CodexThreadLocator, String) -> Unit,
-    onResumeThread: (ThreadStartSelection, Boolean) -> Unit,
+    onSetResumeControlClaim: (Boolean) -> Unit,
+    onResumeThread: (ThreadStartSelection) -> Unit,
     onDismissResumeThread: () -> Unit,
     onBrowseThread: (CodexThreadLocator) -> Unit,
     onAttachThread: (CodexThreadLocator) -> Unit,
@@ -792,7 +792,7 @@ private fun DealerApp(
             title = "New thread on ${review.hostId}",
             confirmText = "Create empty thread",
             onReview = { onReviewNewThread(review.hostId, it) },
-            onConfirm = { selection, _ -> onCreateThread(selection) },
+            onConfirm = onCreateThread,
             onDismiss = onDismissNewThread,
         )
     }
@@ -809,6 +809,8 @@ private fun DealerApp(
             confirmText = "Attach",
             workState = state.threads[review.locator]?.workState,
             requireControlClaimForOverrides = true,
+            controlClaimed = review.controlClaimed,
+            onControlClaimChange = onSetResumeControlClaim,
             onReview = { onReviewResumeThread(review.locator, it) },
             onConfirm = onResumeThread,
             onDismiss = onDismissResumeThread,
@@ -829,8 +831,10 @@ private fun ThreadSettingsDialog(
     confirmText: String,
     workState: ThreadWorkState? = null,
     requireControlClaimForOverrides: Boolean = false,
+    controlClaimed: Boolean = false,
+    onControlClaimChange: (Boolean) -> Unit = {},
     onReview: (String) -> Unit,
-    onConfirm: (ThreadStartSelection, Boolean) -> Unit,
+    onConfirm: (ThreadStartSelection) -> Unit,
     onDismiss: () -> Unit,
 ) {
     var workingDirectory by remember(hostId, initialWorkingDirectory) {
@@ -840,9 +844,8 @@ private fun ThreadSettingsDialog(
     var modelOverride by remember(catalog) { mutableStateOf("") }
     var reasoningEffort by remember(catalog) { mutableStateOf<String?>(null) }
     var permissionPreset by remember(catalog) { mutableStateOf(PermissionPreset.HOST_DEFAULT) }
-    var takeControl by remember(catalog) { mutableStateOf(false) }
     val controlOverridesEnabled = !requireControlClaimForOverrides ||
-        (workState == ThreadWorkState.READY && takeControl)
+        (workState == ThreadWorkState.READY && controlClaimed)
     val selectedModel = modelOverride.ifBlank { catalog?.defaultModel.orEmpty() }
     val reasoningChoices = catalog?.models
         ?.singleOrNull { it.model == selectedModel }
@@ -885,8 +888,8 @@ private fun ThreadSettingsDialog(
                     if (requireControlClaimForOverrides) {
                         OutlinedButton(
                             onClick = {
-                                takeControl = !takeControl
-                                if (!takeControl) {
+                                onControlClaimChange(!controlClaimed)
+                                if (controlClaimed) {
                                     providerOverride = ""
                                     modelOverride = ""
                                     permissionPreset = PermissionPreset.HOST_DEFAULT
@@ -896,7 +899,7 @@ private fun ThreadSettingsDialog(
                                 !submitting,
                         ) {
                             Text(
-                                if (takeControl) {
+                                if (controlClaimed) {
                                     "Dealer control selected"
                                 } else {
                                     "Take Dealer control for overrides"
@@ -1014,7 +1017,6 @@ private fun ThreadSettingsDialog(
                             reasoningEffort = reasoningEffort,
                             permissionPreset = permissionPreset,
                         ),
-                        takeControl,
                     )
                 },
                 enabled = catalog?.workingDirectory == workingDirectory &&

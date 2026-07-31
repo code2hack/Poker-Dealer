@@ -250,6 +250,34 @@ class DealerUiStateTest {
     }
 
     @Test
+    fun resumeOverridesRequireAnExistingReadyControlClaim() {
+        val locator = CodexThreadLocator("spark", "loaded")
+        val selection = ThreadStartSelection("/work/repo", modelOverride = "model")
+        val initial = DealerUiState(
+            threads = mapOf(
+                locator to DiscoveredThread(
+                    locator = locator,
+                    workingDirectory = "/work/repo",
+                    workState = ThreadWorkState.READY,
+                ),
+            ),
+            resumeThread = ResumeThreadUiState(
+                locator = locator,
+                observedWorkingDirectories = listOf("/work/repo"),
+                workingDirectory = "/work/repo",
+            ),
+        )
+
+        assertEquals(
+            "Take Dealer control before applying Resume overrides",
+            initial.resumeControlError(selection),
+        )
+        val claimed = initial.withResumeControlClaim(true)
+        assertEquals(true, claimed.resumeThread?.controlClaimed)
+        assertEquals(null, claimed.resumeControlError(selection))
+    }
+
+    @Test
     fun inheritedResumeAttachesAsObserverWhileVerifiedOverridesGrantControl() {
         val locator = CodexThreadLocator("u4090", "loaded")
         val initial = DealerUiState(
