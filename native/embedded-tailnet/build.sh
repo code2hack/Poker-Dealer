@@ -58,7 +58,10 @@ bin_dir="${toolchains_dir}/bin"
 mkdir -p "${toolchains_dir}" "${bin_dir}" "${module_dir}/build"
 
 if [ ! -x "${go_root}/bin/go" ]; then
-    curl -fL --retry 3 -C - "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "${go_archive}"
+    if ! printf '%s  %s\n' "${GO_LINUX_AMD64_SHA256}" "${go_archive}" |
+        sha256sum -c - >/dev/null 2>&1; then
+        curl -fL --retry 3 -C - "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o "${go_archive}"
+    fi
     printf '%s  %s\n' "${GO_LINUX_AMD64_SHA256}" "${go_archive}" | sha256sum -c -
     temp_dir=$(mktemp -d "${toolchains_dir}/go.XXXXXX")
     trap 'rm -rf "${temp_dir}"' EXIT INT TERM
