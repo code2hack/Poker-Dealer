@@ -246,11 +246,13 @@ Poker is authoritative only for:
 
 - its current viewport;
 - local scrolling and navigation;
-- composition state;
-- explicitly persisted pending Morse/ASR text;
+- process-local composition state not yet acknowledged by Dealer;
+- a temporary captured photo until Dealer durably acknowledges it;
 - the user's direct semantic action before Dealer accepts it.
 
-Poker MUST NOT become the authoritative store for thread history or delivery state.
+Poker MUST NOT become the authoritative store for thread history, durable
+drafts or photo assets, or delivery state. Only its pairing identity persists;
+Dealer resynchronizes all other recoverable state after Poker restarts.
 
 ---
 
@@ -650,19 +652,116 @@ M3 MUST produce deterministic pile ordering and focus metadata; M4 renders it on
 BUSY | ATTENTION_REQUIRED | READY
 ```
 
-Busy piles retain stable attachment order. Within `ATTENTION_REQUIRED` and `READY`, the oldest transition into that state comes first; equal transition times use stable attachment order. Automatic focus priority is the first Attention pile, then the first Ready pile. Busy piles remain reachable through manual navigation.
+Poker MUST NOT present a separate attached-thread list. The attached
+host-qualified card piles themselves form one horizontal line in the
+deterministic order above. `RIGHT` moves to the next pile and `LEFT` moves to
+the previous pile. At the first or last pile, movement toward the missing
+neighbor stops; pile navigation never wraps around.
+
+Busy piles are ordered by Busy activity from oldest to newest. A transition into
+`BUSY` or an accepted Send or Steer refreshes that pile's Busy activity and
+moves it to the right edge of the Busy group, including a Steer accepted while
+the pile was already Busy. Streaming output alone MUST NOT reorder it. Piles
+without observed Busy activity and equal activity values use stable attachment
+order.
+
+Within `ATTENTION_REQUIRED` and `READY`, the oldest transition into that state
+comes first; equal transition times use stable attachment order. Automatic
+focus priority is the first Attention pile, then the first Ready pile. Busy
+piles remain reachable through manual navigation.
+
+Work-state reordering MUST preserve visible focus by
+`(hostId, threadId)`, not by horizontal index. The focused pile may move and
+its neighbors may change, but a visible HUD remains on that pile. Automatic
+focus selection applies when the HUD is hidden or when another explicit rule
+advances focus.
 
 When the HUD is already visible, a newly Attention or Ready pile MUST NOT steal focus; Poker indicates the state change in place. When the HUD is hidden, a new transition into Attention or Ready wakes it and selects the highest-priority eligible pile. Existing eligible piles MUST NOT immediately undo a user's manual Hide.
 
 Poker MUST offer Manual Hide in every thread work state. Manual Wake selects the oldest Attention pile, then the oldest Ready pile. If every available pile is Busy, it restores the last viewed attached pile when possible, otherwise the first attached Busy pile.
 
-After the focused pile accepts a prompt or steer, it is or remains Busy and focus advances to the first Attention pile, otherwise the first Ready pile. If neither exists, the HUD hides until a later eligible transition or Manual Wake. Failed and interrupted outcomes wake and focus like Ready. Unavailable piles retain cached history for manual viewing but are excluded from automatic focus.
+After the focused pile accepts a prompt or steer, it is or remains Busy and the
+HUD stays visible on the same `(hostId, threadId)`. Focus remains inside that
+pile's now-empty composer input; Poker MUST NOT advance to an Attention or Ready
+pile or hide merely because the action was accepted.
+
+Failed and interrupted outcomes wake and focus like Ready. Unavailable piles
+retain cached history for manual viewing but are excluded from automatic focus.
 
 ---
 
 ## 10. Input and semantic actions
 
 Dealer MUST support reviewed turn start, turn steering when accepted, interruption, supported user-input answers, approval resolution, and taking control on phone.
+
+### 10.1 Canonical Poker operations
+
+Poker interaction logic MUST consume source-neutral operations rather than
+raw Rokid or Bluetooth events. The initial Rokid mappings are:
+
+| Operation | Rokid built-in interaction |
+| --- | --- |
+| `DOWN` | single-finger swipe forward on the touch panel |
+| `UP` | single-finger swipe backward on the touch panel |
+| `RIGHT` | double-finger swipe forward on the touch panel |
+| `LEFT` | double-finger swipe backward on the touch panel |
+| `FN` | function button |
+| `TAP` | single-finger tap on the touch panel |
+| `TAPTAP` | dual-finger tap on the touch panel |
+
+A Bluetooth remote adapter MAY map its messages to the same operations. Raw
+controller messages and vendor event types MUST NOT leak into pile, card, or
+input-mode logic.
+
+While the HUD is visible, `TAPTAP` performs Manual Hide. While it is hidden,
+`TAP` performs Manual Wake using the accepted Attention-then-Ready focus
+priority. M4 does not require a separate on-screen Hide control.
+
+While the HUD is visible in navigation mode, `TAP` toggles the focused card's
+collapsed or expanded details when that card supports expansion. It does
+nothing to a card without an expandable presentation.
+
+`FN` is reserved and has no behavior in M4. Its short-press and hold behavior
+begin in M5.
+
+### 10.2 Poker pile browsing in M4
+
+One card pile is treated as zero or more history cards followed by its newest
+bottom card and then the thread composer when ordinary input is available.
+Every unresolved server-request card owns its own request panel immediately
+after that card, so concurrent requests remain independently reachable.
+
+In navigation mode, `DOWN` and `UP` normally scroll the focused card. If the
+HUD bottom is already at that card's end, another `DOWN` jumps to the next
+card's end rather than its start. If the HUD top is already at that card's
+start, another `UP` jumps to the previous card's start rather than its end. A
+card shorter than the HUD is always at both its start and end, so these
+operations immediately perform the corresponding card jump. An unresolved
+request card is the exception: `DOWN` at its end enters that card's request
+panel instead of jumping to the next card.
+
+At the oldest card's start, `UP` stops. At the bottom card's end, `DOWN` stops
+when no composer or request panel is available. Vertical pile navigation never
+wraps around.
+
+At the end of the bottom card, `DOWN` moves focus into the composer when it is
+available. Entering a composer or request panel starts input mode and shows a
+blinking cursor or highlighted option. When input focus is back at the first
+cursor or option position, `UP` returns to navigation mode at the end of the
+owning card, so one subsequent `DOWN` re-enters the same input surface.
+At the final cursor or option position, `DOWN` stops; input mode never wraps
+or jumps directly into another card.
+
+M4 implements only this input-mode presentation, focus, and navigation seam.
+It MUST NOT enter or submit text, start or steer a turn, or resolve a pending
+request from Poker. M5 activates those semantic actions after their review and
+safety rules are implemented.
+
+Switching piles preserves each pile's focused card, scroll offset, and
+navigation or input mode in Poker process memory. If synchronized state
+removes or changes the focused card, composer, or request panel so the
+saved position is no longer valid, Poker exits stale input focus and
+re-anchors that pile to its newest bottom card.
 
 Dealer's composer is state-sensitive and requires the thread's Dealer control claim:
 
@@ -1014,11 +1113,105 @@ This evidence MUST NOT claim mixed-version compatibility. Spark and u4090 have n
 
 ### M4 — Dealer↔Poker synchronization
 
-Complete when Poker pairs, lists attached host-qualified threads, switches conversations, reads retained/live output, receives work-state transitions that drive the accepted HUD wake/focus behavior, offers Manual Hide in every work state and Manual Wake, reconnects deterministically, and preserves scroll position during live growth.
+Complete when Poker pairs, lays out attached host-qualified card piles horizontally in `BUSY | ATTENTION_REQUIRED | READY` order without a separate thread list, switches piles with `LEFT` and `RIGHT`, implements the accepted navigation/input-mode boundary, reads retained/live output, receives work-state transitions that drive the accepted HUD wake/focus behavior, offers Manual Hide in every work state and Manual Wake, reconnects deterministically, and preserves scroll position during live growth.
 
 ### M5 — Wearable input
 
 Complete when Poker supports reviewed Morse/ASR, start/steer/interrupt, safe limited approvals, and escalation to Dealer.
+
+M5 draft editing, photo capture, and ordinary turn submission apply only while
+focus is in the thread composer. They MUST NOT appear in, mutate, or submit a
+server-request panel; request panels retain their own bounded input and
+resolution rules.
+
+The composer draft is an ordered mixture of text and atomic photo tokens. Poker
+renders each photo token as `📷`, but the token retains the identity of its
+underlying unsent image and MUST remain distinguishable from an ordinary typed
+emoji. Submission serializes the token as an actual image input in its draft
+position; it MUST NOT send the rendering emoji as a substitute for the image.
+Photo capture inserts its token at the current composer cursor and shifts later
+draft content; it does not always append at the end. Deleting a photo token
+deletes its corresponding unsent image.
+
+Poker shows no photo preview in the HUD. It transfers a capture over the
+authenticated Dealer connection, and the `📷` token appears only after Dealer
+has durably stored the image and acknowledged it. Poker then deletes its
+temporary copy. Dealer retains the image while its token exists and throughout
+pending or uncertain submission. Dealer deletes it only when the token is
+deleted, the exact submission is confirmed accepted, or the thread is confirmed
+deleted.
+
+Poker and Dealer MUST preserve the captured image bytes and all embedded
+metadata. They MUST NOT strip metadata, automatically downscale, or re-encode
+the image as part of capture, transfer, draft storage, or submission. Embedded
+location, device, and timestamp metadata therefore remains part of the image
+submitted to Codex when present.
+
+Dealer submits each photo as an inline `image` data URL in the ordered app-server
+input array. Accepted capture formats are PNG, JPEG, WebP, and non-animated GIF;
+Poker–Dealer validates the actual image format and never converts an unsupported
+capture. It MUST NOT use `localImage` or stage files on the execution host
+because Poker, Dealer, and the selected host do not share a filesystem.
+
+Poker–Dealer MUST NOT impose a project-specific photo byte-size or pixel-size
+ceiling unless the user explicitly changes this decision. M5 qualifies the
+unaltered 12-megapixel capture path on Spark and Fold6 Termux and adds mixed
+text/image compatibility fixtures for `turn/start` and `turn/steer`. An
+unsupported or rejected image submission remains visible, retains the exact
+draft and photo assets, and MUST NOT silently fall back to text or emoji alone.
+
+In composer input, `DOWN` moves to the start of the next Unicode word or photo
+token like Vim `w`, and `UP` moves to the previous one like Vim `b`. Each photo
+token is one indivisible word. At the first draft position, another `UP` exits
+to navigation mode at the bottom card's end as specified for M4; at the final
+position, `DOWN` stops. A short `FN` deletes from the cursor through the next
+word-motion boundary like Vim `dw`; deleting a photo token is atomic.
+
+Holding `FN` opens an action wheel, posture highlights one candidate while the
+button remains held, and releasing the button selects it. The M5 wheel offers:
+
+- start Morse typing;
+- start ASR recording;
+- take a photo and insert a token into the current host-qualified thread's
+  unsent composer draft; and
+- perform the context-sensitive Primary action.
+
+The default layout maps left relative roll to Morse, upward relative pitch to
+ASR, right relative roll to Photo, and downward relative pitch to Primary.
+Releasing `FN` inside a small origin dead zone performs no action. Dealer MUST
+allow the four candidate actions to be rearranged among the noncentral sectors
+and synchronize that layout to Poker. Poker MUST keep the synchronized sector
+assignments fixed until Dealer changes the layout. A contextually unavailable
+action disables its sector; it MUST NOT cause the other actions to shift.
+
+Primary is derived when the wheel opens and revalidated when `FN` is released:
+
+- `READY` with a nonempty draft means Send through `turn/start`;
+- `BUSY` with a nonempty draft means Steer through `turn/steer` and its required
+  `expectedTurnId`;
+- `BUSY` with an empty draft is displayed as `ESC` and means semantic Interrupt
+  through `turn/interrupt`; and
+- `READY` with an empty draft, `ATTENTION_REQUIRED`, unknown state, missing
+  control, or a pending or uncertain conflicting action disables Primary.
+
+A draft is empty only when its text is blank and it contains no photo tokens.
+The `ESC` label MUST NOT emit or emulate a terminal Escape key. It reuses the
+turn-ID-bound Interrupt locking, reconciliation, and no-replay rules above.
+
+The wheel captures origin posture when the hold begins and uses relative roll
+and pitch, never absolute head orientation. Its sector thresholds and origin
+dead zone MUST remain tunable and be calibrated on the real glasses.
+The wheel opens only after Android's standard long-press timeout. Releasing
+`FN` before that threshold performs the composer deletion above in ordinary
+composer input. Active ASR and Morse modes retain their own short-press rules;
+outside those three contexts, a short `FN` has no action.
+
+After ASR starts, pressing `FN` again commits the current transcript segment
+and `TAP` abandons it.
+
+In Morse mode, `TAP` enters a dot, `TAPTAP` enters a dash, a short `FN`
+finishes the composition and opens review, and a long `FN` cancels the current
+composition.
 
 M5 design note: consider host-skill name completion while composing Morse input to reduce keystrokes. Until that design is reviewed, earlier milestones pass `$...` mentions as ordinary prompt text and rely on Codex's model-driven skill activation; Dealer does not add structured skill input or skill completion in M3.
 

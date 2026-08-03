@@ -106,8 +106,8 @@ The execution host does not change. Cross-host continuation requires repository 
 ## Authority
 
 - Codex app-server owns threads, turns, items, approvals, command/file-change state, and persisted Codex history.
-- Dealer owns configured hosts, route priority, embedded-tailnet lifecycle, distribution-specific daemon behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, and Poker synchronization.
-- Poker owns only its viewport, composition state, and explicitly persisted pending input.
+- Dealer owns configured hosts, route priority, embedded-tailnet lifecycle, distribution-specific daemon behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, durable composer drafts and photo assets, and Poker synchronization.
+- Poker owns only its process-local viewport, unacknowledged composition/capture state, and the user's direct semantic action before Dealer accepts it. Only its pairing identity persists.
 
 ## Control rule
 
@@ -141,11 +141,25 @@ Termux installation and update behavior is distribution-specific. Dealer must ca
 - **Card:** a Poker-readable presentation unit derived from the Dealer projection. Cards are not the authoritative Codex record.
 - **Card pile:** Poker's ordered card history for one attached host-qualified thread.
 - **Thread work state:** Dealer's projection classifies a discovered or attached host-qualified thread as `BUSY` while its turn progresses, `ATTENTION_REQUIRED` while an active turn is blocked on the user, or `READY` when it can accept a new prompt. Host availability is separate.
+- **Busy activity order:** The oldest-to-newest ordering within the Busy pile group. Entering Busy or accepting Send or Steer moves that pile to the group's right edge; streamed output alone does not reorder it.
 - **Control surface:** the client currently intended to accept human actions for a thread, usually local TUI, Dealer, or Poker-through-Dealer.
 - **Soft-control claim:** Dealer's per-thread, cooperative record that it is the intended human-control surface; it is not an app-server-enforced writer lease.
 - **Thread-management action:** A host-scoped action that changes a thread's identity or lifecycle, such as starting, forking, renaming, archiving, restoring, or deleting it. Dealer is the only Poker–Dealer surface that may initiate one; Poker only receives the resulting synchronized state.
 - **Thread attachment:** Dealer's managed set of host-qualified threads synchronized to Poker. Only Dealer may attach or detach a thread.
-- **Poker HUD visibility:** Poker's local visible or hidden presentation state. Hiding the HUD does not detach a thread, unsubscribe Dealer, or disconnect a host.
+- **Poker pairing:** The one-to-one trust relationship between one Dealer installation and one Poker installation, independent of either installation's current network endpoint. Authenticated reconnection reuses that relationship; trusting a different Dealer requires explicit replacement.
+- **Poker synchronization snapshot:** Dealer's authoritative retained projection sent to establish or rebuild Poker's synchronized state before live updates continue.
+- **Poker operation:** A source-neutral HUD action emitted by either the Rokid's built-in controls or a paired Bluetooth controller. The canonical operations are `DOWN`, `UP`, `RIGHT`, `LEFT`, `FN`, `TAP`, and `TAPTAP`.
+- **Poker action-wheel layout:** Dealer's stable mapping from noncentral relative-head-posture sectors to the available Poker actions. Runtime availability disables a sector without moving the others; the origin dead zone has no action.
+- **Poker Primary action:** The action wheel's state-sensitive draft action: Send for a nonempty Ready composer, Steer for a nonempty Busy composer, or semantic Interrupt when the Busy composer is empty.
+- **Poker navigation mode:** The HUD mode in which `DOWN` and `UP` scroll within or jump among cards in the focused pile.
+- **Poker request panel:** The text-input or decision surface owned by one unresolved server-request card.
+- **Poker input mode:** The HUD mode in which focus has moved from a card into that card's request panel or into the thread composer below the newest card.
+- **Poker composer input:** The ordinary thread-composer form of Poker input mode. Draft editing, photo capture, and turn submission apply only here, never in a request panel.
+- **Draft photo token:** An atomic photo element in an ordered composer draft, rendered on Poker as `📷`. It retains the identity of its underlying unsent image and is distinct from an ordinary typed emoji.
+- **Poker word motion:** Unicode-aware movement among user-visible words and atomic photo tokens in composer input. It borrows Vim's `w`, `b`, and `dw` behavior without emulating terminal keys.
+- **Poker HUD visibility:** Poker's local visible or hidden presentation state, including its focused and last-viewed pile. Dealer supplies synchronized thread facts but does not command the viewport; hiding the HUD does not detach a thread, unsubscribe Dealer, or disconnect a host.
+- **Poker scroll anchor:** Poker's process-local card and reading position within one attached pile. Each pile retains its own anchor and interaction mode so live growth and pile switching do not displace the text being read.
+- **Poker unread state:** A per-pile indication that synchronized content exists beyond its scroll anchor. It clears only while the pile is focused at its newest content and never changes focus by itself.
 
 ## Explicitly abandoned terminology
 
