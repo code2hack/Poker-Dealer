@@ -47,17 +47,38 @@ class WebSocketJsonRpcTest {
     }
 
     @Test
-    fun `websocket bounds a fragmented message across frames`() = runTest {
+    fun `websocket reassembles a fragmented message across frames`() = runTest {
         val stream = MemoryStream(
             serverFrame(fin = false, opcode = 0x1, payload = "1234".toByteArray()) +
                 serverFrame(fin = true, opcode = 0x0, payload = "5678".toByteArray()),
         )
-        val socket = AppServerWebSocket(stream, maxPayloadBytes = 6)
 
-        val failure = runCatching { socket.readText() }.exceptionOrNull()
+        assertEquals("12345678", AppServerWebSocket(stream).readText())
+    }
+
+    @Test
+    fun `websocket sends text above the former eight MiB limit`() = runTest {
+        val stream = CountingStream()
+        val text = "x".repeat(8 * 1_024 * 1_024 + 1)
+
+        AppServerWebSocket(stream, maskFactory = { byteArrayOf(0, 0, 0, 0) }).sendText(text)
+
+        assertEquals(text.length + 14, stream.writtenBytes)
+    }
+
+    @Test
+    fun `websocket rejects a frame beyond JVM array capacity before allocation`() = runTest {
+        val stream = MemoryStream(
+            byteArrayOf(
+                0x81.toByte(), 0x7F,
+                0, 0, 0, 0, 0x80.toByte(), 0, 0, 0,
+            ),
+        )
+
+        val failure = runCatching { AppServerWebSocket(stream).readText() }.exceptionOrNull()
 
         assertTrue(failure is IllegalArgumentException)
-        assertTrue(failure?.message.orEmpty().contains("message exceeds limit"))
+        assertTrue(failure?.message.orEmpty().contains("JVM array capacity"))
     }
 
     @Test
@@ -277,6 +298,16 @@ private class BlockingStream : DuplexByteStream {
     override suspend fun close() {
         closed = true
     }
+}
+
+private class CountingStream : DuplexByteStream {
+    var writtenBytes = 0
+
+    override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int = -1
+    override suspend fun write(buffer: ByteArray, offset: Int, length: Int) {
+        writtenBytes += length
+    }
+    override suspend fun close() = Unit
 }
 
 private class BlockingPeer(

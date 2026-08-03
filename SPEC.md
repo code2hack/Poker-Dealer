@@ -493,7 +493,7 @@ Dealer MUST implement:
 - ping/pong and close handling as needed;
 - fragmented/coalesced transport reads;
 - bounded ingress and egress queues;
-- message-size limits;
+- overflow-safe WebSocket payload-length parsing;
 - clean cancellation and reconnect.
 
 TCP connect, SSH connect and command execution, WebSocket upgrade, app-server request/response, turn-notification inactivity, and reconnect inspection MUST have separate configurable bounds. Cancellation MUST actively close the underlying TCP stream, SSH session, proxy channel, and WebSocket so blocked Java reads return.

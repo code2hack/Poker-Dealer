@@ -43,12 +43,10 @@ class AppServerWebSocket(
     private val hostHeader: String = "localhost",
     private val keyFactory: () -> String = { Base64.getEncoder().encodeToString(WebSocketRandom.bytes(16)) },
     private val maskFactory: () -> ByteArray = { WebSocketRandom.bytes(4) },
-    private val maxPayloadBytes: Long = 8L * 1_024 * 1_024,
     private val maxHeaderBytes: Int = 16 * 1_024,
     private val handshakeTimeoutMs: Long = 10_000,
 ) {
     init {
-        require(maxPayloadBytes in 1..Int.MAX_VALUE.toLong()) { "WebSocket payload limit is invalid" }
         require(maxHeaderBytes > 0) { "WebSocket header limit must be positive" }
         require(handshakeTimeoutMs > 0) { "WebSocket handshake timeout must be positive" }
     }
@@ -94,7 +92,6 @@ class AppServerWebSocket(
 
     suspend fun sendText(text: String) {
         val payload = text.toByteArray(Charsets.UTF_8)
-        require(payload.size.toLong() <= maxPayloadBytes) { "WebSocket payload exceeds limit" }
         writeFrame(opcode = 0x1, payload = payload)
     }
 
@@ -117,23 +114,26 @@ class AppServerWebSocket(
             val masked = second and 0x80 != 0
             require(!masked) { "Server WebSocket frames must not be masked" }
             val length = readPayloadLength(second and 0x7F)
-            require(length <= maxPayloadBytes) { "WebSocket payload exceeds limit" }
+            require(length <= Int.MAX_VALUE.toLong()) { "WebSocket frame exceeds JVM array capacity" }
             if (opcode >= 0x8) {
                 require(fin) { "WebSocket control frames must not be fragmented" }
                 require(length <= 125) { "WebSocket control frame is too large" }
+            }
+            if (opcode == 0x0) {
+                require(message.size().toLong() + length <= Int.MAX_VALUE.toLong()) {
+                    "WebSocket message exceeds JVM array capacity"
+                }
             }
             val payload = readExactly(length.toInt())
 
             when (opcode) {
                 0x0 -> {
                     require(textStarted) { "Unexpected continuation frame" }
-                    require(message.size().toLong() + length <= maxPayloadBytes) { "WebSocket message exceeds limit" }
                     message.write(payload)
                     if (fin) return message.toByteArray().toString(Charsets.UTF_8)
                 }
                 0x1 -> {
                     require(!textStarted) { "Unexpected text frame before fragmented message completed" }
-                    require(length <= maxPayloadBytes) { "WebSocket message exceeds limit" }
                     textStarted = true
                     message.write(payload)
                     if (fin) return message.toByteArray().toString(Charsets.UTF_8)
