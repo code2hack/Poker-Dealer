@@ -51,7 +51,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-toolchains_dir="${repo_dir}/.toolchains"
+toolchains_dir="${repo_dir}/.toolchains/amd64"
 go_root="${toolchains_dir}/go${GO_VERSION}"
 go_archive="${toolchains_dir}/go${GO_VERSION}.linux-amd64.tar.gz"
 bin_dir="${toolchains_dir}/bin"
