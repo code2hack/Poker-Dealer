@@ -1,0 +1,10 @@
+{
+  "revision": 1,
+  "projection": {
+    "orderedPiles": [],
+    "unknownWorkState": [],
+    "hudVisible": false,
+    "focused": null
+  },
+  "piles": []
+}

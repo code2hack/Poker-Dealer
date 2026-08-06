@@ -223,6 +223,28 @@ enum class PokerConnectionState {
     CONNECTED,
 }
 
+data class PokerConnectionContext(
+    val epoch: PokerConnectionEpoch,
+    val negotiation: PokerProtocolNegotiation,
+)
+
+typealias PokerEnvelopeSender = suspend (
+    type: String,
+    stream: String,
+    payload: JsonObject,
+    replyTo: String?,
+) -> Unit
+
+interface PokerConnectionCallbacks {
+    suspend fun onConnected(context: PokerConnectionContext, send: PokerEnvelopeSender) = Unit
+
+    suspend fun onEnvelope(
+        context: PokerConnectionContext,
+        envelope: ProtocolEnvelope,
+        send: PokerEnvelopeSender,
+    ) = Unit
+}
+
 /** Keeps the last complete snapshot in memory while a replacement epoch negotiates. */
 class PokerConnectionSession<Snapshot>(
     private val localOffer: PokerProtocolOffer = PokerProtocolOffer(),
@@ -553,6 +575,7 @@ class PokerConnectionOwner<Snapshot>(
     private val sessionId: String = UUID.randomUUID().toString(),
     private val messageId: () -> String = { UUID.randomUUID().toString() },
     private val connector: PokerConnectionConnector? = null,
+    private val callbacks: PokerConnectionCallbacks? = null,
 ) {
     init {
         require((factory == null) xor (connector == null)) {
@@ -762,8 +785,13 @@ class PokerConnectionOwner<Snapshot>(
                         capabilities = negotiation.capabilities,
                         readOnly = negotiation.access == PokerProtocolAccess.READ_ONLY,
                     ),
-                ).jsonObject,
+                    ).jsonObject,
             )
+            val context = PokerConnectionContext(epoch, negotiation)
+            val sendEnvelope: PokerEnvelopeSender = { type, stream, payload, replyTo ->
+                send(epoch, type, payload, stream, replyTo)
+            }
+            callbacks?.onConnected(context, sendEnvelope)
             reconnect.markStable()
             scheduleHeartbeat(runtime)
             while (true) {
@@ -783,7 +811,10 @@ class PokerConnectionOwner<Snapshot>(
                         runtime.heartbeat.onPong(clock.nowMs())
                     }
 
-                    else -> runtime.heartbeat.onTraffic(clock.nowMs())
+                    else -> {
+                        runtime.heartbeat.onTraffic(clock.nowMs())
+                        callbacks?.onEnvelope(context, envelope, sendEnvelope)
+                    }
                 }
             }
         } catch (_: CancellationException) {
@@ -817,7 +848,7 @@ class PokerConnectionOwner<Snapshot>(
         require(envelope.epoch == 0L || envelope.epoch == runtime.epoch.value) {
             "Unexpected Poker epoch"
         }
-        require(envelope.stream == POKER_CONTROL_STREAM) { "Unexpected Poker stream" }
+        require(envelope.stream.isNotBlank()) { "Unexpected Poker stream" }
         require(
             session.acceptInboundFrame(runtime.epoch, envelope.stream, envelope.sequence) ==
                 PokerSequenceDecision.ACCEPTED,
@@ -829,28 +860,29 @@ class PokerConnectionOwner<Snapshot>(
         epoch: PokerConnectionEpoch,
         type: String,
         payload: JsonObject,
+        stream: String = POKER_CONTROL_STREAM,
         replyTo: String? = null,
     ) {
-        val sequence = session.nextOutboundSequence(epoch, POKER_CONTROL_STREAM)
-            ?: throw IllegalStateException("Poker epoch is no longer current")
-        val envelope = ProtocolEnvelope(
-            type = type,
-            messageId = messageId(),
-            sessionId = sessionId,
-            sentAtMs = clock.nowMs(),
-            epoch = epoch.value,
-            stream = POKER_CONTROL_STREAM,
-            sequence = sequence,
-            replyTo = replyTo,
-            payload = payload,
-        )
-        runtimeSocket(epoch).sendFrame(PokerFrameCodec.encode(envelope))
-    }
-
-    private suspend fun runtimeSocket(epoch: PokerConnectionEpoch): PokerFrameSocket =
-        synchronized(lock) {
-            active?.takeIf { it.epoch == epoch }?.socket
+        val runtime = synchronized(lock) {
+            active?.takeIf { it.epoch == epoch }
         } ?: throw IllegalStateException("Poker epoch is no longer current")
+        runtime.sendLock.withLock {
+            val sequence = session.nextOutboundSequence(epoch, stream)
+                ?: throw IllegalStateException("Poker epoch is no longer current")
+            val envelope = ProtocolEnvelope(
+                type = type,
+                messageId = messageId(),
+                sessionId = sessionId,
+                sentAtMs = clock.nowMs(),
+                epoch = epoch.value,
+                stream = stream,
+                sequence = sequence,
+                replyTo = replyTo,
+                payload = payload,
+            )
+            runtime.socket.sendFrame(PokerFrameCodec.encode(envelope))
+        }
+    }
 
     private fun buildOfferPayload(): JsonObject = PokerProtocolJson.encodeToJsonElement(
         PokerProtocolOffer.serializer(),
@@ -884,6 +916,7 @@ class PokerConnectionOwner<Snapshot>(
         val socket: PokerFrameSocket,
         val job: Job,
         val heartbeat: PokerHeartbeatMonitor,
+        val sendLock: Mutex = Mutex(),
         var heartbeatTask: PokerScheduledTask? = null,
         var peerEnvelopeVersion: Int? = null,
     ) : PokerEpochConnection {
