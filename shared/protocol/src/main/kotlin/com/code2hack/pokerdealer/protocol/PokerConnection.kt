@@ -1,5 +1,18 @@
 package com.code2hack.pokerdealer.protocol
 
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToLong
 import kotlin.random.Random
 
@@ -277,6 +290,14 @@ class PokerConnectionSession<Snapshot>(
     fun nextOutboundSequence(epoch: PokerConnectionEpoch, stream: String): Long? =
         epochFence.nextOutboundSequence(epoch, stream)
 
+    fun acceptInboundFrame(
+        epoch: PokerConnectionEpoch,
+        stream: String,
+        sequence: Long,
+    ): PokerSequenceDecision = epochFence.acceptInbound(epoch, stream, sequence)
+
+    fun isCurrent(epoch: PokerConnectionEpoch): Boolean = epochFence.isCurrent(epoch)
+
     fun close(epoch: PokerConnectionEpoch): Boolean {
         val closed = epochFence.close(epoch)
         if (closed) {
@@ -408,5 +429,352 @@ class PokerReconnectController(
 
     fun enable() {
         enabled = true
+    }
+}
+
+/** A length-delimited JSON envelope is carried by the platform socket. */
+object PokerFrameCodec {
+    fun encode(envelope: ProtocolEnvelope): ByteArray =
+        PokerProtocolJson.encodeToString(envelope).encodeToByteArray().also {
+            require(it.size <= DEFAULT_MAX_FRAME_BYTES) { "Poker frame is too large" }
+        }
+
+    fun decode(frame: ByteArray): ProtocolEnvelope {
+        require(frame.isNotEmpty()) { "Poker frame is empty" }
+        require(frame.size <= DEFAULT_MAX_FRAME_BYTES) { "Poker frame is too large" }
+        return PokerProtocolJson.decodeFromString(frame.decodeToString())
+    }
+}
+
+interface PokerFrameSocket : PokerEpochConnection {
+    suspend fun sendFrame(frame: ByteArray)
+
+    suspend fun receiveFrame(): ByteArray?
+}
+
+interface PokerListenerSocket : PokerEpochConnection {
+    suspend fun accept(): PokerFrameSocket
+}
+
+fun interface PokerListenerFactory {
+    fun open(): PokerListenerSocket
+}
+
+fun interface PokerScheduledTask {
+    fun cancel()
+}
+
+interface PokerScheduler {
+    fun schedule(delayMs: Long, task: () -> Unit): PokerScheduledTask
+}
+
+fun interface PokerClock {
+    fun nowMs(): Long
+}
+
+/**
+ * Owns the only production connection loop. Socket implementations authenticate before returning
+ * a frame socket; this class owns framing, protocol negotiation, epochs, heartbeat, and retry.
+ */
+class PokerConnectionOwner<Snapshot>(
+    private val factory: PokerListenerFactory,
+    private val scope: CoroutineScope,
+    private val localOffer: PokerProtocolOffer = PokerProtocolOffer(),
+    private val session: PokerConnectionSession<Snapshot> = PokerConnectionSession(localOffer),
+    private val scheduler: PokerScheduler,
+    private val clock: PokerClock,
+    private val heartbeatPolicy: PokerHeartbeatPolicy = PokerHeartbeatPolicy(),
+    private val reconnect: PokerReconnectController = PokerReconnectController(),
+    private val sessionId: String = UUID.randomUUID().toString(),
+    private val messageId: () -> String = { UUID.randomUUID().toString() },
+) {
+    private val lock = Any()
+    private var running = false
+    private var generation = 0L
+    private var listener: PokerListenerSocket? = null
+    private var listenerJob: Job? = null
+    private var retryTask: PokerScheduledTask? = null
+    private var active: ActiveConnection? = null
+
+    val isRunning: Boolean
+        get() = synchronized(lock) { running }
+
+    val isListening: Boolean
+        get() = synchronized(lock) { listener != null }
+
+    fun start() {
+        synchronized(lock) {
+            if (running) return
+            running = true
+            reconnect.enable()
+            scheduleOpenLocked(0L, generation)
+        }
+    }
+
+    /** Returns the scheduled delay so callers cannot accidentally discard reconnect work. */
+    fun retry(trigger: PokerReconnectTrigger, jitterUnit: Double = Random.nextDouble()): Long? {
+        synchronized(lock) {
+            if (!running) return null
+            generation++
+            retryTask?.cancel()
+            retryTask = null
+            listenerJob?.cancel()
+            listenerJob = null
+            listener?.close()
+            listener = null
+            active?.cancel()
+            active = null
+            session.close()
+            val delay = reconnect.request(trigger, jitterUnit)
+            if (delay != null) scheduleOpenLocked(delay, generation)
+            return delay
+        }
+    }
+
+    fun stop() {
+        synchronized(lock) {
+            if (!running) return
+            running = false
+            generation++
+            retryTask?.cancel()
+            retryTask = null
+            listenerJob?.cancel()
+            listenerJob = null
+            listener?.close()
+            listener = null
+            active?.cancel()
+            active = null
+            session.close()
+            reconnect.cancel()
+        }
+    }
+
+    private fun scheduleOpenLocked(delayMs: Long, expectedGeneration: Long) {
+        retryTask?.cancel()
+        retryTask = scheduler.schedule(delayMs) {
+            synchronized(lock) {
+                if (!running || generation != expectedGeneration) return@schedule
+                retryTask = null
+                openListenerLocked(expectedGeneration)
+            }
+        }
+    }
+
+    private fun openListenerLocked(expectedGeneration: Long) {
+        if (!running || generation != expectedGeneration || listenerJob?.isActive == true) return
+        val job = scope.launch {
+            var opened: PokerListenerSocket? = null
+            try {
+                val bound = factory.open()
+                opened = bound
+                synchronized(lock) {
+                    if (!running || generation != expectedGeneration) {
+                        bound.close()
+                        return@launch
+                    }
+                    listener = bound
+                    coroutineContext[Job]?.invokeOnCompletion { bound.close() }
+                }
+                while (true) {
+                    val socket = bound.accept()
+                    scope.launch { handleConnection(socket, expectedGeneration) }
+                }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                synchronized(lock) {
+                    if (running && generation == expectedGeneration) {
+                        active?.let {
+                            session.close(it.epoch)
+                            it.cancel()
+                        }
+                        active = null
+                    }
+                }
+                scheduleFailure(expectedGeneration)
+            } finally {
+                opened?.close()
+                synchronized(lock) {
+                    if (listener === opened) listener = null
+                    if (listenerJob === coroutineContext[Job]) listenerJob = null
+                }
+            }
+        }
+        listenerJob = job
+    }
+
+    private fun scheduleFailure(expectedGeneration: Long) {
+        synchronized(lock) {
+            if (!running || generation != expectedGeneration || retryTask != null) return
+            val delay = reconnect.request(PokerReconnectTrigger.FAILURE) ?: return
+            scheduleOpenLocked(delay, expectedGeneration)
+        }
+    }
+
+    private suspend fun handleConnection(socket: PokerFrameSocket, expectedGeneration: Long) {
+        val job = kotlinx.coroutines.currentCoroutineContext()[Job]!!
+        val runtime = synchronized(lock) {
+            if (!running || generation != expectedGeneration) {
+                socket.close()
+                null
+            } else {
+                active?.let {
+                    session.close(it.epoch)
+                    it.cancel()
+                }
+                val epoch = session.replaceAuthenticatedConnection(socket)
+                ActiveConnection(
+                    epoch = epoch,
+                    socket = socket,
+                    job = job,
+                    heartbeat = PokerHeartbeatMonitor(heartbeatPolicy, clock.nowMs()),
+                ).also { active = it }
+            }
+        } ?: return
+        val epoch = runtime.epoch
+        try {
+            send(epoch, POKER_PROTOCOL_OFFER_TYPE, buildOfferPayload())
+            val offer = receiveEnvelope(runtime) ?: return
+            require(offer.type == POKER_PROTOCOL_OFFER_TYPE) { "Poker offer required" }
+            val peerOffer = PokerProtocolJson.decodeFromJsonElement(
+                PokerProtocolOffer.serializer(),
+                offer.payload,
+            )
+            val negotiation = session.negotiate(epoch, peerOffer)
+                ?: throw IllegalStateException("Stale Poker negotiation")
+            send(
+                epoch,
+                POKER_PROTOCOL_NEGOTIATED_TYPE,
+                PokerProtocolJson.encodeToJsonElement(
+                    PokerProtocolNegotiationMessage.serializer(),
+                    PokerProtocolNegotiationMessage(
+                        major = localOffer.major,
+                        capabilities = negotiation.capabilities,
+                        readOnly = negotiation.access == PokerProtocolAccess.READ_ONLY,
+                    ),
+                ).jsonObject,
+            )
+            reconnect.markStable()
+            scheduleHeartbeat(runtime)
+            while (true) {
+                val envelope = receiveEnvelope(runtime) ?: return
+                when (envelope.type) {
+                    POKER_HEARTBEAT_PING_TYPE -> {
+                        runtime.heartbeat.onTraffic(clock.nowMs())
+                        send(
+                            epoch,
+                            POKER_HEARTBEAT_PONG_TYPE,
+                            buildJsonObject { },
+                            replyTo = envelope.messageId,
+                        )
+                    }
+
+                    POKER_HEARTBEAT_PONG_TYPE -> {
+                        runtime.heartbeat.onPong(clock.nowMs())
+                    }
+
+                    else -> runtime.heartbeat.onTraffic(clock.nowMs())
+                }
+            }
+        } catch (_: CancellationException) {
+            throw CancellationException("Poker connection cancelled")
+        } catch (_: Throwable) {
+            runtime.cancel()
+        } finally {
+            runtime.heartbeatTask?.cancel()
+            socket.close()
+            val wasCurrent = session.close(epoch)
+            synchronized(lock) {
+                if (active === runtime) active = null
+                if (wasCurrent && running && generation == expectedGeneration) {
+                    scheduleFailure(expectedGeneration)
+                }
+            }
+        }
+    }
+
+    private suspend fun receiveEnvelope(runtime: ActiveConnection): ProtocolEnvelope? {
+        val envelope = runtime.socket.receiveFrame()?.let(PokerFrameCodec::decode) ?: return null
+        require(envelope.protocol == POKER_PROTOCOL_NAME) { "Unexpected Poker protocol" }
+        require(envelope.version == POKER_PROTOCOL_VERSION) { "Unexpected Poker protocol version" }
+        require(envelope.epoch == 0L || envelope.epoch == runtime.epoch.value) {
+            "Unexpected Poker epoch"
+        }
+        require(envelope.stream == POKER_CONTROL_STREAM) { "Unexpected Poker stream" }
+        require(
+            session.acceptInboundFrame(runtime.epoch, envelope.stream, envelope.sequence) ==
+                PokerSequenceDecision.ACCEPTED,
+        ) { "Invalid Poker sequence" }
+        return envelope
+    }
+
+    private suspend fun send(
+        epoch: PokerConnectionEpoch,
+        type: String,
+        payload: JsonObject,
+        replyTo: String? = null,
+    ) {
+        val sequence = session.nextOutboundSequence(epoch, POKER_CONTROL_STREAM)
+            ?: throw IllegalStateException("Poker epoch is no longer current")
+        val envelope = ProtocolEnvelope(
+            type = type,
+            messageId = messageId(),
+            sessionId = sessionId,
+            sentAtMs = clock.nowMs(),
+            epoch = epoch.value,
+            stream = POKER_CONTROL_STREAM,
+            sequence = sequence,
+            replyTo = replyTo,
+            payload = payload,
+        )
+        runtimeSocket(epoch).sendFrame(PokerFrameCodec.encode(envelope))
+    }
+
+    private suspend fun runtimeSocket(epoch: PokerConnectionEpoch): PokerFrameSocket =
+        synchronized(lock) {
+            active?.takeIf { it.epoch == epoch }?.socket
+        } ?: throw IllegalStateException("Poker epoch is no longer current")
+
+    private fun buildOfferPayload(): JsonObject = PokerProtocolJson.encodeToJsonElement(
+        PokerProtocolOffer.serializer(),
+        localOffer,
+    ).jsonObject
+
+    private fun scheduleHeartbeat(runtime: ActiveConnection) {
+        runtime.heartbeatTask?.cancel()
+        runtime.heartbeatTask = scheduler.schedule(heartbeatPolicy.idlePingIntervalMs) {
+            scope.launch {
+                if (!isCurrent(runtime)) return@launch
+                when (runtime.heartbeat.poll(clock.nowMs())) {
+                    PokerHeartbeatAction.SEND_PING -> runCatching {
+                        send(runtime.epoch, POKER_HEARTBEAT_PING_TYPE, buildJsonObject { })
+                    }.onFailure { runtime.cancel() }
+
+                    PokerHeartbeatAction.CLOSE -> runtime.cancel()
+                    PokerHeartbeatAction.NONE -> Unit
+                }
+                if (isCurrent(runtime)) scheduleHeartbeat(runtime)
+            }
+        }
+    }
+
+    private fun isCurrent(runtime: ActiveConnection): Boolean = synchronized(lock) {
+        running && active === runtime && session.isCurrent(runtime.epoch)
+    }
+
+    private class ActiveConnection(
+        val epoch: PokerConnectionEpoch,
+        val socket: PokerFrameSocket,
+        val job: Job,
+        val heartbeat: PokerHeartbeatMonitor,
+        var heartbeatTask: PokerScheduledTask? = null,
+    ) : PokerEpochConnection {
+        override fun close() = cancel()
+
+        fun cancel() {
+            heartbeatTask?.cancel()
+            job.cancel()
+            socket.close()
+        }
     }
 }

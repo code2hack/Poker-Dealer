@@ -18,6 +18,7 @@ const val POKER_PROTOCOL_OFFER_TYPE = "protocol.offer"
 const val POKER_PROTOCOL_NEGOTIATED_TYPE = "protocol.negotiated"
 const val POKER_HEARTBEAT_PING_TYPE = "heartbeat.ping"
 const val POKER_HEARTBEAT_PONG_TYPE = "heartbeat.pong"
+const val POKER_LISTENER_PORT = 39_817
 
 val PokerProtocolJson = Json {
     encodeDefaults = true

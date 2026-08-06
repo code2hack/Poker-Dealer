@@ -14,16 +14,33 @@ import android.os.Build
 import android.os.IBinder
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
 import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
+import com.code2hack.pokerdealer.protocol.PokerClock
+import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 /** Owns only listener lifecycle state; synchronized card content is never stored here. */
 class PokerListenerService : Service() {
-    private val reconnect = PokerReconnectController()
+    private lateinit var serviceScope: CoroutineScope
+    private lateinit var owner: PokerConnectionOwner<Unit>
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForegroundCompat()
+        serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val identity = AndroidKeystorePairingIdentity()
+        val pairing = identity.pairingController(this)
+        owner = PokerConnectionOwner(
+            factory = AndroidPokerListenerFactory(this, identity, pairing),
+            scope = serviceScope,
+            scheduler = CoroutinePokerScheduler(serviceScope),
+            clock = PokerClock { System.currentTimeMillis() },
+            reconnect = PokerReconnectController(),
+        )
         registerNetworkCallback()
     }
 
@@ -31,14 +48,38 @@ class PokerListenerService : Service() {
         when (intent?.action) {
             ACTION_DISABLE -> {
                 setEnabled(this, false)
+                owner.stop()
                 stopForeground(STOP_FOREGROUND_REMOVE)
+                foregroundStarted = false
                 stopSelfResult(startId)
+                return START_NOT_STICKY
             }
 
-            ACTION_RETRY,
-            ACTION_ENABLE,
-            null,
-            -> if (!isEnabled(this)) stopSelfResult(startId)
+            ACTION_ENABLE -> {
+                setEnabled(this, true)
+                startForegroundCompat()
+                owner.start()
+            }
+
+            ACTION_RETRY -> if (isEnabled(this)) {
+                startForegroundCompat()
+                if (owner.isRunning) {
+                    owner.retry(PokerReconnectTrigger.MANUAL_RETRY)
+                } else {
+                    owner.start()
+                }
+            } else {
+                stopSelfResult(startId)
+                return START_NOT_STICKY
+            }
+
+            null -> if (isEnabled(this)) {
+                startForegroundCompat()
+                owner.start()
+            } else {
+                stopSelfResult(startId)
+                return START_NOT_STICKY
+            }
         }
         return START_STICKY
     }
@@ -48,7 +89,12 @@ class PokerListenerService : Service() {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }
         networkCallback = null
-        reconnect.cancel()
+        owner.stop()
+        serviceScope.cancel()
+        if (foregroundStarted) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foregroundStarted = false
+        }
         super.onDestroy()
     }
 
@@ -58,22 +104,34 @@ class PokerListenerService : Service() {
         val connectivity = getSystemService(ConnectivityManager::class.java)
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                reconnect.request(PokerReconnectTrigger.NETWORK_CHANGE)
+                requestNetworkRetry()
             }
 
             override fun onLost(network: Network) {
-                reconnect.request(PokerReconnectTrigger.FAILURE, jitterUnit = 0.5)
+                requestNetworkRetry()
+            }
+
+            override fun onLinkPropertiesChanged(
+                network: Network,
+                linkProperties: android.net.LinkProperties,
+            ) {
+                requestNetworkRetry()
             }
         }
         runCatching { connectivity.registerDefaultNetworkCallback(callback) }
             .onSuccess { networkCallback = callback }
     }
 
+    private fun requestNetworkRetry() {
+        if (isEnabled(this)) owner.retry(PokerReconnectTrigger.NETWORK_CHANGE)
+    }
+
     private fun startForegroundCompat() {
+        if (foregroundStarted) return
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
             .setContentTitle("Poker listener")
-            .setContentText("Ready for Dealer")
+            .setContentText("Listener enabled")
             .setContentIntent(
                 PendingIntent.getActivity(
                     this,
@@ -94,6 +152,7 @@ class PokerListenerService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        foregroundStarted = true
     }
 
     private fun createNotificationChannel() {
@@ -136,7 +195,9 @@ class PokerListenerService : Service() {
             context.stopService(Intent(context, PokerListenerService::class.java))
         }
 
-        fun retry(context: Context) = start(context, ACTION_RETRY)
+        fun retry(context: Context) {
+            if (isEnabled(context)) start(context, ACTION_RETRY)
+        }
 
         private fun start(context: Context, action: String) {
             val intent = Intent(context, PokerListenerService::class.java).setAction(action)
