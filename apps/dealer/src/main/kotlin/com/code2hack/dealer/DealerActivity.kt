@@ -60,6 +60,8 @@ import com.code2hack.dealer.asr.DealerAsrDownloadUiState
 import com.code2hack.dealer.asr.DealerAsrDownloadManager
 import com.code2hack.dealer.asr.DealerAsrPackKey
 import com.code2hack.dealer.asr.DealerAsrMode
+import com.code2hack.dealer.asr.DealerAsrProfileSaveResult
+import com.code2hack.dealer.asr.prettyDealerAsrProfile
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
@@ -146,6 +148,7 @@ class DealerActivity : ComponentActivity() {
         asrDownloadManager = DealerAsrDownloadManager(this)
         asrCatalogJob = lifecycleScope.launch {
             val loaded = asrCatalogStore.load()
+            asrDownloadManager.syncCatalog(loaded.catalog)
             asrCatalogState.value = DealerAsrCatalogUiState(
                 catalog = loaded.catalog,
                 error = loaded.error,
@@ -240,6 +243,11 @@ class DealerActivity : ComponentActivity() {
                             lifecycleScope.launch {
                                 runCatching { asrDownloadManager.setMirrorBaseUrl(value) }
                                     .onFailure { asrDownloadState.update { it.copy(error = "mirror-url-invalid") } }
+                            }
+                        },
+                        onSaveAsrProfile = { key, raw, result ->
+                            lifecycleScope.launch {
+                                result(asrDownloadManager.saveProfile(key, raw))
                             }
                         },
                     )
@@ -387,6 +395,7 @@ class DealerActivity : ComponentActivity() {
         asrCatalogState.update { it.copy(refreshing = true, error = null) }
         asrCatalogJob = lifecycleScope.launch {
             val result = asrCatalogStore.refresh()
+            asrDownloadManager.syncCatalog(result.catalog)
             asrCatalogState.value = DealerAsrCatalogUiState(
                 catalog = result.catalog,
                 error = result.error,
@@ -476,6 +485,7 @@ private fun DealerApp(
     onCancelAsrPack: (DealerAsrPackKey) -> Unit,
     onSetDefaultAsrPack: (DealerAsrPackKey) -> Unit,
     onSetAsrMirror: (String?) -> Unit,
+    onSaveAsrProfile: (DealerAsrPackKey, String, (DealerAsrProfileSaveResult) -> Unit) -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
         mutableStateOf(state.browsedThread?.hostId ?: state.hostId ?: "u4090")
@@ -770,6 +780,7 @@ private fun DealerApp(
                 onCancel = onCancelAsrPack,
                 onSetDefault = onSetDefaultAsrPack,
                 onSetMirror = onSetAsrMirror,
+                onSaveProfile = onSaveAsrProfile,
             )
             discoveredThreads.forEach { thread ->
                 ThreadRow(
@@ -1104,11 +1115,15 @@ private fun DealerAsrCatalogPanel(
     onCancel: (DealerAsrPackKey) -> Unit,
     onSetDefault: (DealerAsrPackKey) -> Unit,
     onSetMirror: (String?) -> Unit,
+    onSaveProfile: (DealerAsrPackKey, String, (DealerAsrProfileSaveResult) -> Unit) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var selectedLanguage by remember { mutableStateOf<String?>(null) }
     var selectedMode by remember { mutableStateOf<DealerAsrMode?>(null) }
     var showCatalog by remember { mutableStateOf(false) }
+    var editingKey by remember { mutableStateOf<DealerAsrPackKey?>(null) }
+    var editedProfile by remember { mutableStateOf("") }
+    var profileEditError by remember { mutableStateOf<String?>(null) }
     var mirrorUrl by remember(downloads.mirrorBaseUrl) {
         mutableStateOf(downloads.mirrorBaseUrl.orEmpty())
     }
@@ -1182,6 +1197,24 @@ private fun DealerAsrCatalogPanel(
                             OutlinedButton(onClick = { onSetDefault(job.key) }) {
                                 Text("Use as default")
                             }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                editingKey = job.key
+                                editedProfile = prettyDealerAsrProfile(
+                                    job.profileJson.ifBlank { job.defaultProfileJson },
+                                )
+                                profileEditError = null
+                            },
+                            enabled = job.key !in downloads.activeSessions,
+                        ) {
+                            Text("Edit profile")
+                        }
+                        if (job.key in downloads.activeSessions) {
+                            Text("Profile locked while this pack is in use", style = MaterialTheme.typography.labelSmall)
+                        }
+                        job.profileError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                     DealerAsrDownloadState.FAILED -> {
@@ -1297,6 +1330,64 @@ private fun DealerAsrCatalogPanel(
         state.error?.let {
             Text("Catalog update failed: $it", color = MaterialTheme.colorScheme.error)
         }
+    }
+
+    val editingJob = downloads.jobs.firstOrNull { it.key == editingKey }
+    if (editingJob != null) {
+        val locked = editingJob.key in downloads.activeSessions
+        AlertDialog(
+            onDismissRequest = {
+                editingKey = null
+                profileEditError = null
+            },
+            title = { Text("Edit ${editingJob.displayName} profile") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Strict model profile JSON · schema fields only")
+                    OutlinedTextField(
+                        value = editedProfile,
+                        onValueChange = { editedProfile = it; profileEditError = null },
+                        enabled = !locked,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        minLines = 12,
+                        maxLines = 20,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (locked) {
+                        Text("Editing is blocked while ASR uses this pack.", color = MaterialTheme.colorScheme.error)
+                    }
+                    profileEditError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onSaveProfile(editingJob.key, editedProfile) { result ->
+                            when (result) {
+                                is DealerAsrProfileSaveResult.Saved -> {
+                                    editingKey = null
+                                    profileEditError = null
+                                }
+                                is DealerAsrProfileSaveResult.Rejected -> {
+                                    profileEditError = result.errors.joinToString("; ") {
+                                        "${it.path}: ${it.reason}"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    enabled = !locked,
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = {
+                    editingKey = null
+                    profileEditError = null
+                }) { Text("Cancel") }
+            },
+        )
     }
 }
 

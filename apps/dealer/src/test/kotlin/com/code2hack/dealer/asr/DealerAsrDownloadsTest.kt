@@ -9,6 +9,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -68,7 +70,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun activePauseYieldsToQueuedWorkAndResumeUsesRangeValidator() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -110,7 +112,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun pausingQueuedPackDoesNotInterruptActivePack() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -147,7 +149,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun cancellingQueuedPackDoesNotInterruptActivePackOrCreatePartialReadyInstall() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -282,6 +284,13 @@ class DealerAsrDownloadsTest {
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+    private fun DealerAsrCatalogEntry.withPackId(id: String): DealerAsrCatalogEntry = copy(
+        id = id,
+        displayName = "Second",
+        defaultProfile = JsonObject(defaultProfile + ("packId" to JsonPrimitive(id))),
+        profileSchema = JsonObject(profileSchema + ("packId" to JsonPrimitive(id))),
+    )
 
     private data class Fixture(
         val root: java.io.File,
