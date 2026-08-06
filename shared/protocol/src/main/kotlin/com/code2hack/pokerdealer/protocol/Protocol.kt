@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonObject
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
 import com.code2hack.pokerdealer.domain.UserInputRequest
@@ -43,6 +44,9 @@ const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
 const val POKER_USER_INPUT_PROJECTION_TYPE = "user-input.projection"
 const val POKER_USER_INPUT_MUTATION_TYPE = "user-input.mutation"
 const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
+const val POKER_PRIMARY_ACTION_CAPABILITY = "primary-action.v1"
+const val POKER_PRIMARY_ACTION_TYPE = "primary.action"
+const val POKER_PRIMARY_ACTION_RESULT_TYPE = "primary.action.result"
 const val POKER_LISTENER_PORT = 39_817
 const val POKER_BINDINGS_CAPABILITY = "bindings.v1"
 
@@ -74,6 +78,90 @@ data class ComposerDraftProjection(
     @SerialName("control_generation") val controlGeneration: Long,
     @SerialName("connection_epoch") val connectionEpoch: Long,
     @SerialName("mode_session") val modeSession: String = "",
+    @SerialName("active_turn_id") val activeTurnId: String? = null,
+    @SerialName("has_dealer_claim") val hasDealerClaim: Boolean = true,
+)
+
+@Serializable
+data class PokerPrimaryActionTarget(
+    val locator: CodexThreadLocator,
+    val action: PokerPrimaryAction,
+    @SerialName("wheel_session") val wheelSession: String,
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String,
+    @SerialName("draft_revision") val draftRevision: Long? = null,
+    @SerialName("cursor_position") val cursorPosition: Int? = null,
+    @SerialName("expected_turn_id") val expectedTurnId: String? = null,
+    @SerialName("request_locator") val requestLocator: ServerRequestLocator? = null,
+    @SerialName("answer_revision") val answerRevision: Long? = null,
+    @SerialName("request_fingerprint") val requestFingerprint: String? = null,
+    @SerialName("operation_id") val operationId: String,
+) {
+    init {
+        require(wheelSession.isNotBlank()) { "Wheel session must not be blank" }
+        require(controlGeneration >= 0) { "Control generation must not be negative" }
+        require(connectionEpoch >= 0) { "Connection epoch must not be negative" }
+        require(modeSession.isNotBlank()) { "Mode session must not be blank" }
+        require(operationId.isNotBlank()) { "Operation id must not be blank" }
+        when (action) {
+            PokerPrimaryAction.REQUEST -> {
+                require(draftRevision == null && cursorPosition == null && expectedTurnId == null) {
+                    "Request action cannot target a composer or turn"
+                }
+                require(requestLocator != null) { "Request action requires a request locator" }
+                require(answerRevision != null && answerRevision >= 0) {
+                    "Request action requires an answer revision"
+                }
+                require(!requestFingerprint.isNullOrBlank()) {
+                    "Request action requires a request fingerprint"
+                }
+            }
+            PokerPrimaryAction.SEND,
+            PokerPrimaryAction.STEER,
+            -> {
+                require(requestLocator == null && answerRevision == null && requestFingerprint == null) {
+                    "Composer action cannot target a request"
+                }
+                require(draftRevision != null && draftRevision >= 0) {
+                    "Composer action requires a draft revision"
+                }
+                require(cursorPosition != null && cursorPosition >= 0) {
+                    "Composer action requires a cursor position"
+                }
+                if (action == PokerPrimaryAction.STEER) {
+                    require(!expectedTurnId.isNullOrBlank()) {
+                        "Steer requires an expected turn ID"
+                    }
+                } else {
+                    require(expectedTurnId == null) { "Send cannot target an active turn" }
+                }
+            }
+            PokerPrimaryAction.INTERRUPT -> {
+                require(requestLocator == null && draftRevision == null && cursorPosition == null) {
+                    "Interrupt cannot target a request or draft"
+                }
+                require(answerRevision == null && requestFingerprint == null) {
+                    "Interrupt cannot target a request answer"
+                }
+                require(!expectedTurnId.isNullOrBlank()) { "Interrupt requires an expected turn ID" }
+            }
+        }
+    }
+}
+
+@Serializable
+enum class PokerPrimaryActionOutcome {
+    ACCEPTED,
+    REJECTED,
+    UNKNOWN,
+}
+
+@Serializable
+data class PokerPrimaryActionResult(
+    val target: PokerPrimaryActionTarget,
+    val outcome: PokerPrimaryActionOutcome,
+    val reason: String? = null,
 )
 
 @Serializable
@@ -110,6 +198,7 @@ data class UserInputRequestProjection(
     @SerialName("control_generation") val controlGeneration: Long,
     @SerialName("connection_epoch") val connectionEpoch: Long,
     @SerialName("mode_session") val modeSession: String,
+    @SerialName("has_dealer_claim") val hasDealerClaim: Boolean = true,
 )
 
 @Serializable

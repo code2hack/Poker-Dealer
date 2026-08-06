@@ -5,10 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.intOrNull
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -197,34 +194,18 @@ internal data class DealerAsrCatalog(
         }
 
         private fun validateProfile(candidate: CatalogEntry) {
-            val profile = candidate.defaultProfile
-            require(profile.text("packId") == candidate.id &&
-                profile.text("revision") == candidate.revision &&
-                profile.int("schemaVersion") != null
-            ) { "catalog-default-profile-invalid" }
-            val schema = candidate.profileSchema
-            require(schema.text("packId") == candidate.id &&
-                schema.text("revision") == candidate.revision &&
-                schema.int("schemaVersion") != null
-            ) { "catalog-profile-schema-invalid" }
-            val fields = schema["fields"] as? JsonArray
-                ?: throw CatalogRejected("catalog-profile-schema-invalid")
-            require(fields.isNotEmpty()) { "catalog-profile-schema-invalid" }
-            val names = fields.map { field ->
-                val fieldObject = field as? JsonObject
-                    ?: throw CatalogRejected("catalog-profile-field-invalid")
-                val name = fieldObject.text("name")
-                    ?: throw CatalogRejected("catalog-profile-field-invalid")
-                require(PROFILE_FIELD.matches(name) && fieldObject.text("type") in PROFILE_TYPES) {
-                    "catalog-profile-field-invalid"
+            val schema = runCatching {
+                DealerAsrProfileSchema.parse(candidate.profileSchema, candidate.id, candidate.revision)
+            }.getOrElse { throw CatalogRejected("catalog-profile-schema-invalid") }
+            when (val validation = schema.validate(candidate.defaultProfile)) {
+                is DealerAsrProfileValidation.Invalid ->
+                    throw CatalogRejected("catalog-default-profile-invalid")
+                is DealerAsrProfileValidation.Valid -> {
+                    require(validation.profile.settings == schema.defaultSettings) {
+                        "catalog-default-profile-invalid"
+                    }
                 }
-                require(fieldObject["default"] != null) { "catalog-profile-field-invalid" }
-                name
             }
-            require(names.toSet().size == names.size) { "catalog-profile-field-duplicate" }
-            val settings = profile["settings"] as? JsonObject
-                ?: throw CatalogRejected("catalog-default-profile-invalid")
-            require(settings.keys == names.toSet()) { "catalog-default-profile-incomplete" }
         }
 
         private fun requiredEntries(
@@ -246,12 +227,6 @@ internal data class DealerAsrCatalog(
             return path.split('/').all { it.isNotEmpty() && it != "." && it != ".." }
         }
 
-        private fun JsonObject.text(name: String): String? =
-            (this[name] as? JsonPrimitive)?.content
-
-        private fun JsonObject.int(name: String): Int? =
-            (this[name] as? JsonPrimitive)?.intOrNull
-
         private val catalogJson = Json {
             ignoreUnknownKeys = true
             explicitNulls = false
@@ -259,8 +234,6 @@ internal data class DealerAsrCatalog(
         private val PACK_ID = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
         private val REVISION = Regex("[0-9a-f]{40}")
         private val HF_REPOSITORY = Regex("[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
-        private val PROFILE_FIELD = Regex("[A-Za-z][A-Za-z0-9_]{0,63}")
-        private val PROFILE_TYPES = setOf("boolean", "integer", "number", "string")
         private val SHA256 = Regex("[0-9a-f]{64}")
     }
 }

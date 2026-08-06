@@ -37,6 +37,7 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
 import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_LIVE_DELTA_CAPABILITY
 import com.code2hack.pokerdealer.protocol.pokerPairingFingerprint
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -90,6 +91,7 @@ class PokerListenerService : Service() {
                     POKER_BINDINGS_CAPABILITY,
                     POKER_SNAPSHOT_CAPABILITY,
                     POKER_LIVE_DELTA_CAPABILITY,
+                    POKER_PRIMARY_ACTION_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,

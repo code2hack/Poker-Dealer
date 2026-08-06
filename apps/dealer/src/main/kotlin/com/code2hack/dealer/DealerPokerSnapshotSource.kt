@@ -2,11 +2,13 @@ package com.code2hack.dealer
 
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ThreadPile
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
+import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.PokerSnapshotProjection
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRequestCard
 import com.code2hack.pokerdealer.protocol.PokerSnapshotWire
@@ -72,9 +74,11 @@ internal class DealerPokerSnapshotSource(
             orderedPiles = projectionPiles
                 .filter { it.workState != null }
                 .sortedWith(
-                    compareBy { WORK_STATE_ORDER.getValue(ThreadWorkState.valueOf(it.workState!!)) }
-                        .thenBy { it.stateChangedAtMs }
-                        .thenBy { it.attachmentOrder },
+                    compareBy<PokerSnapshotPileMetadata> {
+                        WORK_STATE_ORDER.getValue(ThreadWorkState.valueOf(it.workState!!))
+                    }
+                        .thenBy(PokerSnapshotPileMetadata::stateChangedAtMs)
+                        .thenBy(PokerSnapshotPileMetadata::attachmentOrder),
                 ),
             unknownWorkState = projectionPiles.sortedBy { it.attachmentOrder }
                 .filter { it.workState == null },

@@ -15,6 +15,10 @@ import com.code2hack.pokerdealer.domain.PokerNavigationReducer
 import com.code2hack.pokerdealer.domain.PokerPileAnchor
 import com.code2hack.pokerdealer.domain.PokerPileLayout
 import com.code2hack.pokerdealer.domain.PokerOperation
+import com.code2hack.pokerdealer.domain.PokerPostureSample
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
+import com.code2hack.pokerdealer.domain.PokerWheelContext
+import com.code2hack.pokerdealer.domain.PokerWheelPosture
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -126,6 +130,64 @@ class PokerInputAdapterTest {
         )))
         assertEquals(first, navigation.metadata().focused)
         assertTrue(builtInResults.isEmpty())
+    }
+
+    @Test
+    fun `remote held FN confirms a wheel using glasses posture from the shared adapter`() {
+        val bindings = PokerBindingController()
+        val remote = PokerBindingDevice.remote("remote-a")
+        bindings.observeRemote(remote.descriptor)
+        bindings.selectDevice(remote)
+        bindings.install(
+            bindings.map.bind(
+                remote,
+                PokerOperation.FN,
+                PokerBindingControl.remote(remote.descriptor, KeyEvent.KEYCODE_FUNCTION),
+            ),
+        )
+        assertEquals(
+            PokerOperation.FN,
+            bindings.map.operationFor(PokerBindingControl.remote(remote.descriptor, KeyEvent.KEYCODE_FUNCTION)),
+        )
+        val results = mutableListOf<PokerInputController.Result>()
+        val controller = PokerInputController(
+            navigation(),
+            wheelContext = {
+                PokerWheelContext(
+                    targetId = "thread|composer|0|SEND",
+                    primaryAction = PokerPrimaryAction.SEND,
+                )
+            },
+        )
+        val android = PokerAndroidInputAdapter(
+            builtIn = PokerBuiltInInputAdapter(controller, bindings),
+            remote = PokerRemoteInputAdapter(controller, bindings, onResult = results::add),
+        )
+
+        assertNull(android.onPosture(PokerPostureSample(0f, 0f, 0L)))
+        assertTrue(android.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_DOWN,
+            time = 100L,
+        )))
+        assertEquals(
+            PokerWheelPosture.DOWN,
+            android.onPosture(PokerPostureSample(-30f, 0f, 600L))?.posture,
+        )
+        assertTrue(android.onPosture(PokerPostureSample(-30f, 0f, 700L))?.stable == true)
+        assertTrue(android.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_UP,
+            time = 701L,
+        )))
+
+        assertEquals(2, results.size)
+        assertNull(results.first().wheelSelection)
+        assertEquals(PokerPrimaryAction.SEND, results.last().wheelSelection?.primaryAction)
     }
 
     @Test

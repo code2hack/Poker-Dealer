@@ -40,6 +40,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 internal data class DealerAsrPackKey(
@@ -88,6 +89,8 @@ internal data class DealerAsrDownloadJob(
     val startedAtMillis: Long? = null,
     val defaultProfileJson: String = "{}",
     val profileSchemaJson: String = "{}",
+    val profileJson: String = "",
+    val profileError: String? = null,
 ) {
     val key: DealerAsrPackKey
         get() = DealerAsrPackKey(packId, revision)
@@ -117,6 +120,8 @@ internal data class DealerAsrDownloadUiState(
     val defaultPack: DealerAsrPackKey? = null,
     val mirrorBaseUrl: String? = null,
     val error: String? = null,
+    val activeSessions: Set<DealerAsrPackKey> = emptySet(),
+    val warmPacks: Set<DealerAsrPackKey> = emptySet(),
 )
 
 internal data class DealerAsrStorageSpace(
@@ -238,6 +243,7 @@ internal class DealerAsrDownloadManager(
     initialMirrorBaseUrl: String? = null,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    profileStateFile: File = stateFile.resolveSibling("profiles-v1.json"),
 ) : Closeable {
     private data class ActiveTransfer(
         val key: DealerAsrPackKey,
@@ -263,6 +269,7 @@ internal class DealerAsrDownloadManager(
     private var managerError: String? = null
     private var worker: Job? = null
     private val activeTransfer = AtomicReference<ActiveTransfer?>(null)
+    private val profileStore = DealerAsrProfileStore(profileStateFile, nowMillis)
 
     val stateFlow: StateFlow<DealerAsrDownloadUiState> = state.asStateFlow()
 
@@ -270,6 +277,7 @@ internal class DealerAsrDownloadManager(
         withContext(Dispatchers.IO) {
             lock.withLock {
                 if (!started) {
+                    profileStore.start()
                     loadLocked()
                     started = true
                     publishLocked()
@@ -302,9 +310,20 @@ internal class DealerAsrDownloadManager(
             lock.withLock {
                 val key = DealerAsrPackKey(entry.id, entry.revision)
                 jobs[key]?.let { existing ->
-                    if (existing.state != DealerAsrDownloadState.FAILED) return@withLock existing
+                    if (existing.state != DealerAsrDownloadState.FAILED) {
+                        val updated = syncJobProfileLocked(existing, entry)
+                        jobs[key] = updated
+                        persistLocked()
+                        publishLocked()
+                        return@withLock updated
+                    }
                     deletePartialRoot(key)
                 }
+                val profile = profileStore.ensureProfile(
+                    key = key,
+                    schema = entry.profileSchemaModel(),
+                    defaultProfile = entry.defaultProfileModel(),
+                )
                 val job = DealerAsrDownloadJob(
                     packId = entry.id,
                     revision = entry.revision,
@@ -336,6 +355,7 @@ internal class DealerAsrDownloadManager(
                     },
                     defaultProfileJson = entry.defaultProfile.toString(),
                     profileSchemaJson = entry.profileSchema.toString(),
+                    profileJson = profile.json.toString(),
                 )
                 jobs[key] = job
                 persistLocked()
@@ -421,6 +441,7 @@ internal class DealerAsrDownloadManager(
                     "model-pack-not-installed"
                 }
                 defaultPack = key
+                profileStore.setDefault(key)
                 persistLocked()
                 publishLocked()
             }
@@ -430,7 +451,119 @@ internal class DealerAsrDownloadManager(
     override fun close() {
         activeResponse.getAndSet(null)?.close()
         activeTransfer.getAndSet(null)?.job?.cancel(CancellationException("download-manager-closed"))
+        profileStore.close()
         scope.cancel()
+    }
+
+    suspend fun syncCatalog(catalog: DealerAsrCatalog) {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                jobs = jobs.mapValuesTo(linkedMapOf()) { (_, job) ->
+                    catalog.entries.firstOrNull { it.id == job.packId && it.revision == job.revision }
+                        ?.let { syncJobProfileLocked(job, it) }
+                        ?: job
+                }
+                persistLocked()
+                publishLocked()
+            }
+        }
+    }
+
+    suspend fun saveProfile(key: DealerAsrPackKey, raw: String): DealerAsrProfileSaveResult {
+        start()
+        return withContext(Dispatchers.IO) {
+            lock.withLock {
+                val job = jobs[key]
+                if (job == null || job.state != DealerAsrDownloadState.READY || !isInstalled(key)) {
+                    val result = DealerAsrProfileSaveResult.Rejected(
+                        listOf(DealerAsrProfileError("profile", "model-pack-not-installed")),
+                    )
+                    profileErrorLocked(key, job, result)
+                    return@withLock result
+                }
+                val schema = runCatching {
+                    DealerAsrProfileSchema.parse(
+                        downloadJson.parseToJsonElement(job.profileSchemaJson) as JsonObject,
+                        key.packId,
+                        key.revision,
+                    )
+                }.getOrElse {
+                    val result = DealerAsrProfileSaveResult.Rejected(
+                        listOf(DealerAsrProfileError("profileSchema", "schema-invalid")),
+                    )
+                    profileErrorLocked(key, job, result)
+                    return@withLock result
+                }
+                val result = profileStore.save(key, schema, raw)
+                when (result) {
+                    is DealerAsrProfileSaveResult.Saved -> {
+                        jobs[key] = job.copy(profileJson = result.profile.json.toString(), profileError = null)
+                        persistLocked()
+                        publishLocked()
+                    }
+                    is DealerAsrProfileSaveResult.Rejected -> profileErrorLocked(key, job, result)
+                }
+                result
+            }
+        }
+    }
+
+    suspend fun beginAsrSession(key: DealerAsrPackKey): DealerAsrSessionProfile {
+        start()
+        return withContext(Dispatchers.IO) {
+            lock.withLock {
+                val job = jobs[key]
+                require(job?.state == DealerAsrDownloadState.READY && isInstalled(key)) {
+                    "model-pack-not-installed"
+                }
+                val schema = DealerAsrProfileSchema.parse(
+                    downloadJson.parseToJsonElement(job.profileSchemaJson) as JsonObject,
+                    key.packId,
+                    key.revision,
+                )
+                val session = profileStore.beginSession(key, schema)
+                jobs[key] = job.copy(profileJson = session.profile.json.toString(), profileError = null)
+                persistLocked()
+                publishLocked()
+                session
+            }
+        }
+    }
+
+    suspend fun endAsrSession(session: DealerAsrSessionProfile) {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                profileStore.endSession(session)
+                publishLocked()
+            }
+        }
+    }
+
+    suspend fun retainWarmRecognizer(
+        key: DealerAsrPackKey,
+        profile: DealerAsrProfile,
+        recognizer: Closeable,
+    ) {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                require(profile.matches(key)) { "profile-schema-pack-mismatch" }
+                profileStore.retainWarmRecognizer(key, profile, recognizer)
+                publishLocked()
+            }
+        }
+    }
+
+    suspend fun evictWarmRecognizers() {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                profileStore.evictWarmRecognizers()
+                publishLocked()
+            }
+        }
     }
 
     private fun interruptActive(key: DealerAsrPackKey, cause: CancellationException) {
@@ -513,7 +646,10 @@ internal class DealerAsrDownloadManager(
                                 currentSource = null,
                                 error = null,
                             )
-                            if (defaultPack == null) defaultPack = key
+                            if (defaultPack == null) {
+                                defaultPack = key
+                                profileStore.setDefault(key)
+                            }
                             persistReadyMarkerLocked(jobs.getValue(key))
                             persistLocked()
                             publishLocked()
@@ -858,7 +994,7 @@ internal class DealerAsrDownloadManager(
             jobs[markerJob.key] = markerJob.copy(state = DealerAsrDownloadState.READY)
         }
         jobs = jobs.mapValuesTo(linkedMapOf()) { (_, job) ->
-            when {
+            val normalized = when {
                 job.state == DealerAsrDownloadState.DOWNLOADING -> job.copy(state = DealerAsrDownloadState.QUEUED)
                 job.state == DealerAsrDownloadState.READY && !isInstalled(job.key) ->
                     job.copy(
@@ -867,6 +1003,7 @@ internal class DealerAsrDownloadManager(
                     )
                 else -> job
             }
+            normalizeJobProfileLocked(normalized)
         }
         nextOrder = max(
             document.nextOrder,
@@ -879,6 +1016,7 @@ internal class DealerAsrDownloadManager(
                 .minByOrNull(DealerAsrDownloadJob::order)
                 ?.key
         }
+        profileStore.setDefault(defaultPack)
         persistLocked()
     }
 
@@ -896,7 +1034,56 @@ internal class DealerAsrDownloadManager(
             defaultPack = defaultPack,
             mirrorBaseUrl = configuredMirrorBaseUrl,
             error = managerError,
+            activeSessions = profileStore.activeSessionKeys(),
+            warmPacks = profileStore.warmPackKeys(),
         )
+    }
+
+    private fun normalizeJobProfileLocked(job: DealerAsrDownloadJob): DealerAsrDownloadJob {
+        val schemaObject = runCatching { downloadJson.parseToJsonElement(job.profileSchemaJson) as JsonObject }
+            .getOrNull() ?: return job
+        val schema = runCatching {
+            DealerAsrProfileSchema.parse(schemaObject, job.packId, job.revision)
+        }.getOrNull() ?: return job
+        val defaultProfile = runCatching {
+            downloadJson.parseToJsonElement(job.defaultProfileJson) as JsonObject
+        }.getOrNull()?.let { raw ->
+            when (val validation = schema.validate(raw)) {
+                is DealerAsrProfileValidation.Valid -> validation.profile
+                is DealerAsrProfileValidation.Invalid -> null
+            }
+        } ?: schema.defaultProfile()
+        val profile = profileStore.ensureProfile(DealerAsrPackKey(job.packId, job.revision), schema, defaultProfile)
+        return job.copy(profileJson = profile.json.toString(), profileError = null)
+    }
+
+    private fun syncJobProfileLocked(
+        job: DealerAsrDownloadJob,
+        entry: DealerAsrCatalogEntry,
+    ): DealerAsrDownloadJob {
+        val key = DealerAsrPackKey(entry.id, entry.revision)
+        val schema = entry.profileSchemaModel()
+        val profile = profileStore.ensureProfile(key, schema, entry.defaultProfileModel())
+        return job.copy(
+            displayName = entry.displayName,
+            adapter = entry.adapter,
+            mode = entry.mode,
+            defaultProfileJson = entry.defaultProfile.toString(),
+            profileSchemaJson = entry.profileSchema.toString(),
+            profileJson = profile.json.toString(),
+            profileError = null,
+        )
+    }
+
+    private fun profileErrorLocked(
+        key: DealerAsrPackKey,
+        job: DealerAsrDownloadJob?,
+        result: DealerAsrProfileSaveResult.Rejected,
+    ) {
+        job ?: return
+        jobs[key] = job.copy(profileError = result.errors.joinToString("; ") { "${it.path}: ${it.reason}" })
+        persistLocked()
+        publishLocked()
     }
 
     private fun persistLocked() {
