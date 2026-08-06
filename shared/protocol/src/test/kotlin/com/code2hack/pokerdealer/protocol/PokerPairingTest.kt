@@ -77,6 +77,23 @@ class PokerPairingTest {
     }
 
     @Test
+    fun `enrollment diagnostics redact code and challenge state`() {
+        val poker = controller(
+            PokerPairingRole.POKER,
+            FakeIdentity(byteArrayOf(1, 2, 3)),
+            "123456",
+        )
+        val enrollment = poker.openEnrollment(0, physicalEnrollmentConfirmed = true)
+
+        assertEquals(
+            "PokerPairingEnrollment(challenge=<redacted>, displayCode=<redacted>)",
+            enrollment.toString(),
+        )
+        assertFalse(enrollment.toString().contains(enrollment.displayCode))
+        assertFalse(enrollment.toString().contains(enrollment.challenge.challengeId))
+    }
+
+    @Test
     fun `enrollment code is always six digits`() {
         val poker = controller(
             PokerPairingRole.POKER,

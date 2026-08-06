@@ -85,7 +85,10 @@ data class PokerPairingEnrollment(
     val challenge: PokerPairingChallenge,
     /** Displayed locally; it is deliberately absent from the wire challenge. */
     val displayCode: String,
-)
+) {
+    override fun toString(): String =
+        "PokerPairingEnrollment(challenge=<redacted>, displayCode=<redacted>)"
+}
 
 enum class PokerPairingState {
     UNPAIRED,
