@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -81,6 +82,27 @@ class DealerAsrSliceSessionTest {
         assertEquals(1, fake.discards)
         assertEquals(1, fake.closed)
         assertTrue(fake.committedTexts.single() == "committed")
+    }
+
+    @Test
+    fun `takeover confirmation sees only the current uncommitted slice`() {
+        val fake = FakeRecognizer("")
+        val session = DealerAsrSliceSession(
+            sessionId = "session",
+            target = target(PokerAsrTargetField.COMPOSER),
+            pack = pack,
+            recognizer = DealerAsrProcessSession(fake, profile("")),
+        )
+
+        assertFalse(session.hasUncommittedSlice)
+        assertNull(session.accept(frame("session", 0, byteArrayOf(1, 0))))
+        assertTrue(session.hasUncommittedSlice)
+        fake.text = "committed"
+        assertEquals("committed", session.commitSlice(fenceSampleOffset = 1))
+        assertFalse(session.hasUncommittedSlice)
+
+        assertNull(session.accept(frame("session", 1, byteArrayOf(2, 0))))
+        assertTrue(session.hasUncommittedSlice)
     }
 
     private fun target(field: PokerAsrTargetField) = PokerAsrTarget(

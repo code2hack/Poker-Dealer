@@ -5,6 +5,9 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioFormat
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Process
@@ -30,6 +33,44 @@ internal interface PokerAsrRecorder {
     fun stop()
 
     fun release()
+}
+
+internal interface PokerAsrAudioFocus {
+    fun request(onLoss: () -> Unit): Boolean
+
+    fun abandon()
+}
+
+private object NoopPokerAsrAudioFocus : PokerAsrAudioFocus {
+    override fun request(onLoss: () -> Unit): Boolean = true
+
+    override fun abandon() = Unit
+}
+
+private class AndroidPokerAsrAudioFocus(context: Context) : PokerAsrAudioFocus {
+    private val audioManager = checkNotNull(context.getSystemService(AudioManager::class.java))
+    private var request: AudioFocusRequest? = null
+
+    override fun request(onLoss: () -> Unit): Boolean {
+        val nextRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            .setOnAudioFocusChangeListener { change ->
+                if (change != AudioManager.AUDIOFOCUS_GAIN) onLoss()
+            }
+            .build()
+        request = nextRequest
+        return audioManager.requestAudioFocus(nextRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+    }
+
+    override fun abandon() {
+        request?.let { audioManager.abandonAudioFocusRequest(it) }
+        request = null
+    }
 }
 
 private class AndroidPokerAsrRecorder(
@@ -76,6 +117,7 @@ internal class PokerAsrCapture internal constructor(
     private val dispatcher: CoroutineDispatcher = Dispatchers.Unconfined,
     private val storageAvailable: () -> Boolean = { true },
     private val sourceAvailable: () -> Boolean = { true },
+    private val audioFocus: PokerAsrAudioFocus = NoopPokerAsrAudioFocus,
     private val onFailureReason: ((String) -> Unit)? = null,
 ) {
     constructor(
@@ -101,12 +143,18 @@ internal class PokerAsrCapture internal constructor(
         recorderFactory = ::createAndroidPokerAsrRecorder,
         dispatcher = Dispatchers.IO,
         storageAvailable = { hasNativeStorage(context) },
+        audioFocus = AndroidPokerAsrAudioFocus(context),
         onFailureReason = onFailureReason,
     )
 
     private var recorder: PokerAsrRecorder? = null
     private var job: Job? = null
     private var failureReported = false
+    private var focusHeld = false
+    @Volatile
+    private var running = false
+    @Volatile
+    private var focusLost = false
 
     fun start(): Boolean {
         if (job?.isActive == true) return true
@@ -124,9 +172,22 @@ internal class PokerAsrCapture internal constructor(
             reportFailure("ASR unavailable")
             return false
         }
-        val audio = recorderFactory(minimum)
-        if (audio == null) {
-            reportFailure("ASR unavailable")
+        focusLost = false
+        running = true
+        focusHeld = true
+        val focusGranted = runCatching { audioFocus.request(::onAudioFocusLost) }.getOrDefault(false)
+        if (!focusGranted || !running || focusLost) {
+            running = false
+            releaseAudioFocus()
+            reportFailure(if (focusLost) "ASR failed" else "ASR unavailable")
+            return false
+        }
+        val audio = runCatching { recorderFactory(minimum) }.getOrNull()
+        if (audio == null || !running || focusLost) {
+            running = false
+            runCatching { audio?.release() }
+            releaseAudioFocus()
+            reportFailure(if (focusLost) "ASR failed" else "ASR unavailable")
             return false
         }
         recorder = audio
@@ -135,14 +196,17 @@ internal class PokerAsrCapture internal constructor(
             job = scope.launch(dispatcher) { readLoop(audio) }
             true
         }.getOrElse {
+            running = false
             runCatching { audio.release() }
             recorder = null
+            releaseAudioFocus()
             reportFailure("ASR unavailable")
             false
         }
     }
 
     fun stop() {
+        running = false
         job?.cancel()
         job = null
         recorder?.let { audio ->
@@ -150,18 +214,19 @@ internal class PokerAsrCapture internal constructor(
             runCatching { audio.release() }
         }
         recorder = null
+        releaseAudioFocus()
     }
 
     private suspend fun readLoop(audio: PokerAsrRecorder) {
         runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
         val buffer = ByteArray(POKER_ASR_FRAME_BYTES)
         try {
-            while (scope.isActive && audio.isRecording) {
+            while (scope.isActive && running && audio.isRecording) {
                 if (!permissionGranted()) {
                     reportFailure("ASR unavailable")
                     return
                 }
-                if (!storageAvailable() || !sourceAvailable()) {
+                if (!storageAvailable() || focusLost || !sourceAvailable()) {
                     reportFailure("ASR failed")
                     return
                 }
@@ -179,13 +244,29 @@ internal class PokerAsrCapture internal constructor(
             }
         } finally {
             if (recorder === audio) {
+                running = false
                 runCatching { audio.stop() }
                 runCatching { audio.release() }
                 recorder = null
+                releaseAudioFocus()
             }
         }
     }
 
+    private fun onAudioFocusLost() {
+        if (!running) return
+        focusLost = true
+        reportFailure("ASR failed")
+        stop()
+    }
+
+    private fun releaseAudioFocus() {
+        if (!focusHeld) return
+        focusHeld = false
+        runCatching { audioFocus.abandon() }
+    }
+
+    @Synchronized
     private fun reportFailure(reason: String) {
         if (failureReported) return
         failureReported = true

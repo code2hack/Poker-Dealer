@@ -19,6 +19,7 @@ import com.code2hack.pokerdealer.protocol.POKER_ASR_AVAILABILITY_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_COMMIT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_DISCARD_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_EXIT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_ASR_MAX_AUDIO_BYTES
 import com.code2hack.pokerdealer.protocol.POKER_ASR_START_TYPE
 import com.code2hack.pokerdealer.protocol.PokerAsrAvailability
 import com.code2hack.pokerdealer.protocol.PokerAsrAudioFrame
@@ -49,6 +50,7 @@ import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -307,6 +309,138 @@ class PokerAsrControllerTest {
     }
 
     @Test
+    fun `duplicate and lost mutation acknowledgments never replay audio`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
+        assertTrue(harness.controller.sendAudio(byteArrayOf(2, 0)))
+        val acknowledgment = PokerAsrCommitResult(
+            target = start.target,
+            sessionId = start.sessionId,
+            operationId = commit.operationId,
+            outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+            committedText = "ok.",
+            nextTarget = start.target.copy(targetRevision = 8, cursorPosition = 5),
+        )
+
+        harness.controller.onCommitResult(acknowledgment)
+        val audioCountAfterAck = sent.filterType(POKER_ASR_AUDIO_TYPE).size
+        harness.controller.onCommitResult(acknowledgment)
+        assertEquals(audioCountAfterAck, sent.filterType(POKER_ASR_AUDIO_TYPE).size)
+
+        harness.controller.onConnectionLost()
+        harness.controller.onCommitResult(acknowledgment)
+        assertEquals(audioCountAfterAck, sent.filterType(POKER_ASR_AUDIO_TYPE).size)
+        assertEquals(1, harness.counters.captureStops)
+    }
+
+    @Test
+    fun `reserved queue rejection below the cap is classified as overload and exits once`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        repeat(32) {
+            assertTrue(harness.controller.sendAudio(ByteArray(2_046)))
+        }
+        assertFalse(harness.controller.sendAudio(ByteArray(POKER_ASR_MAX_AUDIO_BYTES)))
+        assertEquals("ASR overloaded", harness.controller.captureFailureNotice("ASR failed"))
+
+        harness.controller.fail(harness.controller.captureFailureNotice("ASR failed"))
+        harness.controller.fail("ASR failed")
+        assertEquals(PokerAsrState.IDLE, harness.controller.state)
+        assertEquals(1, harness.counters.captureStops)
+        assertEquals(1, harness.counters.failures)
+    }
+
+    @Test
+    fun `forced exit discards late callbacks and results without replay or deliberate notice`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
+        assertTrue(harness.controller.sendAudio(byteArrayOf(2, 0)))
+        val exit = run {
+            harness.controller.forceExit()
+            message<PokerAsrExitRequest>(POKER_ASR_EXIT_TYPE)
+        }
+        val audioCount = sent.filterType(POKER_ASR_AUDIO_TYPE).size
+
+        harness.controller.onCommitResult(
+            PokerAsrCommitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = commit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+                committedText = "late",
+            ),
+        )
+        harness.controller.onDiscardResult(
+            PokerAsrDiscardResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = commit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+            ),
+        )
+        harness.controller.onExitResult(
+            PokerAsrExitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = exit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+            ),
+        )
+
+        assertEquals(PokerAsrState.IDLE, harness.controller.state)
+        assertEquals(audioCount, sent.filterType(POKER_ASR_AUDIO_TYPE).size)
+        assertEquals(1, harness.counters.captureStops)
+        assertEquals(0, harness.counters.notices)
+        assertEquals(0, harness.counters.failures)
+    }
+
+    @Test
+    fun `involuntary control loss exits without takeover confirmation notice`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+
+        harness.controller.onExitResult(
+            PokerAsrExitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = UUID.randomUUID().toString(),
+                outcome = PokerAsrMutationOutcome.REJECTED,
+                reason = "ASR control was taken over",
+            ),
+        )
+
+        assertEquals(PokerAsrState.IDLE, harness.controller.state)
+        assertEquals(1, harness.counters.captureStops)
+        assertEquals(0, harness.counters.notices)
+        assertEquals(1, harness.counters.failures)
+    }
+
+    @Test
     fun `active deliberate exit preserves notice boundary`() = runBlocking {
         val harness = composerHarness()
         assertTrue(harness.controller.start())
@@ -370,6 +504,7 @@ class PokerAsrControllerTest {
                 onCaptureRequired = { counters.captures++ },
                 onCaptureStop = { counters.captureStops++ },
                 onExitNotice = { counters.notices++ },
+                onFailureNotice = { counters.failures++ },
             ),
             counters = counters,
         )
@@ -424,6 +559,7 @@ class PokerAsrControllerTest {
         var captures: Int = 0,
         var captureStops: Int = 0,
         var notices: Int = 0,
+        var failures: Int = 0,
     )
 
     private companion object {

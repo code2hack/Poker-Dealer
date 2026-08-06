@@ -68,6 +68,8 @@ internal class PokerAsrController(
     private val audioMutex = Mutex()
     private val reservedAudio = ArrayDeque<ReservedAudio>()
     private var reservedAudioBytes = 0
+    @Volatile
+    private var queueOverflowed = false
 
     fun isInputCaptured(): Boolean = state != PokerAsrState.IDLE
 
@@ -86,6 +88,7 @@ internal class PokerAsrController(
         pendingExitOperationId = null
         currentSliceHasAudio = false
         lastCommittedSlice = null
+        queueOverflowed = false
         state = PokerAsrState.PREPARING
         val sent = PokerAsrBridge.sendStart(PokerAsrStartRequest(nextTarget, nextSession))
         if (!sent) reset()
@@ -121,6 +124,7 @@ internal class PokerAsrController(
             val offset = nextSampleOffset
             if (pendingOperationId != null) {
                 if (pcm16.size > POKER_ASR_MAX_AUDIO_QUEUE_BYTES - reservedAudioBytes) {
+                    queueOverflowed = true
                     return@withLock false
                 }
                 reservedAudio.addLast(ReservedAudio(offset, pcm16.copyOf()))
@@ -303,7 +307,7 @@ internal class PokerAsrController(
     }
 
     fun captureFailureNotice(default: String): String =
-        if (default == "ASR failed" && reservedAudioBytes >= POKER_ASR_MAX_AUDIO_QUEUE_BYTES) {
+        if (default == "ASR failed" && queueOverflowed) {
             "ASR overloaded"
         } else {
             default
