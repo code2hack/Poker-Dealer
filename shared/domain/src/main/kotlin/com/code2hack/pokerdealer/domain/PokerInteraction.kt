@@ -694,6 +694,7 @@ data class ComposerDeletionRequest(
     val start: Int,
     val endExclusive: Int,
     val target: ComposerEditTarget? = null,
+    val photoAssetId: String? = null,
 )
 
 fun PokerNavigationReducer.shortComposerDeletion(
@@ -703,7 +704,6 @@ fun PokerNavigationReducer.shortComposerDeletion(
     val composer = layout(locator)?.composer ?: return null
     val draft = composer.draft ?: return null
     val deletion = draft.deleteThroughNextWord(anchor.cursorPosition) ?: return null
-    if (deletion.containsPhoto) return null
     val target = composer.modeSession.takeIf(String::isNotBlank)?.let { modeSession ->
         ComposerEditTarget(
             locator = locator,
@@ -713,6 +713,17 @@ fun PokerNavigationReducer.shortComposerDeletion(
             connectionEpoch = composer.connectionEpoch,
             modeSession = modeSession,
             operationId = UUID.randomUUID().toString(),
+        )
+    }
+    if (deletion.containsPhoto) {
+        val photo = draft.visibleUnits().getOrNull(anchor.cursorPosition)?.photoAssetId ?: return null
+        return ComposerDeletionRequest(
+            locator = locator,
+            draftRevision = draft.revision,
+            start = anchor.cursorPosition,
+            endExclusive = anchor.cursorPosition + 1,
+            target = target,
+            photoAssetId = photo,
         )
     }
     return ComposerDeletionRequest(locator, draft.revision, deletion.start, deletion.endExclusive, target)

@@ -66,6 +66,7 @@ import com.code2hack.pokerdealer.protocol.appserver.M1RecoveryUpdate
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnOutcome
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnRecoveryException
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
+import com.code2hack.pokerdealer.protocol.appserver.AppServerTurnInput
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnectionConfig
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
@@ -106,6 +107,27 @@ import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_MORSE_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CANCEL_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_BEGIN_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_CHUNK_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_COMPLETE_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_DELETE_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_DELETE_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_START_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_START_TYPE
+import com.code2hack.pokerdealer.protocol.PhotoAssetCodec
+import com.code2hack.pokerdealer.protocol.PhotoAssetTarget
+import com.code2hack.pokerdealer.protocol.PhotoCaptureBegin
+import com.code2hack.pokerdealer.protocol.PhotoCaptureChunk
+import com.code2hack.pokerdealer.protocol.PhotoCaptureComplete
+import com.code2hack.pokerdealer.protocol.PhotoCaptureOutcome
+import com.code2hack.pokerdealer.protocol.PhotoCaptureResult
+import com.code2hack.pokerdealer.protocol.PhotoDeleteResult
+import com.code2hack.pokerdealer.protocol.PhotoStartOutcome
+import com.code2hack.pokerdealer.protocol.PhotoStartResult
+import com.code2hack.pokerdealer.protocol.PhotoStartTarget
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
@@ -221,6 +243,11 @@ class DealerConnectionService : Service() {
     private val pokerPrimaryResults = mutableMapOf<String, PokerPrimaryActionResult>()
     private val pokerUserInputBindings = mutableMapOf<ServerRequestLocator, PokerUserInputBinding>()
     private val pokerUserInputResults = mutableMapOf<String, UserInputAnswerMutationResult>()
+    private lateinit var photoAssets: DealerPhotoAssetStore
+    private val photoSessions = mutableMapOf<String, DealerPhotoSession>()
+    private val photoTransfers = mutableMapOf<String, DealerPhotoTransfer>()
+    private val photoResults = mutableMapOf<String, PhotoCaptureResult>()
+    private val photoDeleteResults = mutableMapOf<String, PhotoDeleteResult>()
     private val pokerMorseResults = mutableMapOf<String, MorseMutationResult>()
     private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val tailnetEngine = Engine()
@@ -296,6 +323,7 @@ class DealerConnectionService : Service() {
                     POKER_SNAPSHOT_CAPABILITY,
                     POKER_LIVE_DELTA_CAPABILITY,
                     POKER_PRIMARY_ACTION_CAPABILITY,
+                    POKER_PHOTO_CAPABILITY,
                     POKER_MORSE_CAPABILITY,
                     POKER_FONT_SCALE_CAPABILITY,
                     POKER_DIAGNOSTICS_CAPABILITY,
@@ -318,6 +346,7 @@ class DealerConnectionService : Service() {
         )
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
+        photoAssets = DealerPhotoAssetStore(this)
         retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
         stateRecoveryStore = DealerStateRecoveryStore(noBackupFilesDir.resolve("recovery"))
         val hostConnectionIntents = HostConnectionIntentDataStore(this)
@@ -1158,6 +1187,11 @@ class DealerConnectionService : Service() {
         epoch: PokerConnectionEpoch,
         negotiation: com.code2hack.pokerdealer.protocol.PokerProtocolNegotiation,
     ) {
+        photoTransfers.values.forEach { transfer -> photoAssets.delete(transfer.target.assetId) }
+        photoTransfers.clear()
+        photoSessions.clear()
+        photoResults.clear()
+        photoDeleteResults.clear()
         pokerComposerEpoch = epoch
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
@@ -1302,6 +1336,60 @@ class DealerConnectionService : Service() {
                 }.getOrNull() ?: return
                 handlePokerPrimaryAction(epoch, envelope, target)
             }
+            POKER_PHOTO_START_TYPE -> {
+                val target = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoStartTarget.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoStart(epoch, envelope, target)
+            }
+            POKER_PHOTO_CAPTURE_BEGIN_TYPE -> {
+                val begin = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoCaptureBegin.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoCaptureBegin(epoch, envelope, begin)
+            }
+            POKER_PHOTO_CAPTURE_CHUNK_TYPE -> {
+                val chunk = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoCaptureChunk.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoCaptureChunk(epoch, envelope, chunk)
+            }
+            POKER_PHOTO_CAPTURE_COMPLETE_TYPE -> {
+                val complete = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoCaptureComplete.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoCaptureComplete(epoch, envelope, complete)
+            }
+            POKER_PHOTO_DELETE_TYPE -> {
+                val target = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoAssetTarget.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoDelete(epoch, envelope, target)
+            }
+            POKER_PHOTO_CANCEL_TYPE -> {
+                val target = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PhotoStartTarget.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPhotoCancel(epoch, target)
+            }
         }
     }
 
@@ -1339,6 +1427,346 @@ class DealerConnectionService : Service() {
             projection,
         ).jsonObject
         pokerConnectionOwner.send(POKER_COMPOSER_DRAFT_PROJECTION_TYPE, payload)
+    }
+
+    private suspend fun handlePokerPhotoStart(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        target: PhotoStartTarget,
+    ) {
+        val state = mutableState.value
+        val draft = state.threadActions.composerDraft(target.locator)
+        val binding = pokerComposerBindings[target.locator]
+        val existing = photoSessions[target.sessionId]
+        val rejection = when {
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                "Photo connection epoch is stale"
+            target.locator !in state.threadAttachments.attached ||
+                !state.threadAttachments.hasDealerClaim(target.locator) ->
+                "Dealer control is unavailable"
+            target.locator !in state.threads ||
+                state.threads[target.locator]?.workState !in setOf(
+                    ThreadWorkState.READY,
+                    ThreadWorkState.BUSY,
+                ) -> "Composer is not editable"
+            state.threadActions.pendingInputs.containsKey(target.locator) ||
+                state.threadActions.pendingInterrupts.containsKey(target.locator) ->
+                "Composer has a pending action"
+            binding == null || binding.epoch != epoch.value ||
+                binding.controlGeneration != target.controlGeneration ||
+                binding.modeSession != target.modeSession ->
+                "Photo control target is stale"
+            target.draftRevision != draft.revision -> "Composer draft revision is stale"
+            target.cursorPosition !in 0 until draft.cursorCount -> "Composer cursor is stale"
+            existing != null && existing.target != target -> "Photo session already exists"
+            else -> null
+        }
+        val result = if (rejection == null) {
+            if (existing == null) {
+                photoSessions[target.sessionId] = DealerPhotoSession(
+                    target = target,
+                    cursorPosition = target.cursorPosition,
+                )
+            }
+            PhotoStartResult(target, PhotoStartOutcome.ACCEPTED)
+        } else {
+            PhotoStartResult(target, PhotoStartOutcome.REJECTED, rejection)
+        }
+        pokerConnectionOwner.send(
+            type = POKER_PHOTO_START_RESULT_TYPE,
+            payload = PokerProtocolJson.encodeToJsonElement(
+                PhotoStartResult.serializer(),
+                result,
+            ).jsonObject,
+            replyTo = envelope.messageId,
+        )
+    }
+
+    private suspend fun handlePokerPhotoCaptureBegin(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        begin: PhotoCaptureBegin,
+    ) {
+        val target = begin.target
+        val cached = photoResults[target.operationId]?.takeIf { it.target == target }
+        if (cached != null) {
+            sendPokerPhotoCaptureResult(envelope, cached)
+            return
+        }
+        val state = mutableState.value
+        val session = photoSessions[target.sessionId]
+        val draft = state.threadActions.composerDraft(target.locator)
+        val rejection = when {
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                "Photo connection epoch is stale"
+            session == null || session.target.connectionEpoch != epoch.value ->
+                "Photo session is no longer active"
+            target.locator != session.target.locator ||
+                target.controlGeneration != session.target.controlGeneration ||
+                target.modeSession != session.target.modeSession ->
+                "Photo session target is stale"
+            target.draftRevision != draft.revision ||
+                target.cursorPosition != session.cursorPosition ||
+                target.cursorPosition !in 0 until draft.cursorCount ->
+                "Photo draft cursor is stale"
+            target.assetId in session.committedAssetIds ||
+                photoTransfers.values.any { it.target.assetId == target.assetId } ->
+                "Photo asset is already in flight"
+            else -> null
+        }
+        if (rejection != null) {
+            sendPokerPhotoCaptureResult(
+                envelope,
+                PhotoCaptureResult(target, PhotoCaptureOutcome.REJECTED, draft, rejection),
+            )
+            return
+        }
+        if (!photoAssets.begin(target.assetId, begin.expectedLength)) {
+            sendPokerPhotoCaptureResult(
+                envelope,
+                PhotoCaptureResult(
+                    target,
+                    PhotoCaptureOutcome.REJECTED,
+                    draft,
+                    "Insufficient storage",
+                ),
+            )
+            return
+        }
+        val transfer = DealerPhotoTransfer(
+            target = target,
+            mimeType = begin.mimeType,
+            expectedLength = begin.expectedLength,
+            timeout = scope.launch {
+                delay(PHOTO_TRANSFER_TIMEOUT_MS)
+                val expired = photoTransfers.remove(target.operationId) ?: return@launch
+                photoAssets.delete(expired.target.assetId)
+                val result = PhotoCaptureResult(
+                    expired.target,
+                    PhotoCaptureOutcome.REJECTED,
+                    mutableState.value.threadActions.composerDraft(expired.target.locator),
+                    "Photo transfer timed out",
+                )
+                photoResults[expired.target.operationId] = result
+                if (pokerComposerEpoch == epoch) sendPokerPhotoCaptureResult(null, result)
+            },
+        )
+        photoTransfers[target.operationId] = transfer
+    }
+
+    private suspend fun handlePokerPhotoCaptureChunk(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        chunk: PhotoCaptureChunk,
+    ) {
+        val transfer = photoTransfers[chunk.target.operationId] ?: return
+        if (transfer.target != chunk.target || chunk.target.connectionEpoch != epoch.value) return
+        val bytes = runCatching { PhotoAssetCodec.decode(chunk.data) }.getOrNull()
+        if (bytes == null || chunk.offset != transfer.nextOffset ||
+            chunk.offset + bytes.size > transfer.expectedLength ||
+            !photoAssets.append(chunk.target.assetId, chunk.offset, bytes)
+        ) {
+            rejectPhotoTransfer(epoch, envelope, transfer, "Photo transfer is invalid")
+            return
+        }
+        transfer.nextOffset += bytes.size
+    }
+
+    private suspend fun handlePokerPhotoCaptureComplete(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        complete: PhotoCaptureComplete,
+    ) {
+        val target = complete.target
+        photoResults[target.operationId]?.takeIf { it.target == target }?.let {
+            sendPokerPhotoCaptureResult(envelope, it)
+            return
+        }
+        val transfer = photoTransfers.remove(target.operationId) ?: return
+        transfer.timeout.cancel()
+        val state = mutableState.value
+        val session = photoSessions[target.sessionId]
+        val current = state.threadActions.composerDraft(target.locator)
+        if (transfer.target != target || session == null || target.connectionEpoch != epoch.value ||
+            complete.length != transfer.expectedLength || transfer.nextOffset != complete.length ||
+            target.draftRevision != current.revision ||
+            target.cursorPosition != session.cursorPosition
+        ) {
+            photoAssets.delete(target.assetId)
+            rejectPhotoResult(
+                epoch,
+                envelope,
+                target,
+                current,
+                "Photo transfer is stale or incomplete",
+            )
+            return
+        }
+        val committed = photoAssets.commit(
+            assetId = target.assetId,
+            mimeType = transfer.mimeType,
+            expectedLength = complete.length,
+            expectedSha256 = complete.sha256,
+        )
+        if (committed == null) {
+            rejectPhotoResult(epoch, envelope, target, current, "Photo not added")
+            return
+        }
+        val next = current
+            .insertPhoto(target.cursorPosition, target.assetId)
+            .withRevision(current.revision + 1)
+        val response = try {
+            draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
+            mutableState.update {
+                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+            }
+            session.cursorPosition = target.cursorPosition + 1
+            session.committedAssetIds += target.assetId
+            PhotoCaptureResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+        } catch (failure: Throwable) {
+            PhotoCaptureResult(
+                target,
+                PhotoCaptureOutcome.UNCERTAIN,
+                current,
+                "Photo durability is uncertain: ${failure.message}",
+            )
+        }
+        photoResults[target.operationId] = response
+        sendPokerPhotoCaptureResult(envelope, response)
+        if (response.outcome == PhotoCaptureOutcome.ACKNOWLEDGED) {
+            sendPokerProjection(epoch, target.locator)
+        }
+    }
+
+    private suspend fun handlePokerPhotoDelete(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        target: PhotoAssetTarget,
+    ) {
+        photoDeleteResults[target.operationId]?.takeIf { it.target == target }?.let {
+            sendPokerPhotoDeleteResult(envelope, it)
+            return
+        }
+        val state = mutableState.value
+        val current = state.threadActions.composerDraft(target.locator)
+        val session = photoSessions[target.sessionId]
+        val unit = current.visibleUnits().getOrNull(target.cursorPosition)
+        val rejection = when {
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                "Photo connection epoch is stale"
+            session == null || session.target.modeSession != target.modeSession ->
+                "Photo session is no longer active"
+            target.draftRevision != current.revision ||
+                target.cursorPosition !in 0 until current.cursorCount ->
+                "Photo draft target is stale"
+            unit?.photoAssetId != target.assetId -> "Photo token is no longer present"
+            else -> null
+        }
+        if (rejection != null) {
+            val result = PhotoDeleteResult(target, PhotoCaptureOutcome.REJECTED, current, rejection)
+            photoDeleteResults[target.operationId] = result
+            sendPokerPhotoDeleteResult(envelope, result)
+            return
+        }
+        val next = current
+            .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
+            .withRevision(current.revision + 1)
+        val result = try {
+            draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
+            mutableState.update {
+                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+            }
+            photoAssets.delete(target.assetId)
+            session?.committedAssetIds?.remove(target.assetId)
+            session?.cursorPosition = target.cursorPosition
+            PhotoDeleteResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+        } catch (failure: Throwable) {
+            PhotoDeleteResult(
+                target,
+                PhotoCaptureOutcome.UNCERTAIN,
+                current,
+                "Photo deletion is uncertain: ${failure.message}",
+            )
+        }
+        photoDeleteResults[target.operationId] = result
+        sendPokerPhotoDeleteResult(envelope, result)
+        if (result.outcome == PhotoCaptureOutcome.ACKNOWLEDGED) {
+            sendPokerProjection(epoch, target.locator)
+        }
+    }
+
+    private suspend fun handlePokerPhotoCancel(
+        epoch: PokerConnectionEpoch,
+        target: PhotoStartTarget,
+    ) {
+        if (pokerComposerEpoch != epoch || target.connectionEpoch != epoch.value) return
+        photoSessions.remove(target.sessionId)
+        photoTransfers.values
+            .filter { it.target.sessionId == target.sessionId }
+            .toList()
+            .forEach { transfer ->
+                photoTransfers.remove(transfer.target.operationId)
+                transfer.timeout.cancel()
+                photoAssets.delete(transfer.target.assetId)
+            }
+    }
+
+    private suspend fun rejectPhotoTransfer(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        transfer: DealerPhotoTransfer,
+        reason: String,
+    ) {
+        photoTransfers.remove(transfer.target.operationId)
+        transfer.timeout.cancel()
+        photoAssets.delete(transfer.target.assetId)
+        rejectPhotoResult(
+            epoch,
+            envelope,
+            transfer.target,
+            mutableState.value.threadActions.composerDraft(transfer.target.locator),
+            reason,
+        )
+    }
+
+    private suspend fun rejectPhotoResult(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope?,
+        target: PhotoAssetTarget,
+        draft: ComposerDraft,
+        reason: String,
+    ) {
+        val result = PhotoCaptureResult(target, PhotoCaptureOutcome.REJECTED, draft, reason)
+        photoResults[target.operationId] = result
+        if (pokerComposerEpoch == epoch) sendPokerPhotoCaptureResult(envelope, result)
+    }
+
+    private suspend fun sendPokerPhotoCaptureResult(
+        envelope: ProtocolEnvelope?,
+        result: PhotoCaptureResult,
+    ) {
+        pokerConnectionOwner.send(
+            type = POKER_PHOTO_CAPTURE_RESULT_TYPE,
+            payload = PokerProtocolJson.encodeToJsonElement(
+                PhotoCaptureResult.serializer(),
+                result,
+            ).jsonObject,
+            replyTo = envelope?.messageId,
+        )
+    }
+
+    private suspend fun sendPokerPhotoDeleteResult(
+        envelope: ProtocolEnvelope,
+        result: PhotoDeleteResult,
+    ) {
+        pokerConnectionOwner.send(
+            type = POKER_PHOTO_DELETE_RESULT_TYPE,
+            payload = PokerProtocolJson.encodeToJsonElement(
+                PhotoDeleteResult.serializer(),
+                result,
+            ).jsonObject,
+            replyTo = envelope.messageId,
+        )
     }
 
     private suspend fun sendPokerUserInputProjection(
@@ -2065,7 +2493,10 @@ class DealerConnectionService : Service() {
 
         val binding = pokerComposerBindings[target.locator]
         val rejection = when {
-            request.kind != ComposerMutationKind.DELETE_THROUGH_NEXT_WORD ->
+            request.kind !in setOf(
+                ComposerMutationKind.DELETE_THROUGH_NEXT_WORD,
+                ComposerMutationKind.DELETE_PHOTO,
+            ) ->
                 result(ComposerMutationOutcome.REJECTED, reason = "Unsupported composer mutation")
             target.surface != ComposerSurface.THREAD_COMPOSER ->
                 result(ComposerMutationOutcome.REJECTED, reason = "Request panels are not composers")
@@ -2091,6 +2522,48 @@ class DealerConnectionService : Service() {
                 sendPokerMutationResult(envelope, it)
                 return
             }
+
+        if (request.kind == ComposerMutationKind.DELETE_PHOTO) {
+            val assetId = request.assetId
+            val unit = current.visibleUnits().getOrNull(target.cursorPosition)
+            val response = when {
+                assetId.isNullOrBlank() -> result(
+                    ComposerMutationOutcome.REJECTED,
+                    reason = "Photo asset is missing",
+                )
+                target.draftRevision != current.revision ||
+                    unit?.photoAssetId != assetId -> result(
+                    ComposerMutationOutcome.REJECTED,
+                    reason = "Photo token is stale",
+                )
+                else -> {
+                    val next = current
+                        .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
+                        .withRevision(current.revision + 1)
+                    runCatching {
+                        draftMutex.withLock {
+                            threadAttachmentStore.writeDraft(target.locator, next)
+                        }
+                        mutableState.update {
+                            it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                        }
+                        photoAssets.delete(assetId)
+                        result(ComposerMutationOutcome.ACKNOWLEDGED, next)
+                    }.getOrElse { failure ->
+                        result(
+                            ComposerMutationOutcome.UNCERTAIN,
+                            reason = "Photo deletion is uncertain: ${failure.message}",
+                        )
+                    }
+                }
+            }
+            pokerComposerResults[target.locator] = response
+            sendPokerMutationResult(envelope, response)
+            if (response.outcome == ComposerMutationOutcome.ACKNOWLEDGED) {
+                sendPokerProjection(epoch, target.locator)
+            }
+            return
+        }
 
         val editor = try {
             ComposerEditorState.atEnd(
@@ -2224,14 +2697,7 @@ class DealerConnectionService : Service() {
             onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
-        if (pending.draft.elements.any { it is ComposerElement.Photo }) {
-            mutableState.update {
-                it.copy(error = "Photo drafts require image submission support")
-            }
-            onOutcome(PokerPrimaryActionOutcome.REJECTED)
-            return
-        }
-        val text = actions.drafts.getValue(locator)
+        val text = pending.draftText
         val reasoningEffort = actions.pendingReasoningEfforts[locator]
         val conversationId = "${locator.hostId}/${locator.threadId}"
         val sequence = state.cards
@@ -2268,17 +2734,29 @@ class DealerConnectionService : Service() {
                 return@launch
             }
             try {
+                val input = pending.draft.elements.map { element ->
+                    when (element) {
+                        is ComposerElement.Text -> AppServerTurnInput.text(element.value)
+                        is ComposerElement.Photo -> {
+                            val image = photoAssets.read(element.assetId)
+                                ?: error("Photo asset ${element.assetId} is unavailable")
+                            AppServerTurnInput.image(
+                                PhotoAssetCodec.dataUrl(image.mimeType, image.bytes),
+                            )
+                        }
+                    }
+                }
                 val response = when (pending.action) {
                     ComposerAction.START -> appServer.turnStart(
                         locator.threadId,
-                        text,
+                        input,
                         clientId,
                         effort = reasoningEffort,
                     )
                     ComposerAction.STEER -> appServer.turnSteer(
                         locator.threadId,
                         pending.expectedTurnId!!,
-                        text,
+                        input,
                         clientId,
                     )
                     ComposerAction.BLOCKED -> error("Blocked input cannot be submitted")
@@ -2333,6 +2811,7 @@ class DealerConnectionService : Service() {
                         }
                     }
                 }
+                purgeUnusedPhotoAssets()
                 refreshPokerProjection(locator)
                 onOutcome(PokerPrimaryActionOutcome.ACCEPTED)
             } catch (cancelled: CancellationException) {
@@ -2382,6 +2861,18 @@ class DealerConnectionService : Service() {
                 onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
+    }
+
+    private suspend fun purgeUnusedPhotoAssets() {
+        val actions = mutableState.value.threadActions
+        val assetIds = (actions.composerDrafts.values + actions.pendingInputs.values.map { it.draft })
+            .flatMap { draft ->
+                draft.elements.mapNotNull { element ->
+                    (element as? ComposerElement.Photo)?.assetId
+                }
+            }
+            .toSet() + photoTransfers.values.map { it.target.assetId }
+        photoAssets.purgeExcept(assetIds)
     }
 
     fun interrupt(
@@ -4434,6 +4925,14 @@ class DealerConnectionService : Service() {
         pokerPrimaryResults.clear()
         pokerUserInputBindings.clear()
         pokerUserInputResults.clear()
+        photoTransfers.values.forEach { transfer ->
+            transfer.timeout.cancel()
+            scope.launch { photoAssets.delete(transfer.target.assetId) }
+        }
+        photoTransfers.clear()
+        photoSessions.clear()
+        photoResults.clear()
+        photoDeleteResults.clear()
         pokerMorseResults.clear()
         pokerApprovalBindings.clear()
         pokerConnectionOwner.stop()
@@ -4634,6 +5133,22 @@ class DealerConnectionService : Service() {
         )
     }
 }
+
+private const val PHOTO_TRANSFER_TIMEOUT_MS = 15_000L
+
+private data class DealerPhotoSession(
+    val target: PhotoStartTarget,
+    var cursorPosition: Int,
+    val committedAssetIds: MutableSet<String> = linkedSetOf(),
+)
+
+private data class DealerPhotoTransfer(
+    val target: PhotoAssetTarget,
+    val mimeType: String,
+    val expectedLength: Long,
+    val timeout: Job,
+    var nextOffset: Long = 0L,
+)
 
 private data class RetainedCards(
     val cards: List<Card>,

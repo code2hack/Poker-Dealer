@@ -6,6 +6,15 @@ import com.code2hack.pokerdealer.protocol.ComposerMutationResult
 import com.code2hack.pokerdealer.protocol.MorseMutationRequest
 import com.code2hack.pokerdealer.protocol.MorseMutationResult
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CANCEL_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_BEGIN_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_CHUNK_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_COMPLETE_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPTURE_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_DELETE_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_DELETE_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_START_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PHOTO_START_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
@@ -14,6 +23,14 @@ import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
+import com.code2hack.pokerdealer.protocol.PhotoAssetTarget
+import com.code2hack.pokerdealer.protocol.PhotoCaptureBegin
+import com.code2hack.pokerdealer.protocol.PhotoCaptureChunk
+import com.code2hack.pokerdealer.protocol.PhotoCaptureComplete
+import com.code2hack.pokerdealer.protocol.PhotoCaptureResult
+import com.code2hack.pokerdealer.protocol.PhotoDeleteResult
+import com.code2hack.pokerdealer.protocol.PhotoStartResult
+import com.code2hack.pokerdealer.protocol.PhotoStartTarget
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
@@ -46,6 +63,9 @@ internal object PokerComposerBridge {
     private val approvalProjectionState =
         MutableStateFlow<Map<ServerRequestLocator, PokerApprovalRequestProjection>>(emptyMap())
     private val primaryResultState = MutableStateFlow<Map<String, PokerPrimaryActionResult>>(emptyMap())
+    private val photoStartResultState = MutableStateFlow<Map<String, PhotoStartResult>>(emptyMap())
+    private val photoCaptureResultState = MutableStateFlow<Map<String, PhotoCaptureResult>>(emptyMap())
+    private val photoDeleteResultState = MutableStateFlow<Map<String, PhotoDeleteResult>>(emptyMap())
     private var sender: (suspend (String, JsonObject, Boolean) -> Boolean)? = null
 
     val projections: StateFlow<Map<com.code2hack.pokerdealer.domain.CodexThreadLocator, ComposerDraftProjection>> =
@@ -59,6 +79,9 @@ internal object PokerComposerBridge {
     val approvalProjections: StateFlow<Map<ServerRequestLocator, PokerApprovalRequestProjection>> =
         approvalProjectionState
     val primaryResults: StateFlow<Map<String, PokerPrimaryActionResult>> = primaryResultState
+    val photoStartResults: StateFlow<Map<String, PhotoStartResult>> = photoStartResultState
+    val photoCaptureResults: StateFlow<Map<String, PhotoCaptureResult>> = photoCaptureResultState
+    val photoDeleteResults: StateFlow<Map<String, PhotoDeleteResult>> = photoDeleteResultState
 
     fun attach(sender: suspend (String, JsonObject, Boolean) -> Boolean) {
         this.sender = sender
@@ -69,6 +92,9 @@ internal object PokerComposerBridge {
         morseResultState.value = emptyMap()
         approvalProjectionState.value = emptyMap()
         primaryResultState.value = emptyMap()
+        photoStartResultState.value = emptyMap()
+        photoCaptureResultState.value = emptyMap()
+        photoDeleteResultState.value = emptyMap()
     }
 
     fun detach() {
@@ -80,6 +106,9 @@ internal object PokerComposerBridge {
         morseResultState.value = emptyMap()
         approvalProjectionState.value = emptyMap()
         primaryResultState.value = emptyMap()
+        photoStartResultState.value = emptyMap()
+        photoCaptureResultState.value = emptyMap()
+        photoDeleteResultState.value = emptyMap()
     }
 
     fun receive(envelope: ProtocolEnvelope): Boolean = try {
@@ -148,6 +177,30 @@ internal object PokerComposerBridge {
                 primaryResultState.value = primaryResultState.value +
                     (result.target.operationId to result)
             }
+            POKER_PHOTO_START_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    PhotoStartResult.serializer(),
+                    envelope.payload,
+                )
+                photoStartResultState.value = photoStartResultState.value +
+                    (result.target.sessionId to result)
+            }
+            POKER_PHOTO_CAPTURE_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    PhotoCaptureResult.serializer(),
+                    envelope.payload,
+                )
+                photoCaptureResultState.value = photoCaptureResultState.value +
+                    (result.target.operationId to result)
+            }
+            POKER_PHOTO_DELETE_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    PhotoDeleteResult.serializer(),
+                    envelope.payload,
+                )
+                photoDeleteResultState.value = photoDeleteResultState.value +
+                    (result.target.operationId to result)
+            }
             else -> return false
         }
         true
@@ -189,5 +242,51 @@ internal object PokerComposerBridge {
             target,
         ).jsonObject
         return send(POKER_PRIMARY_ACTION_TYPE, payload, true)
+    }
+
+    suspend fun sendPhotoStart(target: PhotoStartTarget): Boolean = sendPhoto(
+        POKER_PHOTO_START_TYPE,
+        PhotoStartTarget.serializer(),
+        target,
+    )
+
+    suspend fun sendPhotoCaptureBegin(begin: PhotoCaptureBegin): Boolean = sendPhoto(
+        POKER_PHOTO_CAPTURE_BEGIN_TYPE,
+        PhotoCaptureBegin.serializer(),
+        begin,
+    )
+
+    suspend fun sendPhotoCaptureChunk(chunk: PhotoCaptureChunk): Boolean = sendPhoto(
+        POKER_PHOTO_CAPTURE_CHUNK_TYPE,
+        PhotoCaptureChunk.serializer(),
+        chunk,
+    )
+
+    suspend fun sendPhotoCaptureComplete(complete: PhotoCaptureComplete): Boolean = sendPhoto(
+        POKER_PHOTO_CAPTURE_COMPLETE_TYPE,
+        PhotoCaptureComplete.serializer(),
+        complete,
+    )
+
+    suspend fun sendPhotoDelete(target: PhotoAssetTarget): Boolean = sendPhoto(
+        POKER_PHOTO_DELETE_TYPE,
+        PhotoAssetTarget.serializer(),
+        target,
+    )
+
+    suspend fun sendPhotoCancel(target: PhotoStartTarget): Boolean = sendPhoto(
+        POKER_PHOTO_CANCEL_TYPE,
+        PhotoStartTarget.serializer(),
+        target,
+    )
+
+    private suspend fun <T> sendPhoto(
+        type: String,
+        serializer: kotlinx.serialization.KSerializer<T>,
+        value: T,
+    ): Boolean {
+        val send = sender ?: return false
+        val payload = PokerProtocolJson.encodeToJsonElement(serializer, value).jsonObject
+        return send(type, payload, true)
     }
 }

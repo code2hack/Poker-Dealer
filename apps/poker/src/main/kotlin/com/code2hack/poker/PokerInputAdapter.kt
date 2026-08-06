@@ -117,6 +117,7 @@ internal class PokerBuiltInInputAdapter(
     private val onNavigationChanged: () -> Unit = {},
     private val onResult: (PokerInputController.Result) -> Unit = {},
     private val onWheelChanged: (PokerWheelState) -> Unit = {},
+    private val photoHandler: ((PokerInteraction) -> Boolean)? = null,
 ) {
     private enum class Owner {
         TOUCH,
@@ -142,6 +143,7 @@ internal class PokerBuiltInInputAdapter(
     private var owner: Owner? = null
     private var touch: TouchState? = null
     private var function: FunctionState? = null
+    private var photoConsumed = false
 
     init {
         require(touchSlopPx > 0) { "Touch slop must be positive" }
@@ -165,7 +167,7 @@ internal class PokerBuiltInInputAdapter(
                     eventTimeMs = event.eventTimeMs,
                 ),
             )
-            state.domainStarted = result != null
+            state.domainStarted = result != null || photoConsumed
             return listOfNotNull(result)
         }
         if (owner != Owner.TOUCH) return emptyList()
@@ -220,7 +222,7 @@ internal class PokerBuiltInInputAdapter(
             function = FunctionState(
                 operation = operation,
                 lastEventTimeMs = event.eventTimeMs,
-                domainStarted = result != null,
+                domainStarted = result != null || photoConsumed,
             )
             return listOfNotNull(result)
         }
@@ -368,7 +370,10 @@ internal class PokerBuiltInInputAdapter(
     }
 
     private fun dispatch(interaction: PokerInteraction): PokerInputController.Result? =
-        controller.reduce(interaction)?.also {
+        if (photoHandler?.invoke(interaction) == true) {
+            photoConsumed = true
+            null
+        } else controller.reduce(interaction)?.also {
             onResult(it)
             onWheelChanged(it.wheelState)
             if (it.navigationEffect != com.code2hack.pokerdealer.domain.PokerNavigationEffect.NONE) {
@@ -385,11 +390,13 @@ internal class PokerBuiltInInputAdapter(
 
     private fun clearTouch() {
         touch = null
+        photoConsumed = false
         if (owner == Owner.TOUCH) owner = null
     }
 
     private fun clearFunction() {
         function = null
+        photoConsumed = false
         if (owner == Owner.FUNCTION) owner = null
     }
 
@@ -397,6 +404,7 @@ internal class PokerBuiltInInputAdapter(
         owner = null
         touch = null
         function = null
+        photoConsumed = false
     }
 }
 
@@ -431,6 +439,7 @@ internal class PokerRemoteInputAdapter(
     private val onNotice: (String) -> Unit = {},
     private val onResult: (PokerInputController.Result) -> Unit = {},
     private val onWheelChanged: (PokerWheelState) -> Unit = {},
+    private val photoHandler: ((PokerInteraction) -> Boolean)? = null,
 ) {
     private data class ActiveKey(
         val descriptor: String,
@@ -591,6 +600,7 @@ internal class PokerRemoteInputAdapter(
     }
 
     private fun dispatch(interaction: PokerInteraction) {
+        if (photoHandler?.invoke(interaction) == true) return
         controller.reduce(interaction)?.let {
             onResult(it)
             onWheelChanged(it.wheelState)

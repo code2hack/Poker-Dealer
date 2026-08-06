@@ -180,6 +180,7 @@ internal class PokerPrimaryActionController(
                 controlGeneration = composerLayout.controlGeneration,
                 connectionEpoch = composerLayout.connectionEpoch,
                 modeSession = composerLayout.modeSession,
+                photoAvailable = true,
                 primaryAction = primary,
                 morseAvailable = morseAvailable,
             ),
