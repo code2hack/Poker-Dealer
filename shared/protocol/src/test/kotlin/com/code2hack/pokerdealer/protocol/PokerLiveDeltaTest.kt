@@ -6,6 +6,8 @@ import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import java.util.ArrayDeque
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -86,6 +88,41 @@ class PokerLiveDeltaTest {
     }
 
     @Test
+    fun `sender and receiver reject skipped card revisions`() {
+        val base = snapshot(1, card(text = "a", revision = 1, complete = false))
+        val jumped = snapshot(2, card(text = "ab", revision = 3, complete = false))
+        assertNull(PokerLiveDeltaWire.build(base, jumped))
+
+        val valid = checkNotNull(
+            PokerLiveDeltaWire.build(
+                base,
+                snapshot(2, card(text = "ab", revision = 2, complete = false)),
+            ),
+        ).single()
+        val receiver = PokerLiveDeltaReceiver().also { it.installSnapshot(base) }
+        assertEquals(
+            PokerLiveDeltaInstallStatus.MALFORMED,
+            receiver.accept(valid.copy(cardRevision = 3)).status,
+        )
+        assertEquals(1L, receiver.installedSnapshot!!.revision)
+    }
+
+    @Test
+    fun `receiver validates every split UTF-8 chunk offset`() {
+        val base = snapshot(1, card(text = "a", revision = 1, complete = false))
+        val growing = snapshot(2, card(text = "a🙂b", revision = 2, complete = false))
+        val deltas = checkNotNull(PokerLiveDeltaWire.build(base, growing, maxChunkBytes = 4))
+        val receiver = PokerLiveDeltaReceiver().also { it.installSnapshot(base) }
+
+        assertEquals(PokerLiveDeltaInstallStatus.QUEUED, receiver.accept(deltas[0]).status)
+        assertEquals(
+            PokerLiveDeltaInstallStatus.RESNAPSHOT_REQUIRED,
+            receiver.accept(deltas[1].copy(offsetUtf8Bytes = 4)).status,
+        )
+        assertEquals(base, receiver.installedSnapshot)
+    }
+
+    @Test
     fun `final append carries one authoritative complete card revision`() {
         val base = snapshot(1, card(text = "partial", revision = 1, complete = false))
         val final = snapshot(
@@ -106,6 +143,52 @@ class PokerLiveDeltaTest {
         assertEquals(final.piles.single().cards.single(), delta.authoritativeCard)
         assertEquals(PokerLiveDeltaInstallStatus.APPLIED, receiver.accept(delta).status)
         assertEquals(final, receiver.installedSnapshot)
+    }
+
+    @Test
+    fun `growing command and file cards become authoritative only when terminal`() {
+        listOf(CardSource.CODEX_COMMAND, CardSource.CODEX_FILE_CHANGE).forEach { source ->
+            val base = snapshot(
+                1,
+                card(
+                    text = "command output",
+                    revision = 1,
+                    complete = true,
+                    source = source,
+                ),
+            )
+            val growing = snapshot(
+                2,
+                card(
+                    text = "command output more",
+                    revision = 2,
+                    complete = true,
+                    source = source,
+                    updatedAtMs = 2,
+                ),
+            )
+            val final = snapshot(
+                3,
+                card(
+                    text = "command output more done",
+                    revision = 3,
+                    complete = true,
+                    state = CardState.COMMITTED,
+                    source = source,
+                    updatedAtMs = 3,
+                ),
+            )
+            val growingDeltas = checkNotNull(PokerLiveDeltaWire.build(base, growing))
+            assertTrue(growingDeltas.all { !it.isFinal && it.authoritativeCard == null })
+
+            val receiver = PokerLiveDeltaReceiver().also { it.installSnapshot(base) }
+            growingDeltas.forEach { assertEquals(PokerLiveDeltaInstallStatus.APPLIED, receiver.accept(it).status) }
+            val finalDeltas = checkNotNull(PokerLiveDeltaWire.build(growing, final))
+            assertEquals(1, finalDeltas.count(PokerCardDelta::isFinal))
+            assertEquals(final.piles.single().cards.single(), finalDeltas.last().authoritativeCard)
+            finalDeltas.forEach { assertEquals(PokerLiveDeltaInstallStatus.APPLIED, receiver.accept(it).status) }
+            assertEquals(final, receiver.installedSnapshot)
+        }
     }
 
     @Test
@@ -215,6 +298,116 @@ class PokerLiveDeltaTest {
         )
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `incomplete delta requests a fresh snapshot after bounded recovery`() = runTest {
+        val base = snapshot(1, card(text = "a", revision = 1, complete = false))
+        val growing = snapshot(2, card(text = "a🙂b", revision = 2, complete = false))
+        val scheduler = ManualPokerScheduler()
+        val outgoing = mutableListOf<WireMessage>()
+        val send: PokerEnvelopeSender = { type, stream, payload, replyTo ->
+            outgoing += WireMessage(type, stream, payload, replyTo, "m${outgoing.size}")
+        }
+        val context = liveContext()
+        val poker = PokerSnapshotConnectionHandler(
+            role = PokerSnapshotRole.POKER,
+            installer = PokerSnapshotInstaller(),
+            scheduler = scheduler,
+            scope = this,
+        )
+        val dealer = PokerSnapshotConnectionHandler(
+            role = PokerSnapshotRole.DEALER,
+            snapshotSource = { base },
+            snapshotId = { "snapshot" },
+        )
+
+        poker.onConnected(context, send)
+        val request = outgoing.single()
+        outgoing.clear()
+        dealer.onEnvelope(context, request.envelope(), send)
+        val transfer = outgoing.toList()
+        outgoing.clear()
+        transfer.forEach { poker.onEnvelope(context, it.envelope(), send) }
+        outgoing.clear()
+
+        val deltas = checkNotNull(PokerLiveDeltaWire.build(base, growing, maxChunkBytes = 4))
+        poker.onEnvelope(
+            context,
+            WireMessage(
+                POKER_LIVE_DELTA_TYPE,
+                POKER_LIVE_DELTA_STREAM,
+                PokerLiveDeltaWire.deltaPayload(deltas.first()),
+                null,
+                "delta",
+            ).envelope(),
+            send,
+        )
+        scheduler.runNext()
+        runCurrent()
+
+        assertTrue(outgoing.any { it.type == POKER_SNAPSHOT_REQUEST_TYPE })
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `slow Poker forces a newer full snapshot after bounded ACK recovery`() = runTest {
+        val base = snapshot(1, card(text = "a", revision = 1, complete = false))
+        val growing = snapshot(2, card(text = "ab", revision = 2, complete = false))
+        var current = base
+        val scheduler = ManualPokerScheduler()
+        val outgoing = mutableListOf<WireMessage>()
+        val send: PokerEnvelopeSender = { type, stream, payload, replyTo ->
+            outgoing += WireMessage(type, stream, payload, replyTo, "m${outgoing.size}")
+        }
+        val context = liveContext()
+        val dealer = PokerSnapshotConnectionHandler(
+            role = PokerSnapshotRole.DEALER,
+            snapshotSource = { current },
+            snapshotId = { "snapshot" },
+            scheduler = scheduler,
+            scope = this,
+        )
+
+        dealer.onConnected(context, send)
+        dealer.onEnvelope(
+            context,
+            WireMessage(
+                POKER_SNAPSHOT_REQUEST_TYPE,
+                POKER_SNAPSHOT_STREAM,
+                PokerSnapshotWire.requestPayload(PokerSnapshotRequest()),
+                null,
+                "request",
+            ).envelope(),
+            send,
+        )
+        val manifest = PokerSnapshotWire.manifest(
+            outgoing.first { it.type == POKER_SNAPSHOT_BEGIN_TYPE }.payload,
+        )
+        dealer.onEnvelope(
+            context,
+            WireMessage(
+                POKER_SNAPSHOT_ACK_TYPE,
+                POKER_SNAPSHOT_STREAM,
+                PokerSnapshotWire.acknowledgementPayload(
+                    PokerSnapshotAcknowledgement(manifest.snapshotId, base.revision),
+                ),
+                null,
+                "ack",
+            ).envelope(),
+            send,
+        )
+        outgoing.clear()
+
+        current = growing
+        dealer.publish(growing)
+        assertTrue(outgoing.any { it.type == POKER_LIVE_DELTA_TYPE })
+        scheduler.runNext()
+        runCurrent()
+
+        val replacement = outgoing.filter { it.type == POKER_SNAPSHOT_BEGIN_TYPE }.single()
+        assertEquals(2L, PokerSnapshotWire.manifest(replacement.payload).revision)
+    }
+
     private fun snapshot(
         revision: Long,
         card: Card,
@@ -256,6 +449,7 @@ class PokerLiveDeltaTest {
         complete: Boolean,
         state: CardState = CardState.OPEN,
         updatedAtMs: Long = revision,
+        source: CardSource = CardSource.CODEX_AGENT_MESSAGE,
     ) = Card(
         id = "card",
         conversationId = "spark/thread",
@@ -266,9 +460,46 @@ class PokerLiveDeltaTest {
         fullText = text,
         createdAtMs = 1,
         updatedAtMs = updatedAtMs,
-        source = CardSource.CODEX_AGENT_MESSAGE,
+        source = source,
         contentComplete = complete,
     )
+
+    private fun liveContext() = PokerConnectionContext(
+        epoch = PokerConnectionEpoch(1),
+        negotiation = PokerProtocolNegotiation(
+            access = PokerProtocolAccess.READ_WRITE,
+            majorCompatible = true,
+            capabilities = setOf(POKER_SNAPSHOT_CAPABILITY, POKER_LIVE_DELTA_CAPABILITY),
+            missingRequiredCapabilities = emptySet(),
+        ),
+    )
+
+    private class ManualPokerScheduler : PokerScheduler {
+        private data class Entry(
+            val task: () -> Unit,
+            var cancelled: Boolean = false,
+        )
+
+        private val entries = ArrayDeque<Entry>()
+
+        override fun schedule(delayMs: Long, task: () -> Unit): PokerScheduledTask {
+            require(delayMs == POKER_LIVE_DELTA_RECOVERY_TIMEOUT_MS)
+            val entry = Entry(task)
+            entries += entry
+            return PokerScheduledTask { entry.cancelled = true }
+        }
+
+        fun runNext() {
+            while (entries.isNotEmpty()) {
+                val entry = entries.removeFirst()
+                if (!entry.cancelled) {
+                    entry.task()
+                    return
+                }
+            }
+            error("No scheduled Poker task")
+        }
+    }
 
     private data class WireMessage(
         val type: String,

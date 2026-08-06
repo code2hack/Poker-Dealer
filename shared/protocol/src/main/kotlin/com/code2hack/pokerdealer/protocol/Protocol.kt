@@ -36,6 +36,7 @@ const val POKER_LIVE_DELTA_CAPABILITY = "live-delta"
 const val POKER_LIVE_DELTA_STREAM = "live"
 const val POKER_LIVE_DELTA_TYPE = "card.delta"
 const val POKER_LIVE_DELTA_ACK_TYPE = "card.delta.ack"
+const val POKER_LIVE_DELTA_RECOVERY_TIMEOUT_MS = 5_000L
 const val POKER_COMPOSER_DRAFT_PROJECTION_TYPE = "composer.projection"
 const val POKER_COMPOSER_MUTATION_TYPE = "composer.mutation"
 const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"

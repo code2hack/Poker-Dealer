@@ -230,6 +230,7 @@ class DealerConnectionService : Service() {
         super.onCreate()
         val pairingIdentity = AndroidKeystorePairingIdentity()
         val pokerPairing = pairingIdentity.pairingController(this)
+        val pokerScheduler = CoroutinePokerScheduler(scope)
         pokerSnapshotSource = DealerPokerSnapshotSource { mutableState.value }
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.DEALER,
@@ -237,6 +238,8 @@ class DealerConnectionService : Service() {
                 pokerSnapshotReady.await()
                 pokerSnapshotSource.current()
             },
+            scheduler = pokerScheduler,
+            scope = scope,
         )
         pokerConnectionOwner = PokerConnectionOwner(
             factory = null,
@@ -250,7 +253,7 @@ class DealerConnectionService : Service() {
                     POKER_LIVE_DELTA_CAPABILITY,
                 ),
             ),
-            scheduler = CoroutinePokerScheduler(scope),
+            scheduler = pokerScheduler,
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
             onConnected = { epoch, _ ->

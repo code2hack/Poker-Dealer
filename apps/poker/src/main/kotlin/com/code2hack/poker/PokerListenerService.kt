@@ -59,12 +59,15 @@ class PokerListenerService : Service() {
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val identity = AndroidKeystorePairingIdentity()
         val pairing = identity.pairingController(this)
+        val pokerScheduler = CoroutinePokerScheduler(serviceScope)
         PokerBindingRuntime.attachService { serviceScope.launch { sendBindingState() } }
         PokerSnapshotRuntime.clearForRestart()
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.POKER,
             installer = PokerSnapshotInstaller(),
             onInstalled = PokerSnapshotRuntime::install,
+            scheduler = pokerScheduler,
+            scope = serviceScope,
         )
         owner = PokerConnectionOwner(
             factory = AndroidPokerListenerFactory(this, identity, pairing),
@@ -77,7 +80,7 @@ class PokerListenerService : Service() {
                     POKER_LIVE_DELTA_CAPABILITY,
                 ),
             ),
-            scheduler = CoroutinePokerScheduler(serviceScope),
+            scheduler = pokerScheduler,
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
             onConnected = { _, negotiation ->

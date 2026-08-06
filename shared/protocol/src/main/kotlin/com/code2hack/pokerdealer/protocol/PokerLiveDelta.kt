@@ -1,6 +1,7 @@
 package com.code2hack.pokerdealer.protocol
 
 import com.code2hack.pokerdealer.domain.Card
+import com.code2hack.pokerdealer.domain.CardState
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -95,7 +96,7 @@ object PokerLiveDeltaWire {
         val (oldCard, newCard) = changed ?: return null
         if (oldCard.conversationId != newCard.conversationId ||
             oldCard.id != newCard.id ||
-            oldCard.revision >= newCard.revision
+            newCard.revision != oldCard.revision + 1
         ) {
             return null
         }
@@ -117,7 +118,7 @@ object PokerLiveDeltaWire {
 
         val append = newBytes.copyOfRange(oldBytes.size, newBytes.size)
         val chunks = splitUtf8(append, maxChunkBytes)
-        val final = newCard.contentComplete
+        val final = newCard.contentComplete && newCard.state.isTerminal()
         return chunks.mapIndexed { index, bytes ->
             PokerCardDelta(
                 baseSnapshotRevision = previous.revision,
@@ -205,6 +206,14 @@ class PokerLiveDeltaReceiver(
 
     val installedSnapshot: PokerSnapshot?
         @Synchronized get() = current
+
+    val hasPendingDeltas: Boolean
+        @Synchronized get() = batches.isNotEmpty()
+
+    @Synchronized
+    fun discardPendingDeltas() {
+        clearQueue()
+    }
 
     @Synchronized
     fun installSnapshot(snapshot: PokerSnapshot) {
@@ -337,8 +346,12 @@ class PokerLiveDeltaReceiver(
         require(oldCard.revision == first.baseCardRevision) { "delta card revision gap" }
         val oldBytes = PokerLiveDeltaWire.strictUtf8(oldCard.fullText)
             ?: throw IllegalArgumentException("delta card base is not valid UTF-8")
-        require(oldBytes.size.toLong() == chunks.first().offsetUtf8Bytes) {
-            "delta UTF-8 offset does not match card base"
+        var expectedOffset = oldBytes.size.toLong()
+        chunks.forEach { chunk ->
+            require(chunk.offsetUtf8Bytes == expectedOffset) {
+                "delta UTF-8 offset does not match cumulative append position"
+            }
+            expectedOffset += chunk.appendBytes.size.toLong()
         }
 
         val appended = chunks.flatMap { it.appendBytes.asList() }.toByteArray()
@@ -355,6 +368,7 @@ class PokerLiveDeltaReceiver(
             require(finalCard.revision == first.cardRevision) { "delta final revision changed" }
             require(finalCard.fullText == combinedText) { "delta final text is not authoritative" }
             require(finalCard.contentComplete) { "delta final card is incomplete" }
+            require(finalCard.state.isTerminal()) { "delta final card is not terminal" }
         } ?: oldCard.copy(
             revision = first.cardRevision,
             fullText = combinedText,
@@ -380,7 +394,7 @@ class PokerLiveDeltaReceiver(
             "delta snapshot revision is not contiguous"
         delta.conversationId.isBlank() || delta.cardId.isBlank() ->
             "delta card identity is blank"
-        delta.baseCardRevision < 0 || delta.cardRevision <= delta.baseCardRevision ->
+        delta.baseCardRevision < 0 || delta.cardRevision != delta.baseCardRevision + 1 ->
             "delta card revision is invalid"
         delta.offsetUtf8Bytes < 0 -> "delta UTF-8 offset is negative"
         delta.chunkCount <= 0 || delta.chunkIndex !in 0 until delta.chunkCount ->
@@ -491,6 +505,19 @@ class PokerLiveDeltaSender(
         return next()
     }
 
+    @Synchronized
+    fun isAwaitingAcknowledgement(revision: Long): Boolean =
+        inFlight?.let { revision >= it.snapshot.revision } == true
+
+    @Synchronized
+    fun forceSnapshot(): PokerLiveDeltaSendAction {
+        if (inFlight == null) return PokerLiveDeltaSendAction.None
+        val snapshot = latest ?: return PokerLiveDeltaSendAction.None
+        inFlight = InFlight.Snapshot(snapshot)
+        queued.clear()
+        return PokerLiveDeltaSendAction.Snapshot(snapshot)
+    }
+
     private fun next(): PokerLiveDeltaSendAction {
         if (queued.isEmpty()) return PokerLiveDeltaSendAction.None
         val next = queued.removeFirst()
@@ -518,4 +545,9 @@ class PokerLiveDeltaSender(
         inFlight = InFlight.Deltas(snapshot)
         return PokerLiveDeltaSendAction.Deltas(deltas)
     }
+}
+
+private fun CardState.isTerminal(): Boolean = when (this) {
+    CardState.COMMITTED, CardState.CORRECTED, CardState.FAILED -> true
+    CardState.OPEN -> false
 }

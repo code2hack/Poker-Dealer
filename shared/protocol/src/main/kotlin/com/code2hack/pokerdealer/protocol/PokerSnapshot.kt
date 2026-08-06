@@ -9,6 +9,9 @@ import com.code2hack.pokerdealer.domain.TurnOutcome
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -541,6 +544,8 @@ class PokerSnapshotConnectionHandler(
     private val installer: PokerSnapshotInstaller? = null,
     private val snapshotId: () -> String = { UUID.randomUUID().toString() },
     private val onInstalled: (PokerSnapshot) -> Unit = {},
+    private val scheduler: PokerScheduler? = null,
+    private val scope: CoroutineScope? = null,
 ) : PokerConnectionCallbacks {
     private val snapshotSource = snapshotSource
     private val lock = Mutex()
@@ -548,12 +553,18 @@ class PokerSnapshotConnectionHandler(
     private val liveReceiver = if (role == PokerSnapshotRole.POKER) PokerLiveDeltaReceiver() else null
     private var liveEnabled = false
     private var liveSend: PokerEnvelopeSender? = null
+    private var liveEpoch: PokerConnectionEpoch? = null
+    private var acknowledgementRecoveryTask: PokerScheduledTask? = null
+    private var deltaRecoveryTask: PokerScheduledTask? = null
 
     init {
         require(
             (role == PokerSnapshotRole.DEALER && snapshotSource != null && installer == null) ||
                 (role == PokerSnapshotRole.POKER && snapshotSource == null && installer != null),
         ) { "Dealer needs a source; Poker needs an installer" }
+        require((scheduler == null) == (scope == null)) {
+            "Snapshot recovery needs both a scheduler and a scope"
+        }
     }
 
     override suspend fun onConnected(
@@ -561,9 +572,12 @@ class PokerSnapshotConnectionHandler(
         send: PokerEnvelopeSender,
     ) {
         lock.withLock {
+            cancelRecoveryTasks()
             liveEnabled = context.canUseLiveDeltas()
             liveSend = send
+            liveEpoch = context.epoch
             liveSender?.reset()
+            liveReceiver?.discardPendingDeltas()
             if (role == PokerSnapshotRole.POKER && context.canUseSnapshots()) {
                 send(
                     POKER_SNAPSHOT_REQUEST_TYPE,
@@ -604,7 +618,12 @@ class PokerSnapshotConnectionHandler(
                                 val acknowledgement = runCatching {
                                     PokerSnapshotWire.acknowledgement(envelope.payload)
                                 }.getOrNull() ?: return
-                                emit(liveSender!!.acknowledged(acknowledgement.revision), send)
+                                val sender = liveSender ?: return
+                                if (sender.isAwaitingAcknowledgement(acknowledgement.revision)) {
+                                    acknowledgementRecoveryTask?.cancel()
+                                    acknowledgementRecoveryTask = null
+                                }
+                                emit(sender.acknowledged(acknowledgement.revision), send)
                             }
                         }
                         else -> Unit
@@ -618,7 +637,12 @@ class PokerSnapshotConnectionHandler(
                         val acknowledgement = runCatching {
                             PokerLiveDeltaWire.acknowledgement(envelope.payload)
                         }.getOrNull() ?: return
-                        emit(liveSender!!.acknowledged(acknowledgement.revision), send)
+                        val sender = liveSender ?: return
+                        if (sender.isAwaitingAcknowledgement(acknowledgement.revision)) {
+                            acknowledgementRecoveryTask?.cancel()
+                            acknowledgementRecoveryTask = null
+                        }
+                        emit(sender.acknowledged(acknowledgement.revision), send)
                     }
 
                     PokerSnapshotRole.POKER -> receiveDelta(envelope, send)
@@ -633,13 +657,18 @@ class PokerSnapshotConnectionHandler(
     ) {
         when (action) {
             PokerLiveDeltaSendAction.None -> Unit
-            is PokerLiveDeltaSendAction.Deltas -> action.deltas.forEach { delta ->
-                send(
-                    POKER_LIVE_DELTA_TYPE,
-                    POKER_LIVE_DELTA_STREAM,
-                    PokerLiveDeltaWire.deltaPayload(delta),
-                    null,
-                )
+            is PokerLiveDeltaSendAction.Deltas -> {
+                action.deltas.forEach { delta ->
+                    send(
+                        POKER_LIVE_DELTA_TYPE,
+                        POKER_LIVE_DELTA_STREAM,
+                        PokerLiveDeltaWire.deltaPayload(delta),
+                        null,
+                    )
+                }
+                action.deltas.lastOrNull()?.let { delta ->
+                    armAcknowledgementRecovery(delta.snapshotRevision, send)
+                }
             }
             is PokerLiveDeltaSendAction.Snapshot -> sendSnapshot(action.snapshot, null, send)
         }
@@ -679,6 +708,7 @@ class PokerSnapshotConnectionHandler(
             replyTo,
         )
         liveSender?.snapshotSent(snapshot)
+        armAcknowledgementRecovery(snapshot.revision, send)
     }
 
     private suspend fun receiveSnapshot(
@@ -736,6 +766,8 @@ class PokerSnapshotConnectionHandler(
         val result = liveReceiver!!.accept(delta)
         when (result.status) {
             PokerLiveDeltaInstallStatus.APPLIED -> {
+                deltaRecoveryTask?.cancel()
+                deltaRecoveryTask = null
                 result.snapshot?.let(onInstalled)
                 send(
                     POKER_LIVE_DELTA_ACK_TYPE,
@@ -747,6 +779,10 @@ class PokerSnapshotConnectionHandler(
                 )
             }
             PokerLiveDeltaInstallStatus.DUPLICATE -> {
+                if (!liveReceiver.hasPendingDeltas) {
+                    deltaRecoveryTask?.cancel()
+                    deltaRecoveryTask = null
+                }
                 result.acknowledgedRevision?.let { revision ->
                     send(
                         POKER_LIVE_DELTA_ACK_TYPE,
@@ -761,8 +797,73 @@ class PokerSnapshotConnectionHandler(
             PokerLiveDeltaInstallStatus.RESNAPSHOT_REQUIRED,
             PokerLiveDeltaInstallStatus.MALFORMED,
             PokerLiveDeltaInstallStatus.QUEUE_OVERFLOW,
-            -> sendFreshRequest(send, result.reason ?: result.status.name.lowercase())
-            PokerLiveDeltaInstallStatus.QUEUED -> Unit
+            -> {
+                deltaRecoveryTask?.cancel()
+                deltaRecoveryTask = null
+                sendFreshRequest(send, result.reason ?: result.status.name.lowercase())
+            }
+            PokerLiveDeltaInstallStatus.QUEUED -> armDeltaRecovery(send)
+        }
+    }
+
+    private fun armAcknowledgementRecovery(
+        revision: Long,
+        send: PokerEnvelopeSender,
+    ) {
+        acknowledgementRecoveryTask?.cancel()
+        val epoch = liveEpoch ?: return
+        val recoveryScheduler = scheduler ?: return
+        val recoveryScope = scope ?: return
+        acknowledgementRecoveryTask = recoveryScheduler.schedule(
+            POKER_LIVE_DELTA_RECOVERY_TIMEOUT_MS,
+        ) {
+            recoveryScope.launch {
+                lock.withLock {
+                    if (liveEpoch == epoch && liveEnabled &&
+                        liveSender!!.isAwaitingAcknowledgement(revision)
+                    ) {
+                        acknowledgementRecoveryTask = null
+                        tryRecoverySend { emit(liveSender.forceSnapshot(), send) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun armDeltaRecovery(send: PokerEnvelopeSender) {
+        if (deltaRecoveryTask != null) return
+        val epoch = liveEpoch ?: return
+        val recoveryScheduler = scheduler ?: return
+        val recoveryScope = scope ?: return
+        deltaRecoveryTask = recoveryScheduler.schedule(
+            POKER_LIVE_DELTA_RECOVERY_TIMEOUT_MS,
+        ) {
+            recoveryScope.launch {
+                lock.withLock {
+                    if (liveEpoch == epoch && liveEnabled && liveReceiver!!.hasPendingDeltas) {
+                        deltaRecoveryTask = null
+                        liveReceiver.discardPendingDeltas()
+                        tryRecoverySend { sendFreshRequest(send, "incomplete") }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cancelRecoveryTasks() {
+        acknowledgementRecoveryTask?.cancel()
+        acknowledgementRecoveryTask = null
+        deltaRecoveryTask?.cancel()
+        deltaRecoveryTask = null
+    }
+
+    private suspend fun tryRecoverySend(block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // The connection owner will reconnect when a recovery send uses a stale epoch.
         }
     }
 
