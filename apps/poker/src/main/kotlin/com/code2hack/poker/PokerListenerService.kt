@@ -36,6 +36,7 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshotInstaller
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
 import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_LIVE_DELTA_CAPABILITY
+import com.code2hack.pokerdealer.protocol.pokerPairingFingerprint
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -63,6 +64,17 @@ class PokerListenerService : Service() {
         val pokerScheduler = CoroutinePokerScheduler(serviceScope)
         PokerBindingRuntime.attachService { serviceScope.launch { sendBindingState() } }
         PokerSnapshotRuntime.clearForRestart()
+        PokerSnapshotRuntime.initializeUnread(
+            this,
+            runCatching {
+                pairing.pinnedPeerPublicKey?.let { peer ->
+                    pokerPairingFingerprint(identity.publicKey, peer)
+                }
+            }.getOrNull(),
+        )
+        PokerSnapshotRuntime.attachForegroundRequester {
+            PokerForegroundWake.request(this)
+        }
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.POKER,
             installer = PokerSnapshotInstaller(),
@@ -155,6 +167,7 @@ class PokerListenerService : Service() {
         }
         networkCallback = null
         PokerComposerBridge.detach()
+        PokerSnapshotRuntime.detachForegroundRequester()
         owner.stop()
         PokerBindingRuntime.notifyConnectionLost()
         PokerBindingRuntime.detachService()

@@ -14,11 +14,13 @@ import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
+import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
 import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
+import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.JsonObject
@@ -84,6 +86,16 @@ internal object PokerComposerBridge {
                 val projection = PokerProtocolJson.decodeFromJsonElement(
                     UserInputRequestProjection.serializer(),
                     envelope.payload,
+                )
+                PokerSnapshotRuntime.observeRequest(
+                    locator = projection.request.thread,
+                    requestKey = pokerUnreadRequestKey(
+                        "user-input",
+                        projection.request.locator.requestId,
+                        projection.request.fingerprint,
+                    ),
+                    finalized = projection.request.resolution != RequestResolutionState.PENDING &&
+                        projection.request.resolution != RequestResolutionState.RESPONDING,
                 )
                 userInputProjectionState.value = userInputProjectionState.value +
                     (projection.request.locator to projection)

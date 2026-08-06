@@ -2,14 +2,18 @@ package com.code2hack.dealer
 
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
-import com.code2hack.pokerdealer.domain.PokerPileMetadata
+import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ThreadPile
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
+import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
+import com.code2hack.pokerdealer.protocol.PokerSnapshotProjection
+import com.code2hack.pokerdealer.protocol.PokerSnapshotRequestCard
 import com.code2hack.pokerdealer.protocol.PokerSnapshotWire
+import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
 import com.code2hack.pokerdealer.protocol.toPokerSnapshotMetadata
-import com.code2hack.pokerdealer.protocol.toPokerSnapshotProjection
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 
 /** Builds the complete Dealer-owned projection requested by a connected Poker. */
@@ -54,34 +58,33 @@ internal class DealerPokerSnapshotSource(
                     .lastOrNull(),
             )
             PokerSnapshotPile(
-                metadata = pile.toPokerSnapshotMetadata(),
+                metadata = pile.toPokerSnapshotMetadata().copy(
+                    hostLabel = InitialCodexHosts.all.firstOrNull { it.id == locator.hostId }
+                        ?.displayName
+                        ?: locator.hostId,
+                    threadName = thread?.name,
+                    threadPreview = thread?.preview,
+                ),
                 cards = cards,
+                requestCards = dealerState.requestCards(locator),
             )
         }
-        val projectionPiles = piles.map(PokerSnapshotPile::metadata).map { metadata ->
-            ThreadPile(
-                locator = metadata.locator,
-                attachmentOrder = metadata.attachmentOrder,
-                workState = metadata.workState?.let(ThreadWorkState::valueOf),
-                stateChangedAtMs = metadata.stateChangedAtMs,
-                available = metadata.available,
-                outcome = metadata.outcome,
-            )
-        }
-        val projection = PokerPileMetadata(
+        val projectionPiles = piles.map(PokerSnapshotPile::metadata)
+        val projection = PokerSnapshotProjection(
             orderedPiles = projectionPiles
                 .filter { it.workState != null }
                 .sortedWith(
-                    compareBy<ThreadPile> { WORK_STATE_ORDER.getValue(it.workState!!) }
-                        .thenBy(ThreadPile::stateChangedAtMs)
-                        .thenBy(ThreadPile::attachmentOrder),
+                    compareBy<PokerSnapshotPileMetadata> {
+                        WORK_STATE_ORDER.getValue(ThreadWorkState.valueOf(it.workState!!))
+                    }
+                        .thenBy(PokerSnapshotPileMetadata::stateChangedAtMs)
+                        .thenBy(PokerSnapshotPileMetadata::attachmentOrder),
                 ),
-            unknownWorkState = projectionPiles
-                .filter { it.workState == null }
-                .sortedBy(ThreadPile::attachmentOrder),
+            unknownWorkState = projectionPiles.sortedBy { it.attachmentOrder }
+                .filter { it.workState == null },
             hudVisible = false,
             focused = null,
-        ).toPokerSnapshotProjection()
+        )
         val content = PokerSnapshot(
             revision = 0L,
             projection = projection,
@@ -107,3 +110,59 @@ internal class DealerPokerSnapshotSource(
         )
     }
 }
+
+private fun DealerUiState.requestCards(
+    locator: CodexThreadLocator,
+): List<PokerSnapshotRequestCard> = buildList {
+    commandApprovals.requests.values
+        .filter { it.thread == locator }
+        .sortedByDescending { it.locator.appServerGeneration }
+        .forEach { request ->
+            add(
+                PokerSnapshotRequestCard(
+                    key = pokerUnreadRequestKey(
+                        "command",
+                        request.locator.requestId,
+                        request.fingerprint,
+                    ),
+                    cardId = request.itemId,
+                    finalized = request.resolution.isFinalized(),
+                ),
+            )
+        }
+    fileApprovals.requests.values
+        .filter { it.thread == locator }
+        .sortedByDescending { it.locator.appServerGeneration }
+        .forEach { request ->
+            add(
+                PokerSnapshotRequestCard(
+                    key = pokerUnreadRequestKey(
+                        "file",
+                        request.locator.requestId,
+                        request.fingerprint,
+                    ),
+                    cardId = request.itemId,
+                    finalized = request.resolution.isFinalized(),
+                ),
+            )
+        }
+    userInputRequests.requests.values
+        .filter { it.thread == locator }
+        .sortedByDescending { it.locator.appServerGeneration }
+        .forEach { request ->
+            add(
+                PokerSnapshotRequestCard(
+                    key = pokerUnreadRequestKey(
+                        "user-input",
+                        request.locator.requestId,
+                        request.fingerprint,
+                    ),
+                    cardId = request.itemId,
+                    finalized = request.resolution.isFinalized(),
+                ),
+            )
+        }
+}.distinctBy(PokerSnapshotRequestCard::key)
+
+private fun RequestResolutionState.isFinalized(): Boolean = this != RequestResolutionState.PENDING &&
+    this != RequestResolutionState.RESPONDING
