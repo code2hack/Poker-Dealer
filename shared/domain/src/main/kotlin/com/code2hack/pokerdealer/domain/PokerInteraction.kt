@@ -52,16 +52,25 @@ data class PokerInteraction(
     val source: PokerInputSource,
     val operation: PokerOperation,
     val phase: PokerInteractionPhase,
+    val eventTimeMs: Long,
+    val durationMs: Long = 0L,
     val cancellationReason: PokerCancellationReason? = null,
-)
+) {
+    init {
+        require(eventTimeMs >= 0) { "Interaction event time must be non-negative" }
+        require(durationMs >= 0) { "Interaction duration must be non-negative" }
+    }
+}
 
 fun glassesInteraction(
     gesture: PokerGlassesGesture,
     phase: PokerInteractionPhase,
+    eventTimeMs: Long,
 ): PokerInteraction = PokerInteraction(
     source = PokerInputSource.GLASSES,
     operation = gesture.toOperation(),
     phase = phase,
+    eventTimeMs = eventTimeMs,
 )
 
 /** Grants one source exclusive ownership until its interaction ends. */
@@ -69,44 +78,73 @@ class PokerInteractionReducer {
     private data class ActiveInteraction(
         val source: PokerInputSource,
         val operation: PokerOperation,
+        val startedAtMs: Long,
+        val lastEventTimeMs: Long,
     )
 
     private var active: ActiveInteraction? = null
+    private val lastEventTimeBySource = mutableMapOf<PokerInputSource, Long>()
 
     fun reduce(interaction: PokerInteraction): PokerInteraction? {
         val current = active
         return when (interaction.phase) {
-            PokerInteractionPhase.BEGIN -> if (current == null) {
-                active = ActiveInteraction(interaction.source, interaction.operation)
-                interaction.copy(cancellationReason = null)
+            PokerInteractionPhase.BEGIN -> if (current == null && isMonotonic(interaction)) {
+                active = ActiveInteraction(
+                    source = interaction.source,
+                    operation = interaction.operation,
+                    startedAtMs = interaction.eventTimeMs,
+                    lastEventTimeMs = interaction.eventTimeMs,
+                )
+                lastEventTimeBySource[interaction.source] = interaction.eventTimeMs
+                interaction.copy(durationMs = 0L, cancellationReason = null)
             } else {
                 null
             }
 
-            PokerInteractionPhase.UPDATE -> interaction.takeIf { it.matches(current) }
+            PokerInteractionPhase.UPDATE -> interaction.takeIf { it.matches(current) && isMonotonic(it) }
+                ?.also { updateTimestamp(it) }
+                ?.withDuration(current)
 
-            PokerInteractionPhase.RELEASE -> interaction.takeIf { it.matches(current) }?.also {
-                active = null
-            }
+            PokerInteractionPhase.RELEASE -> interaction.takeIf { it.matches(current) && isMonotonic(it) }
+                ?.also { updateTimestamp(it); active = null }
+                ?.withDuration(current)
 
-            PokerInteractionPhase.CANCEL -> interaction.takeIf { it.matches(current) }?.also {
-                active = null
-            }
+            PokerInteractionPhase.CANCEL -> interaction.takeIf { it.matches(current) && isMonotonic(it) }
+                ?.also { updateTimestamp(it); active = null }
+                ?.withDuration(current)
         }
     }
 
-    fun cancelActive(reason: PokerCancellationReason): PokerInteraction? {
+    fun cancelActive(reason: PokerCancellationReason, eventTimeMs: Long? = null): PokerInteraction? {
         val current = active ?: return null
+        val timestamp = maxOf(current.lastEventTimeMs, eventTimeMs ?: current.lastEventTimeMs)
         active = null
+        lastEventTimeBySource[current.source] = timestamp
         return PokerInteraction(
             source = current.source,
             operation = current.operation,
             phase = PokerInteractionPhase.CANCEL,
+            eventTimeMs = timestamp,
+            durationMs = timestamp - current.startedAtMs,
             cancellationReason = reason,
         )
     }
 
     fun isActive(): Boolean = active != null
+
+    private fun isMonotonic(interaction: PokerInteraction): Boolean {
+        val current = active
+        return interaction.eventTimeMs >= (lastEventTimeBySource[interaction.source] ?: 0L) &&
+            (current == null || interaction.eventTimeMs >= current.lastEventTimeMs)
+    }
+
+    private fun updateTimestamp(interaction: PokerInteraction) {
+        lastEventTimeBySource[interaction.source] = interaction.eventTimeMs
+        active = active?.copy(lastEventTimeMs = interaction.eventTimeMs)
+    }
+
+    private fun PokerInteraction.withDuration(active: ActiveInteraction?): PokerInteraction =
+        copy(durationMs = eventTimeMs - (active?.startedAtMs ?: eventTimeMs))
 
     private fun PokerInteraction.matches(active: ActiveInteraction?): Boolean =
         active != null && source == active.source && operation == active.operation
@@ -252,6 +290,8 @@ class PokerNavigationReducer(
     fun layout(locator: CodexThreadLocator): PokerPileLayout? = layouts[locator]
 
     fun anchor(locator: CodexThreadLocator): PokerPileAnchor? = anchors[locator]
+
+    fun anchors(): Map<CodexThreadLocator, PokerPileAnchor> = anchors.toMap()
 
     fun metadata(): PokerPileMetadata {
         piles.metadata().focused?.let(::reanchor)
@@ -544,10 +584,10 @@ class PokerInputController(
         return Result(accepted, effect)
     }
 
-    fun cancel(reason: PokerCancellationReason): Result? =
-        interactions.cancelActive(reason)?.let { Result(it, PokerNavigationEffect.NONE) }
+    fun cancel(reason: PokerCancellationReason, eventTimeMs: Long? = null): Result? =
+        interactions.cancelActive(reason, eventTimeMs)?.let { Result(it, PokerNavigationEffect.NONE) }
 
-    fun onFocusLost(): Result? = cancel(PokerCancellationReason.FOCUS_LOST)
+    fun onFocusLost(eventTimeMs: Long? = null): Result? = cancel(PokerCancellationReason.FOCUS_LOST, eventTimeMs)
 
-    fun onDisconnected(): Result? = cancel(PokerCancellationReason.DISCONNECTED)
+    fun onDisconnected(eventTimeMs: Long? = null): Result? = cancel(PokerCancellationReason.DISCONNECTED, eventTimeMs)
 }

@@ -25,13 +25,13 @@ class PokerInteractionTest {
     @Test
     fun `first source owns interaction until one release`() {
         val reducer = PokerInteractionReducer()
-        val owner = PokerInteraction(PokerInputSource.GLASSES, PokerOperation.TAP, PokerInteractionPhase.BEGIN)
-        val competitor = PokerInteraction(PokerInputSource.REMOTE, PokerOperation.DOWN, PokerInteractionPhase.BEGIN)
+        val owner = PokerInteraction(PokerInputSource.GLASSES, PokerOperation.TAP, PokerInteractionPhase.BEGIN, eventTimeMs = 10)
+        val competitor = PokerInteraction(PokerInputSource.REMOTE, PokerOperation.DOWN, PokerInteractionPhase.BEGIN, eventTimeMs = 10)
 
         assertEquals(owner, reducer.reduce(owner))
         assertNull(reducer.reduce(competitor))
         assertNull(reducer.reduce(competitor.copy(phase = PokerInteractionPhase.RELEASE)))
-        assertEquals(owner.copy(phase = PokerInteractionPhase.RELEASE), reducer.reduce(owner.copy(phase = PokerInteractionPhase.RELEASE)))
+        assertEquals(owner.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 20, durationMs = 10), reducer.reduce(owner.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 20)))
         assertFalse(reducer.isActive())
         assertEquals(competitor, reducer.reduce(competitor))
     }
@@ -39,14 +39,16 @@ class PokerInteractionTest {
     @Test
     fun `cancel clears owner and never emits a release`() {
         val reducer = PokerInteractionReducer()
-        val begin = PokerInteraction(PokerInputSource.GLASSES, PokerOperation.FN, PokerInteractionPhase.BEGIN)
+        val begin = PokerInteraction(PokerInputSource.GLASSES, PokerOperation.FN, PokerInteractionPhase.BEGIN, eventTimeMs = 10)
         reducer.reduce(begin)
 
-        val cancelled = reducer.cancelActive(PokerCancellationReason.ACTION_CANCEL)
+        val cancelled = reducer.cancelActive(PokerCancellationReason.ACTION_CANCEL, eventTimeMs = 15)
 
         assertEquals(
             begin.copy(
                 phase = PokerInteractionPhase.CANCEL,
+                eventTimeMs = 15,
+                durationMs = 5,
                 cancellationReason = PokerCancellationReason.ACTION_CANCEL,
             ),
             cancelled,
@@ -61,13 +63,25 @@ class PokerInteractionTest {
         val begin = glassesInteraction(
             PokerGlassesGesture.SINGLE_FINGER_TAP,
             PokerInteractionPhase.BEGIN,
+            eventTimeMs = 10,
         )
 
         reducer.reduce(begin)
-        assertNull(reducer.reduce(begin.copy(operation = PokerOperation.TAPTAP, phase = PokerInteractionPhase.UPDATE)))
-        assertNull(reducer.reduce(begin.copy(operation = PokerOperation.TAPTAP, phase = PokerInteractionPhase.RELEASE)))
+        assertNull(reducer.reduce(begin.copy(operation = PokerOperation.TAPTAP, phase = PokerInteractionPhase.UPDATE, eventTimeMs = 11)))
+        assertNull(reducer.reduce(begin.copy(operation = PokerOperation.TAPTAP, phase = PokerInteractionPhase.RELEASE, eventTimeMs = 11)))
         assertTrue(reducer.isActive())
-        assertEquals(begin.copy(phase = PokerInteractionPhase.RELEASE), reducer.reduce(begin.copy(phase = PokerInteractionPhase.RELEASE)))
+        assertEquals(begin.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 12, durationMs = 2), reducer.reduce(begin.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 12)))
+    }
+
+    @Test
+    fun `events that move backwards on one source are ignored`() {
+        val reducer = PokerInteractionReducer()
+        val begin = PokerInteraction(PokerInputSource.GLASSES, PokerOperation.TAP, PokerInteractionPhase.BEGIN, eventTimeMs = 20)
+
+        assertEquals(begin, reducer.reduce(begin))
+        assertNull(reducer.reduce(begin.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 19)))
+        assertTrue(reducer.isActive())
+        assertEquals(begin.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 21, durationMs = 1), reducer.reduce(begin.copy(phase = PokerInteractionPhase.RELEASE, eventTimeMs = 21)))
     }
 }
 
@@ -239,7 +253,7 @@ class PokerNavigationTest {
         val navigation = navigation()
         navigation.view(locator)
         val controller = PokerInputController(navigation)
-        val begin = glassesInteraction(PokerGlassesGesture.SINGLE_FINGER_TAP, PokerInteractionPhase.BEGIN)
+        val begin = glassesInteraction(PokerGlassesGesture.SINGLE_FINGER_TAP, PokerInteractionPhase.BEGIN, eventTimeMs = 10)
 
         controller.reduce(begin)
         val cancelled = controller.onFocusLost()
