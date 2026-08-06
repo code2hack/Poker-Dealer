@@ -60,6 +60,7 @@ internal sealed interface VerifiedAsrPackSource {
         val decoderPath: String,
         val joinerPath: String,
         val tokensPath: String,
+        val expectedSha256: List<String>,
     ) : VerifiedAsrPackSource
 
     data class Files(
@@ -67,7 +68,27 @@ internal sealed interface VerifiedAsrPackSource {
         val decoder: File,
         val joiner: File,
         val tokens: File,
+        val expectedSha256: List<String>,
     ) : VerifiedAsrPackSource
+
+    fun revalidate() {
+        val valid = when (this) {
+            is Assets -> runCatching {
+                listOf(encoderPath, decoderPath, joinerPath, tokensPath)
+                    .zip(expectedSha256)
+                    .all { (path, expected) -> sha256(assetManager, path) == expected }
+            }.getOrDefault(false)
+            is Files -> listOf(encoder, decoder, joiner, tokens)
+                .zip(expectedSha256)
+                .all { (file, expected) ->
+                    java.nio.file.Files.isRegularFile(
+                        file.toPath(),
+                        LinkOption.NOFOLLOW_LINKS,
+                    ) && runCatching { sha256(file) == expected }.getOrDefault(false)
+                }
+        }
+        check(valid) { "ASR pack changed after verification" }
+    }
 }
 
 class VerifiedAsrPack private constructor(
@@ -165,11 +186,19 @@ class DealerAsrRuntime private constructor(
         }
     }
 
-    internal fun openParakeetStreaming(pack: VerifiedAsrPack): DealerAsrSession {
+    internal fun openParakeetStreaming(pack: VerifiedAsrPack): DealerAsrSession =
+        openStreaming(pack, featureDim = 128)
+
+    /** Test-only compact transducer fixture; it is not a production adapter capability. */
+    internal fun openInstrumentationStreamingFixture(pack: VerifiedAsrPack): DealerAsrSession =
+        openStreaming(pack, featureDim = 80)
+
+    private fun openStreaming(pack: VerifiedAsrPack, featureDim: Int): DealerAsrSession {
         check(pack.belongsTo(ownerToken)) { "ASR pack belongs to another runtime" }
         check(pack.adapter == DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
             "ASR adapter is not implemented"
         }
+        pack.source.revalidate()
         val paths = when (val source = pack.source) {
             is VerifiedAsrPackSource.Assets -> RecognizerPaths(
                 assetManager = source.assetManager,
@@ -189,7 +218,7 @@ class DealerAsrRuntime private constructor(
         val recognizer = OnlineRecognizer(
             assetManager = paths.assetManager,
             config = OnlineRecognizerConfig(
-                featConfig = FeatureConfig(sampleRate = 16_000, featureDim = 128),
+                featConfig = FeatureConfig(sampleRate = 16_000, featureDim = featureDim),
                 modelConfig = OnlineModelConfig(
                     transducer = OnlineTransducerModelConfig(
                         encoder = paths.encoder,
@@ -288,6 +317,7 @@ private class AssetPackSource(private val assets: AssetManager) : PackSource {
             decoderPath = manifest.decoderPath,
             joinerPath = manifest.joinerPath,
             tokensPath = manifest.tokensPath,
+            expectedSha256 = artifacts.map(PackArtifact::sha256),
         )
     }
 }
@@ -309,7 +339,8 @@ private class FilePackSource(private val installedPacksRoot: File) : PackSource 
         if (!packRootPath.startsWith(rootPath)) throw PackRejected("pack-path-invalid")
         if (!packRoot.isDirectory) throw PackRejected("model-pack-not-installed")
 
-        val files = manifest.artifacts().map { artifact ->
+        val artifacts = manifest.artifacts()
+        val files = artifacts.map { artifact ->
             val file = resolveArtifact(packRoot, artifact.path)
             if (sha256(file) != artifact.sha256) {
                 throw PackRejected("pack-digest-mismatch")
@@ -321,6 +352,7 @@ private class FilePackSource(private val installedPacksRoot: File) : PackSource 
             decoder = files[1],
             joiner = files[2],
             tokens = files[3],
+            expectedSha256 = artifacts.map(PackArtifact::sha256),
         )
     }
 

@@ -156,3 +156,27 @@ tasks.register("verifySherpaOnnxPackaging") {
         }
     }
 }
+
+tasks.register("verifySherpaOnnxInstrumentationPackaging") {
+    dependsOn("assembleDebugAndroidTest")
+    doLast {
+        val apk = layout.buildDirectory.file(
+            "outputs/apk/androidTest/debug/dealer-debug-androidTest.apk",
+        ).get().asFile
+        ZipFile(apk).use { zip ->
+            val modelEntries = zip.entries().asSequence().filter { entry ->
+                entry.name.startsWith("assets/") &&
+                    (entry.name.endsWith(".onnx") || entry.name.endsWith("/tokens.txt"))
+            }.toList()
+            check(modelEntries.isNotEmpty()) {
+                "Dealer instrumentation APK is missing the tiny ASR fixture"
+            }
+            check(modelEntries.sumOf { it.size } < 64L * 1024 * 1024) {
+                "Dealer instrumentation APK contains a model fixture larger than 64 MiB"
+            }
+            check(modelEntries.none { it.name.contains("0.6b", ignoreCase = true) }) {
+                "Dealer instrumentation APK must not contain the production Parakeet pack"
+            }
+        }
+    }
+}

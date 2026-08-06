@@ -35,11 +35,11 @@ trap 'rm -rf "${extract_dir}"' EXIT INT TERM
 tar -xjf "${archive}" -C "${extract_dir}"
 root_dir="${extract_dir}/${SMOKE_MODEL_NAME}"
 test -d "${root_dir}"
-encoder_path=$(find "${root_dir}" -type f -name 'encoder*.onnx' -print | sort | head -1)
-decoder_path=$(find "${root_dir}" -type f -name 'decoder*.onnx' -print | sort | head -1)
-joiner_path=$(find "${root_dir}" -type f -name 'joiner*.onnx' -print | sort | head -1)
+encoder_path=$(find "${root_dir}" -type f -name 'encoder*.int8.onnx' -print | sort | head -1)
+decoder_path=$(find "${root_dir}" -type f -name 'decoder*.int8.onnx' -print | sort | head -1)
+joiner_path=$(find "${root_dir}" -type f -name 'joiner*.int8.onnx' -print | sort | head -1)
 tokens_path=$(find "${root_dir}" -type f -name 'tokens.txt' -print | sort | head -1)
-sample_path=$(find "${root_dir}" -type f -iname '*.wav' -print | sort | head -1)
+sample_path=$(find "${root_dir}" -type f -path '*/test_wavs/0.wav' -print | sort | head -1)
 test -n "${encoder_path}"
 test -n "${decoder_path}"
 test -n "${joiner_path}"
@@ -61,23 +61,24 @@ fi
 
 rm -rf "${output_dir}"
 mkdir -p "${output_dir}"
-cp -R "${root_dir}" "${output_dir}/${SMOKE_MODEL_NAME}"
-encoder_relative=${encoder_path#"${extract_dir}/"}
-decoder_relative=${decoder_path#"${extract_dir}/"}
-joiner_relative=${joiner_path#"${extract_dir}/"}
-tokens_relative=${tokens_path#"${extract_dir}/"}
-sample_relative=${sample_path#"${extract_dir}/"}
+fixture_dir="${output_dir}/${SMOKE_MODEL_NAME}"
+mkdir -p "${fixture_dir}"
+cp "${encoder_path}" "${fixture_dir}/encoder.int8.onnx"
+cp "${decoder_path}" "${fixture_dir}/decoder.int8.onnx"
+cp "${joiner_path}" "${fixture_dir}/joiner.int8.onnx"
+cp "${tokens_path}" "${fixture_dir}/tokens.txt"
+cp "${sample_path}" "${fixture_dir}/smoke.wav"
 {
     printf 'packId=sherpa-smoke\n'
     printf 'packRevision=%s\n' "${SMOKE_MODEL_NAME}"
     printf 'adapter=PARAKEET_UNIFIED_STREAMING\n'
-    printf 'encoder=%s\n' "${encoder_relative}"
+    printf 'encoder=%s/encoder.int8.onnx\n' "${SMOKE_MODEL_NAME}"
     printf 'encoderSha256=%s\n' "${encoder_sha256}"
-    printf 'decoder=%s\n' "${decoder_relative}"
+    printf 'decoder=%s/decoder.int8.onnx\n' "${SMOKE_MODEL_NAME}"
     printf 'decoderSha256=%s\n' "${decoder_sha256}"
-    printf 'joiner=%s\n' "${joiner_relative}"
+    printf 'joiner=%s/joiner.int8.onnx\n' "${SMOKE_MODEL_NAME}"
     printf 'joinerSha256=%s\n' "${joiner_sha256}"
-    printf 'tokens=%s\n' "${tokens_relative}"
+    printf 'tokens=%s/tokens.txt\n' "${SMOKE_MODEL_NAME}"
     printf 'tokensSha256=%s\n' "${tokens_sha256}"
-    printf 'sample=%s\n' "${sample_relative}"
+    printf 'sample=%s/smoke.wav\n' "${SMOKE_MODEL_NAME}"
 } > "${output_dir}/sherpa-smoke.properties"

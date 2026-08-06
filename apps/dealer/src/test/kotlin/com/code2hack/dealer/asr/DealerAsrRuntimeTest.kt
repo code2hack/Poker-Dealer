@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class DealerAsrRuntimeTest {
@@ -96,6 +97,26 @@ class DealerAsrRuntimeTest {
                 DealerAsrPackVerification.Rejected("pack-digest-mismatch"),
                 runtime.verifyPack(fixture.manifest.copy(encoderSha256 = "0".repeat(64))),
             )
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun fileSourceRejectsArtifactMutationAtSessionOpen() {
+        val fixture = installedPack()
+        try {
+            val runtime = DealerAsrRuntime(fixture.root) {}
+            val pack = verifiedPack(runtime, fixture.manifest)
+            Files.write(
+                fixture.root.resolve("test-pack/r1/encoder.onnx").toPath(),
+                "changed after verification".toByteArray(),
+            )
+
+            val failure = assertThrows(IllegalStateException::class.java) {
+                runtime.openParakeetStreaming(pack)
+            }
+            assertEquals("ASR pack changed after verification", failure.message)
         } finally {
             fixture.root.deleteRecursively()
         }

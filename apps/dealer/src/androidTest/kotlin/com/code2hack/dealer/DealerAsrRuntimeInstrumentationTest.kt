@@ -64,7 +64,7 @@ class DealerAsrRuntimeInstrumentationTest {
             setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
             (startup as DealerAsrStartup.Ready).capabilities.adapters,
         )
-        runtime.openParakeetStreaming(pack).use { session ->
+        runtime.openInstrumentationStreamingFixture(pack).use { session ->
             session.acceptPcm16(pcm)
             assertTrue("the smoke sample was not recognized", session.finish().isNotBlank())
         }
