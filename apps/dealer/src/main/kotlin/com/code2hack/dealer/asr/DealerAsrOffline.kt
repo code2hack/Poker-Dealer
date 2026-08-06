@@ -12,9 +12,19 @@ import kotlin.math.abs
 internal class DealerAsrOfflineSpoolStore(
     private val root: File,
     private val hasRoomFor: (Long) -> Boolean = { true },
+    private val write: (FileOutputStream, ByteArray) -> Unit = { output, pcm16 -> output.write(pcm16) },
 ) {
-    fun purge() {
+    private val startupLock = Any()
+    private var startupPurged = false
+
+    fun purge() = synchronized(startupLock) {
         root.listFiles()?.forEach { it.deleteRecursively() }
+    }
+
+    fun purgeAtStartup() = synchronized(startupLock) {
+        if (startupPurged) return@synchronized
+        purge()
+        startupPurged = true
     }
 
     fun open(prefix: String): DealerAsrOfflineSpool {
@@ -22,7 +32,7 @@ internal class DealerAsrOfflineSpoolStore(
         val directory = root.resolve("$prefix-${UUID.randomUUID()}")
         if (!directory.mkdirs()) throw DealerAsrOfflineFailure("spool-open-failed")
         return try {
-            DealerAsrOfflineSpool(directory, hasRoomFor)
+            DealerAsrOfflineSpool(directory, hasRoomFor, write)
         } catch (failure: Throwable) {
             directory.deleteRecursively()
             throw failure
@@ -37,6 +47,7 @@ internal class DealerAsrOfflineSpoolStore(
 internal class DealerAsrOfflineSpool internal constructor(
     private val directory: File,
     private val hasRoomFor: (Long) -> Boolean,
+    private val write: (FileOutputStream, ByteArray) -> Unit,
 ) {
     private val lock = Any()
     private var active = newActiveFile()
@@ -56,7 +67,7 @@ internal class DealerAsrOfflineSpool internal constructor(
                 .getOrElse { failLocked("spool-space-check-failed", it) }
             if (!hasRoom) failLocked("insufficient-storage")
             try {
-                output.write(pcm16)
+                write(output, pcm16)
                 bytes += pcm16.size
             } catch (failure: Throwable) {
                 failLocked("spool-write-failed", failure)

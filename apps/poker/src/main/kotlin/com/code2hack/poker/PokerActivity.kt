@@ -128,7 +128,7 @@ class PokerActivity : ComponentActivity() {
         if (granted && asrController.isActive()) {
             asrCapture.start()
         } else {
-            lifecycleScope.launch { asrController.cancel() }
+            lifecycleScope.launch { asrController.fail("ASR unavailable") }
         }
     }
 
@@ -180,12 +180,20 @@ class PokerActivity : ComponentActivity() {
                     screenState.value = currentScreenState(screenState.value.wheelState)
                 }
             },
+            onFailureNotice = { message ->
+                PokerNoticeRuntime.show(PokerTransientNotice(message, 1_000L))
+            },
         )
         asrCapture = PokerAsrCapture(
             context = this,
             scope = lifecycleScope,
             send = asrController::sendAudio,
-            onFailure = { lifecycleScope.launch { asrController.cancel() } },
+            onFailure = {},
+            onFailureReason = { reason ->
+                lifecycleScope.launch {
+                    asrController.fail(asrController.captureFailureNotice(reason))
+                }
+            },
         )
         camera = PokerCamera2Controller(
             activity = this,
@@ -322,13 +330,13 @@ class PokerActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             PokerAsrBridge.commitResults.collect { results ->
-                results.values.forEach(asrController::onCommitResult)
+                results.values.forEach { asrController.onCommitResult(it) }
                 screenState.value = currentScreenState(screenState.value.wheelState)
             }
         }
         lifecycleScope.launch {
             PokerAsrBridge.discardResults.collect { results ->
-                results.values.forEach(asrController::onDiscardResult)
+                results.values.forEach { asrController.onDiscardResult(it) }
                 screenState.value = currentScreenState(screenState.value.wheelState)
             }
         }
@@ -505,8 +513,7 @@ class PokerActivity : ComponentActivity() {
             if (::photoController.isInitialized) photoController.onPresentationLost()
             if (::input.isInitialized) input.onFocusLost()
             if (::morseController.isInitialized) morseController.abort()
-            if (::asrCapture.isInitialized) asrCapture.stop()
-            if (::asrController.isInitialized) lifecycleScope.launch { asrController.cancel() }
+            if (::asrController.isInitialized) lifecycleScope.launch { asrController.forceExit() }
         }
     }
 

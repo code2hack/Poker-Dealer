@@ -1,5 +1,6 @@
 package com.code2hack.dealer.asr
 
+import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -11,7 +12,7 @@ import org.junit.Assert.assertThrows
 
 class DealerAsrOfflineSpoolTest {
     @Test
-    fun segmentationPrefersSilenceAndBoundsLongRecordings() {
+    fun segmentationPrefersSilenceAndHandlesMultiSegmentLongRecordings() {
         val root = Files.createTempDirectory("dealer-asr-segments").toFile()
         try {
             val shortFile = root.resolve("short.pcm16")
@@ -27,11 +28,12 @@ class DealerAsrOfflineSpoolTest {
             assertEquals(listOf(12, 12), shortSegments.map(FloatArray::size))
 
             val longFile = root.resolve("long.pcm16")
-            Files.write(longFile.toPath(), pcm16(ShortArray(15 * 16_000 + 123) { 1_000 }))
+            Files.write(longFile.toPath(), pcm16(ShortArray(31 * 16_000 + 123) { 1_000 }))
             val longSegments = DealerAsrOfflineSegmenter(speechProbability = { 1f })
                 .segments(longFile).toList()
+            assertTrue(longSegments.size >= 3)
             assertTrue(longSegments.all { it.size <= 15 * 16_000 })
-            assertEquals(15 * 16_000 + 123, longSegments.sumOf(FloatArray::size))
+            assertEquals(31 * 16_000 + 123, longSegments.sumOf(FloatArray::size))
         } finally {
             root.deleteRecursively()
         }
@@ -86,6 +88,24 @@ class DealerAsrOfflineSpoolTest {
     }
 
     @Test
+    fun ordinaryWriteFailureRemovesTemporarySpool() {
+        val root = Files.createTempDirectory("dealer-asr-write-failure").toFile()
+        try {
+            val spool = DealerAsrOfflineSpoolStore(
+                root,
+                write = { _, _ -> throw IOException("injected write failure") },
+            ).open("session")
+            val failure = assertThrows(DealerAsrOfflineFailure::class.java) {
+                spool.append(pcm16(shortArrayOf(1)))
+            }
+            assertEquals("spool-write-failed", failure.reason)
+            assertFalse(root.listFiles()?.any() == true)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun startupPurgeDeletesAbandonedSpoolsWithoutReadingThem() {
         val root = Files.createTempDirectory("dealer-asr-purge").toFile()
         try {
@@ -94,6 +114,25 @@ class DealerAsrOfflineSpoolTest {
                 resolve("capture.pcm16").writeBytes(pcm16(shortArrayOf(9)))
             }
             DealerAsrOfflineSpoolStore(root).purge()
+            assertTrue(root.listFiles().isNullOrEmpty())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun repeatedStartupInitializationDoesNotPurgeLiveSpool() {
+        val root = Files.createTempDirectory("dealer-asr-repeat-start").toFile()
+        try {
+            val store = DealerAsrOfflineSpoolStore(root)
+            store.purgeAtStartup()
+            val live = store.open("session")
+            live.append(pcm16(shortArrayOf(1)))
+
+            store.purgeAtStartup()
+
+            assertTrue(root.listFiles()?.any() == true)
+            live.close()
             assertTrue(root.listFiles().isNullOrEmpty())
         } finally {
             root.deleteRecursively()

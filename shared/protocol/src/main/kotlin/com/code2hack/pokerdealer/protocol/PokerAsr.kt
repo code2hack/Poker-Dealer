@@ -19,6 +19,7 @@ const val POKER_ASR_DISCARD_RESULT_TYPE = "asr.discard.result"
 const val POKER_ASR_EXIT_TYPE = "asr.exit"
 const val POKER_ASR_EXIT_RESULT_TYPE = "asr.exit.result"
 const val POKER_ASR_MAX_AUDIO_BYTES = 2_048
+const val POKER_ASR_MAX_AUDIO_QUEUE_BYTES = 64 * 1024
 
 @Serializable
 enum class PokerAsrTargetField {
@@ -183,14 +184,42 @@ data class PokerAsrCommitResult(
 )
 
 @Serializable
+enum class PokerAsrDiscardKind {
+    CURRENT_SLICE,
+    LAST_COMMITTED_SLICE,
+}
+
+@Serializable
 data class PokerAsrDiscardRequest(
     val target: PokerAsrTarget,
     @SerialName("session_id") val sessionId: String,
     @SerialName("operation_id") val operationId: String,
+    @SerialName("fence_sample_offset") val fenceSampleOffset: Long = 0L,
+    val kind: PokerAsrDiscardKind = PokerAsrDiscardKind.CURRENT_SLICE,
+    @SerialName("delete_start") val deleteStart: Int? = null,
+    @SerialName("delete_end_exclusive") val deleteEndExclusive: Int? = null,
+    @SerialName("expected_text") val expectedText: String? = null,
 ) {
     init {
         require(sessionId.isNotBlank()) { "ASR discard session id must not be blank" }
         require(operationId.isNotBlank()) { "ASR operation id must not be blank" }
+        require(fenceSampleOffset >= 0) { "ASR discard fence must not be negative" }
+        when (kind) {
+            PokerAsrDiscardKind.CURRENT_SLICE -> require(
+                deleteStart == null && deleteEndExclusive == null && expectedText == null,
+            ) { "Current-slice discard cannot include a committed range" }
+            PokerAsrDiscardKind.LAST_COMMITTED_SLICE -> {
+                require(deleteStart != null && deleteStart >= 0) {
+                    "ASR committed-slice delete start must be nonnegative"
+                }
+                require(deleteEndExclusive != null && deleteEndExclusive > deleteStart) {
+                    "ASR committed-slice delete range must be nonempty"
+                }
+                require(!expectedText.isNullOrEmpty()) {
+                    "ASR committed-slice delete text must not be empty"
+                }
+            }
+        }
     }
 }
 

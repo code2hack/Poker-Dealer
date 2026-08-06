@@ -34,6 +34,25 @@ class PokerAsrCaptureTest {
     }
 
     @Test
+    fun `low storage stops before opening the recorder`() = runTest {
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = { true },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            storageAvailable = { false },
+            minimumBufferSize = { error("storage must gate buffer setup") },
+            recorderFactory = { error("storage must gate recorder creation") },
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertFalse(capture.start())
+        assertEquals(listOf("ASR failed"), reasons)
+    }
+
+    @Test
     fun `capture emits whole signed pcm16 chunks in order`() = runTest {
         val recorder = FakeRecorder(
             byteArrayOf(1, 0, -2, 127),
@@ -93,6 +112,80 @@ class PokerAsrCaptureTest {
         assertTrue(recorder.released)
     }
 
+    @Test
+    fun `source loss terminates an already started capture`() = runTest {
+        val recorder = FakeRecorder(byteArrayOf(1, 0))
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = { true },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            sourceAvailable = { false },
+            minimumBufferSize = { POKER_ASR_FRAME_BYTES },
+            recorderFactory = { recorder },
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertTrue(capture.start())
+        runCurrent()
+
+        assertEquals(listOf("ASR failed"), reasons)
+        assertTrue(recorder.released)
+    }
+
+    @Test
+    fun `audio focus denial is unavailable and abandons the requested focus`() = runTest {
+        val focus = FakeAudioFocus(granted = false)
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = { true },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            minimumBufferSize = { POKER_ASR_FRAME_BYTES },
+            recorderFactory = { error("focus must gate recorder creation") },
+            audioFocus = focus,
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertFalse(capture.start())
+        assertEquals(listOf("ASR unavailable"), reasons)
+        assertEquals(1, focus.requests)
+        assertEquals(1, focus.abandons)
+    }
+
+    @Test
+    fun `audio focus loss forces one failure and releases the source`() = runTest {
+        val recorder = FakeRecorder(byteArrayOf(1, 0))
+        val focus = FakeAudioFocus()
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = {
+                focus.lose()
+                true
+            },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            minimumBufferSize = { POKER_ASR_FRAME_BYTES },
+            recorderFactory = { recorder },
+            audioFocus = focus,
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertTrue(capture.start())
+        runCurrent()
+
+        assertEquals(listOf("ASR failed"), reasons)
+        assertTrue(recorder.released)
+        assertEquals(1, focus.requests)
+        assertEquals(1, focus.abandons)
+    }
+
     private class FakeRecorder(vararg chunks: ByteArray) : PokerAsrRecorder {
         private val chunks = ArrayDeque(chunks.toList())
         override var isRecording: Boolean = false
@@ -124,5 +217,27 @@ class PokerAsrCaptureTest {
             released = true
             isRecording = false
         }
+    }
+
+    private class FakeAudioFocus(
+        private val granted: Boolean = true,
+    ) : PokerAsrAudioFocus {
+        var requests = 0
+            private set
+        var abandons = 0
+            private set
+        private var onLoss: () -> Unit = {}
+
+        override fun request(onLoss: () -> Unit): Boolean {
+            requests++
+            this.onLoss = onLoss
+            return granted
+        }
+
+        override fun abandon() {
+            abandons++
+        }
+
+        fun lose() = onLoss()
     }
 }

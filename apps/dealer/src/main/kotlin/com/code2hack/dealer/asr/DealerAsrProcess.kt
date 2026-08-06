@@ -28,7 +28,7 @@ internal class DealerAsrProcess private constructor(context: Context) {
         get() = manager
 
     internal suspend fun start() = withContext(Dispatchers.IO) {
-        offlineSpools.purge()
+        offlineSpools.purgeAtStartup()
         manager.start()
     }
 

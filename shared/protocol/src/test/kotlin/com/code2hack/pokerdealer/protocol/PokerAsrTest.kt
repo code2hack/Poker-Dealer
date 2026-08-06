@@ -61,4 +61,29 @@ class PokerAsrTest {
             PokerAsrProjection(target, "session", 0, "hello", 4),
         ).contains("slice_text"))
     }
+
+    @Test
+    fun `last committed discard carries an exact revision delete range`() {
+        val request = PokerAsrDiscardRequest(
+            target = target,
+            sessionId = "session",
+            operationId = "operation",
+            fenceSampleOffset = 4,
+            kind = PokerAsrDiscardKind.LAST_COMMITTED_SLICE,
+            deleteStart = 2,
+            deleteEndExclusive = 5,
+            expectedText = "ok.",
+        )
+        val encoded = PokerProtocolJson.encodeToString(PokerAsrDiscardRequest.serializer(), request)
+        assertTrue(encoded.contains("delete_start"))
+        assertThrows(IllegalArgumentException::class.java) {
+            PokerAsrDiscardRequest(
+                target = target,
+                sessionId = "session",
+                operationId = "operation",
+                kind = PokerAsrDiscardKind.CURRENT_SLICE,
+                deleteStart = 2,
+            )
+        }
+    }
 }
