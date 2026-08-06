@@ -233,6 +233,8 @@ data class UserInputRequestState(
         return copy(
             requests = (reissued?.let { requests - it.locator } ?: requests) + (
                 request.locator to request.copy(
+                    receivedAtMs = reissued?.receivedAtMs?.let { minOf(it, request.receivedAtMs) }
+                        ?: request.receivedAtMs,
                     resolution = RequestResolutionState.PENDING,
                     outcome = null,
                 )

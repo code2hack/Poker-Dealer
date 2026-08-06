@@ -2638,7 +2638,8 @@ class DealerConnectionService : Service() {
                                         userInputTimeoutJobs.remove(oldLocator)?.cancel()
                                     }
                                     wireUserInputs[parsed.request.locator] = wire
-                                    scheduleUserInputTimeout(parsed.request)
+                                    mutableState.value.userInputRequests.requests[parsed.request.locator]
+                                        ?.let(::scheduleUserInputTimeout)
                                     recordThreadTransition(parsed.request.thread)
                                     refreshPokerUserInputProjection(parsed.request.thread)
                                 } catch (failure: IllegalArgumentException) {
