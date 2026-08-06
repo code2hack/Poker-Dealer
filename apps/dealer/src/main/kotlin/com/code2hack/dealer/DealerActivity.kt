@@ -236,6 +236,19 @@ class DealerActivity : ComponentActivity() {
                         onSetDefaultAsrPack = { key ->
                             lifecycleScope.launch { asrDownloadManager.setDefault(key) }
                         },
+                        onRepairAsrPack = { key ->
+                            lifecycleScope.launch { asrDownloadManager.repair(key) }
+                        },
+                        onDeleteAsrPack = { key ->
+                            lifecycleScope.launch {
+                                runCatching { asrDownloadManager.delete(key, confirmed = true) }
+                                    .onFailure { failure ->
+                                        asrDownloadState.update { current ->
+                                            current.copy(error = failure.message ?: "pack-delete-failed")
+                                        }
+                                    }
+                            }
+                        },
                         onSetAsrMirror = { value ->
                             lifecycleScope.launch {
                                 runCatching { asrDownloadManager.setMirrorBaseUrl(value) }
@@ -475,6 +488,8 @@ private fun DealerApp(
     onResumeAsrPack: (DealerAsrPackKey) -> Unit,
     onCancelAsrPack: (DealerAsrPackKey) -> Unit,
     onSetDefaultAsrPack: (DealerAsrPackKey) -> Unit,
+    onRepairAsrPack: (DealerAsrPackKey) -> Unit,
+    onDeleteAsrPack: (DealerAsrPackKey) -> Unit,
     onSetAsrMirror: (String?) -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
@@ -769,6 +784,8 @@ private fun DealerApp(
                 onResume = onResumeAsrPack,
                 onCancel = onCancelAsrPack,
                 onSetDefault = onSetDefaultAsrPack,
+                onRepair = onRepairAsrPack,
+                onDelete = onDeleteAsrPack,
                 onSetMirror = onSetAsrMirror,
             )
             discoveredThreads.forEach { thread ->
@@ -1103,12 +1120,15 @@ private fun DealerAsrCatalogPanel(
     onResume: (DealerAsrPackKey) -> Unit,
     onCancel: (DealerAsrPackKey) -> Unit,
     onSetDefault: (DealerAsrPackKey) -> Unit,
+    onRepair: (DealerAsrPackKey) -> Unit,
+    onDelete: (DealerAsrPackKey) -> Unit,
     onSetMirror: (String?) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var selectedLanguage by remember { mutableStateOf<String?>(null) }
     var selectedMode by remember { mutableStateOf<DealerAsrMode?>(null) }
     var showCatalog by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<DealerAsrPackKey?>(null) }
     var mirrorUrl by remember(downloads.mirrorBaseUrl) {
         mutableStateOf(downloads.mirrorBaseUrl.orEmpty())
     }
@@ -1155,6 +1175,8 @@ private fun DealerAsrCatalogPanel(
         }
         downloads.jobs.forEach { job ->
             var menuExpanded by remember(job.key) { mutableStateOf(false) }
+            val installed = downloads.installed.firstOrNull { it.key == job.key }
+            val canDelete = installed != null && !installed.isDefault && !installed.isActive
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1174,13 +1196,42 @@ private fun DealerAsrCatalogPanel(
                 Text(job.displayName)
                 when (job.state) {
                     DealerAsrDownloadState.READY -> {
-                        Text(if (job.key == downloads.defaultPack) "Ready · default" else "Ready")
+                        Text(
+                            when {
+                                job.key == downloads.defaultPack -> "Ready · default"
+                                installed?.isActive == true -> "Ready · active"
+                                else -> "Ready"
+                            },
+                        )
                         job.warning?.let {
                             Text(it, color = Color(0xFF9A5B00), style = MaterialTheme.typography.labelSmall)
                         }
-                        if (job.key != downloads.defaultPack) {
-                            OutlinedButton(onClick = { onSetDefault(job.key) }) {
-                                Text("Use as default")
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (job.key != downloads.defaultPack) {
+                                OutlinedButton(onClick = { onSetDefault(job.key) }) {
+                                    Text("Use as default")
+                                }
+                            }
+                            if (canDelete) {
+                                OutlinedButton(onClick = { deleteTarget = job.key }) {
+                                    Text("Delete")
+                                }
+                            }
+                        }
+                    }
+                    DealerAsrDownloadState.REPAIR_NEEDED -> {
+                        Text(
+                            "Repair needed${job.error?.let { ": $it" } ?: ""}",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = { onRepair(job.key) }) {
+                                Text("Repair")
+                            }
+                            if (canDelete) {
+                                OutlinedButton(onClick = { deleteTarget = job.key }) {
+                                    Text("Delete")
+                                }
                             }
                         }
                     }
@@ -1189,7 +1240,26 @@ private fun DealerAsrCatalogPanel(
                         job.warning?.let {
                             Text(it, color = Color(0xFF9A5B00), style = MaterialTheme.typography.labelSmall)
                         }
-                        OutlinedButton(onClick = { onResume(job.key) }) { Text("Retry") }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = { onResume(job.key) }) { Text("Retry") }
+                            if (job.key != downloads.defaultPack) {
+                                Box {
+                                    OutlinedButton(onClick = { menuExpanded = true }) { Text("⋮") }
+                                    DropdownMenu(
+                                        expanded = menuExpanded,
+                                        onDismissRequest = { menuExpanded = false },
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Delete") },
+                                            onClick = {
+                                                menuExpanded = false
+                                                deleteTarget = job.key
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                     DealerAsrDownloadState.QUEUED,
                     DealerAsrDownloadState.DOWNLOADING,
@@ -1293,6 +1363,30 @@ private fun DealerAsrCatalogPanel(
         }
         if (showCatalog && entries.none { DealerAsrPackKey(it.id, it.revision) !in activeKeys }) {
             Text("No compatible model packs match the current filters.")
+        }
+        deleteTarget?.let { key ->
+            val job = downloads.jobs.firstOrNull { it.key == key }
+            AlertDialog(
+                onDismissRequest = { deleteTarget = null },
+                title = { Text("Delete ASR pack?") },
+                text = {
+                    Text(
+                        "${job?.displayName ?: key.packId} @ ${key.revision.take(12)} will be removed " +
+                            "with its profile. This cannot delete the active or default pack.",
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            onDelete(key)
+                            deleteTarget = null
+                        },
+                    ) { Text("Delete") }
+                },
+                dismissButton = {
+                    OutlinedButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+                },
+            )
         }
         state.error?.let {
             Text("Catalog update failed: $it", color = MaterialTheme.colorScheme.error)

@@ -17,6 +17,164 @@ import org.junit.Test
 
 class DealerAsrDownloadsTest {
     @Test
+    fun revisionsRemainSideBySideAndUseTheirOwnCatalogProfiles() = runBlocking {
+        val fixture = fixture()
+        val secondRevision = "b".repeat(40)
+        val secondEntry = fixture.entry.copy(revision = secondRevision, displayName = "Second revision")
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val manager = manager(fixture.root, transport)
+        try {
+            val first = manager.queue(fixture.entry)
+            await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
+            manager.saveProfile(first.key, "{\"packId\":\"${first.key.packId}\",\"custom\":true}")
+
+            val second = manager.queue(secondEntry)
+            await {
+                manager.stateFlow.value.jobs.firstOrNull { it.key == second.key }?.state ==
+                    DealerAsrDownloadState.READY
+            }
+
+            assertEquals(first.key, manager.stateFlow.value.defaultPack)
+            assertEquals(
+                secondEntry.defaultProfile.toString(),
+                manager.profile(second.key),
+            )
+            assertEquals(
+                "{\"packId\":\"${first.key.packId}\",\"custom\":true}",
+                manager.profile(first.key),
+            )
+            assertTrue(fixture.root.resolve("installed/${first.key.packId}/${first.key.revision}").isDirectory)
+            assertTrue(fixture.root.resolve("installed/${second.key.packId}/${second.key.revision}").isDirectory)
+        } finally {
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun activeAndDefaultPacksAreProtectedAndIdleDefaultsUnload() = runBlocking {
+        val fixture = fixture()
+        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val unloaded = mutableListOf<DealerAsrPackKey>()
+        val manager = manager(fixture.root, transport, unloadIdleDefault = unloaded::add)
+        try {
+            val first = manager.queue(fixture.entry)
+            val secondJob = manager.queue(second)
+            await { manager.stateFlow.value.jobs.all { it.state == DealerAsrDownloadState.READY } }
+
+            manager.setActive(first.key, true)
+            manager.setDefault(secondJob.key)
+            assertTrue(unloaded.isEmpty())
+            val activeDelete = runCatching { manager.delete(first.key, confirmed = true) }.exceptionOrNull()
+            assertTrue(activeDelete is IllegalArgumentException)
+            assertEquals("model-pack-active", activeDelete?.message)
+
+            manager.setActive(first.key, false)
+            assertEquals(listOf(first.key), unloaded)
+            manager.delete(first.key, confirmed = true)
+            assertFalse(fixture.root.resolve("installed/${first.key.packId}/${first.key.revision}").exists())
+            assertEquals(listOf(secondJob.key), manager.stateFlow.value.jobs.map { it.key })
+        } finally {
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun corruptDefaultBecomesRepairNeededWithoutFallbackAndRepairKeepsProfile() = runBlocking {
+        val fixture = fixture()
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val manager = manager(fixture.root, transport)
+        val customProfile = "{\"packId\":\"${fixture.entry.id}\",\"custom\":true}"
+        try {
+            val queued = manager.queue(fixture.entry)
+            await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
+            manager.saveProfile(queued.key, customProfile)
+            manager.close()
+
+            fixture.root.resolve("installed/${queued.key.packId}/${queued.key.revision}/model.onnx")
+                .writeText("corrupt")
+            val recovered = manager(fixture.root, transport)
+            try {
+                recovered.start()
+                val broken = recovered.stateFlow.value.jobs.single()
+                assertEquals(DealerAsrDownloadState.REPAIR_NEEDED, broken.state)
+                assertEquals(queued.key, recovered.stateFlow.value.defaultPack)
+                assertEquals(customProfile, recovered.profile(queued.key))
+
+                recovered.repair(queued.key)
+                await { recovered.stateFlow.value.jobs.single().state == DealerAsrDownloadState.READY }
+                assertEquals(queued.key, recovered.stateFlow.value.defaultPack)
+                assertEquals(customProfile, recovered.profile(queued.key))
+            } finally {
+                recovered.close()
+            }
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun installedRevisionSurvivesCatalogRemovalAndRestart() = runBlocking {
+        val fixture = fixture()
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val manager = manager(fixture.root, transport)
+        try {
+            val queued = manager.queue(fixture.entry)
+            await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
+            manager.close()
+
+            val restarted = manager(fixture.root, transport)
+            try {
+                restarted.start()
+                assertEquals(DealerAsrDownloadState.READY, restarted.stateFlow.value.jobs.single().state)
+                assertEquals(queued.key, restarted.stateFlow.value.defaultPack)
+            } finally {
+                restarted.close()
+            }
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stateV1MigratesAtomicallyAndUnsupportedStateRemainsUntouched() = runBlocking {
+        val fixture = fixture()
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val manager = manager(fixture.root, transport)
+        try {
+            manager.queue(fixture.entry)
+            await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
+            manager.close()
+
+            val stateFile = fixture.root.resolve("state.json")
+            val v1 = stateFile.readText().replace("\"schemaVersion\":2,", "")
+            stateFile.writeText(v1)
+            val migrated = manager(fixture.root, transport)
+            try {
+                migrated.start()
+                assertTrue(stateFile.readText().contains("\"schemaVersion\":2"))
+            } finally {
+                migrated.close()
+            }
+
+            val unsupported = stateFile.readText().replace("\"schemaVersion\":2", "\"schemaVersion\":99")
+            stateFile.writeText(unsupported)
+            val rejected = manager(fixture.root, transport)
+            try {
+                rejected.start()
+                assertEquals("download-state-unsupported", rejected.stateFlow.value.error)
+                assertEquals(unsupported, stateFile.readText())
+            } finally {
+                rejected.close()
+            }
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun queueInstallsAtomicallyAndFirstReadyPackBecomesDefault() = runBlocking {
         val fixture = fixture()
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
@@ -229,12 +387,14 @@ class DealerAsrDownloadsTest {
             availableBytes = { Long.MAX_VALUE },
             lowStorageBytes = { 0L },
         ),
+        unloadIdleDefault: (DealerAsrPackKey) -> Unit = {},
     ) = DealerAsrDownloadManager(
         stateFile = root.resolve("state.json"),
         partialRoot = root.resolve("partials"),
         installedRoot = root.resolve("installed"),
         transport = transport,
         storage = storage,
+        unloadIdleDefault = unloadIdleDefault,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 

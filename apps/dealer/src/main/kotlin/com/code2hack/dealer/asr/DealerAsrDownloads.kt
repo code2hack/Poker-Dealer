@@ -52,6 +52,7 @@ internal enum class DealerAsrDownloadState {
     DOWNLOADING,
     PAUSED,
     READY,
+    REPAIR_NEEDED,
     FAILED,
 }
 
@@ -88,6 +89,8 @@ internal data class DealerAsrDownloadJob(
     val startedAtMillis: Long? = null,
     val defaultProfileJson: String = "{}",
     val profileSchemaJson: String = "{}",
+    val profileJson: String? = null,
+    val repairing: Boolean = false,
 ) {
     val key: DealerAsrPackKey
         get() = DealerAsrPackKey(packId, revision)
@@ -103,12 +106,17 @@ internal data class DealerAsrDownloadJob(
 
     val percentage: Int
         get() = (progressFraction * 100).toInt().coerceIn(0, 100)
+
+    val currentProfileJson: String
+        get() = profileJson ?: defaultProfileJson
 }
 
 internal data class DealerAsrInstalledPack(
     val key: DealerAsrPackKey,
     val displayName: String,
     val isDefault: Boolean,
+    val isActive: Boolean = false,
+    val profileJson: String = "{}",
 )
 
 internal data class DealerAsrDownloadUiState(
@@ -238,6 +246,7 @@ internal class DealerAsrDownloadManager(
     initialMirrorBaseUrl: String? = null,
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val unloadIdleDefault: (DealerAsrPackKey) -> Unit = {},
 ) : Closeable {
     private data class ActiveTransfer(
         val key: DealerAsrPackKey,
@@ -261,8 +270,11 @@ internal class DealerAsrDownloadManager(
     private var nextOrder = 1L
     private var started = false
     private var managerError: String? = null
+    private var persistenceBlocked = false
     private var worker: Job? = null
     private val activeTransfer = AtomicReference<ActiveTransfer?>(null)
+    private val activePacks = mutableSetOf<DealerAsrPackKey>()
+    private val pendingIdleUnloads = mutableSetOf<DealerAsrPackKey>()
 
     val stateFlow: StateFlow<DealerAsrDownloadUiState> = state.asStateFlow()
 
@@ -336,6 +348,7 @@ internal class DealerAsrDownloadManager(
                     },
                     defaultProfileJson = entry.defaultProfile.toString(),
                     profileSchemaJson = entry.profileSchema.toString(),
+                    profileJson = entry.defaultProfile.toString(),
                 )
                 jobs[key] = job
                 persistLocked()
@@ -389,7 +402,51 @@ internal class DealerAsrDownloadManager(
                     currentSource = null,
                     warning = null,
                     error = null,
+                    repairing = job.repairing,
                 )
+                persistLocked()
+                publishLocked()
+            }
+        }
+        ensureWorker()
+    }
+
+    suspend fun repair(key: DealerAsrPackKey) {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val job = jobs[key] ?: throw DownloadRejected("model-pack-not-installed")
+                require(job.state == DealerAsrDownloadState.REPAIR_NEEDED) {
+                    "model-pack-repair-not-needed"
+                }
+                require(key !in activePacks) { "model-pack-active" }
+                val reset = job.artifacts.map {
+                    it.copy(
+                        downloadedBytes = 0,
+                        validator = null,
+                        sourceUrl = null,
+                        complete = false,
+                    )
+                }
+                val enoughStorage = hasRoomFor(job, job.totalBytes)
+                jobs[key] = job.copy(
+                    artifacts = reset,
+                    state = if (enoughStorage) {
+                        DealerAsrDownloadState.QUEUED
+                    } else {
+                        DealerAsrDownloadState.REPAIR_NEEDED
+                    },
+                    currentSource = null,
+                    warning = null,
+                    error = if (enoughStorage) null else "insufficient-storage",
+                    repairing = enoughStorage,
+                )
+                if (!enoughStorage) {
+                    persistLocked()
+                    publishLocked()
+                    return@withLock
+                }
+                deletePartialRoot(key)
                 persistLocked()
                 publishLocked()
             }
@@ -402,7 +459,11 @@ internal class DealerAsrDownloadManager(
         withContext(Dispatchers.IO) {
             lock.withLock {
                 val job = jobs[key] ?: return@withLock
-                if (job.state == DealerAsrDownloadState.READY) return@withLock
+                if (job.state in setOf(
+                        DealerAsrDownloadState.READY,
+                        DealerAsrDownloadState.REPAIR_NEEDED,
+                    )
+                ) return@withLock
                 jobs.remove(key)
                 deletePartialRoot(key)
                 persistLocked()
@@ -414,13 +475,113 @@ internal class DealerAsrDownloadManager(
 
     suspend fun setDefault(key: DealerAsrPackKey) {
         start()
-        withContext(Dispatchers.IO) {
+        val unload = withContext(Dispatchers.IO) {
             lock.withLock {
                 val job = jobs[key]
-                require(job?.state == DealerAsrDownloadState.READY && isInstalled(key)) {
+                require(job?.state == DealerAsrDownloadState.READY && isHealthy(job)) {
                     "model-pack-not-installed"
                 }
+                val previous = defaultPack
+                if (previous == key) return@withLock null
                 defaultPack = key
+                previous?.let { oldDefault ->
+                    if (oldDefault in activePacks) {
+                        pendingIdleUnloads += oldDefault
+                    } else {
+                        pendingIdleUnloads -= oldDefault
+                    }
+                }
+                pendingIdleUnloads -= key
+                persistLocked()
+                publishLocked()
+                previous?.takeUnless { it in activePacks }
+            }
+        }
+        unload?.let { runCatching { unloadIdleDefault(it) } }
+    }
+
+    suspend fun setActive(key: DealerAsrPackKey, active: Boolean) {
+        start()
+        val unload = withContext(Dispatchers.IO) {
+            lock.withLock {
+                val result = if (active) {
+                    val job = jobs[key]
+                    require(job?.state == DealerAsrDownloadState.READY && isHealthy(job)) {
+                        "model-pack-not-installed"
+                    }
+                    activePacks += key
+                    pendingIdleUnloads -= key
+                    null
+                } else {
+                    activePacks -= key
+                    if (key in pendingIdleUnloads) {
+                        pendingIdleUnloads -= key
+                        key
+                    } else {
+                        null
+                    }
+                }
+                publishLocked()
+                result
+            }
+        }
+        unload?.let { runCatching { unloadIdleDefault(it) } }
+    }
+
+    suspend fun markRepairNeeded(key: DealerAsrPackKey, reason: String = "pack-unloadable") {
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val job = jobs[key] ?: throw DownloadRejected("model-pack-not-installed")
+                jobs[key] = job.copy(
+                    state = DealerAsrDownloadState.REPAIR_NEEDED,
+                    currentSource = null,
+                    error = reason,
+                    repairing = false,
+                )
+                persistLocked()
+                publishLocked()
+            }
+        }
+    }
+
+    suspend fun saveProfile(key: DealerAsrPackKey, profileJson: String) {
+        require(profileJson.trim().startsWith("{") && profileJson.trim().endsWith("}")) {
+            "profile-invalid"
+        }
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                val job = jobs[key] ?: throw DownloadRejected("model-pack-not-installed")
+                jobs[key] = job.copy(profileJson = profileJson)
+                persistLocked()
+                if (isReady(key)) persistReadyMarkerLocked(jobs.getValue(key))
+                publishLocked()
+            }
+        }
+    }
+
+    suspend fun profile(key: DealerAsrPackKey): String? = withContext(Dispatchers.IO) {
+        lock.withLock { jobs[key]?.currentProfileJson }
+    }
+
+    suspend fun delete(key: DealerAsrPackKey, confirmed: Boolean) {
+        require(confirmed) { "confirmation-required" }
+        start()
+        withContext(Dispatchers.IO) {
+            lock.withLock {
+                require(defaultPack != key) { "model-pack-default" }
+                require(key !in activePacks) { "model-pack-active" }
+                val job = jobs[key] ?: return@withLock
+                require(job.state in setOf(
+                    DealerAsrDownloadState.READY,
+                    DealerAsrDownloadState.REPAIR_NEEDED,
+                    DealerAsrDownloadState.FAILED,
+                )) { "model-pack-busy" }
+                jobs.remove(key)
+                pendingIdleUnloads -= key
+                deletePartialRoot(key)
+                installedRootFor(key).deleteRecursively()
                 persistLocked()
                 publishLocked()
             }
@@ -507,11 +668,12 @@ internal class DealerAsrDownloadManager(
                             persistLocked()
                             publishLocked()
                         }
-                        job.state == DealerAsrDownloadState.DOWNLOADING && isInstalled(key) -> {
+                        job.state == DealerAsrDownloadState.DOWNLOADING && isHealthy(job.copy(repairing = false)) -> {
                             jobs[key] = job.copy(
                                 state = DealerAsrDownloadState.READY,
                                 currentSource = null,
                                 error = null,
+                                repairing = false,
                             )
                             if (defaultPack == null) defaultPack = key
                             persistReadyMarkerLocked(jobs.getValue(key))
@@ -698,23 +860,30 @@ internal class DealerAsrDownloadManager(
         }
         val staging = partialRootFor(key)
         require(staging.isDirectory) { "download-storage-unavailable" }
-        persistReadyMarkerLocked(job, staging)
+        persistReadyMarkerLocked(job.copy(repairing = false), staging)
 
         val finalRoot = installedRoot.resolve(key.packId).resolve(key.revision)
         requireSafeDirectory(finalRoot, installedRoot)
         finalRoot.parentFile?.let { require(it.isDirectory || it.mkdirs()) { "install-storage-unavailable" } }
-        if (finalRoot.exists()) {
-            if (isReady(key)) return
-            finalRoot.deleteRecursively()
+        val replacing = finalRoot.exists()
+        val backupRoot = if (replacing) {
+            finalRoot.resolveSibling(".${finalRoot.name}.replacing-${nowMillis()}")
+        } else {
+            null
         }
         try {
-            Files.move(
-                staging.toPath(),
-                finalRoot.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(staging.toPath(), finalRoot.toPath())
+            if (backupRoot != null) {
+                requireSafeDirectory(backupRoot, installedRoot)
+                moveDirectory(finalRoot, backupRoot)
+            }
+            moveDirectory(staging, finalRoot)
+        } catch (failure: Throwable) {
+            if (backupRoot?.isDirectory == true && !finalRoot.exists()) {
+                runCatching { moveDirectory(backupRoot, finalRoot) }
+            }
+            throw failure
+        } finally {
+            if (finalRoot.exists()) backupRoot?.deleteRecursively()
         }
         partialRootFor(key).parentFile?.listFiles()?.let { children ->
             if (children.isEmpty()) partialRootFor(key).parentFile?.delete()
@@ -837,12 +1006,17 @@ internal class DealerAsrDownloadManager(
     private fun loadLocked() {
         val document = if (stateFile.isFile) {
             runCatching { downloadJson.decodeFromString<PersistedDownloadDocument>(stateFile.readText()) }
-                .getOrElse {
+                .onFailure {
                     managerError = "download-state-invalid"
-                    PersistedDownloadDocument()
+                    persistenceBlocked = true
                 }
+                .getOrElse { PersistedDownloadDocument() }
         } else {
             PersistedDownloadDocument()
+        }
+        if (document.schemaVersion > STATE_SCHEMA_VERSION) {
+            managerError = "download-state-unsupported"
+            persistenceBlocked = true
         }
         configuredMirrorBaseUrl = document.mirrorBaseUrl?.let {
             runCatching { normalizeDealerAsrMirrorUrl(it) }.getOrNull()
@@ -855,15 +1029,27 @@ internal class DealerAsrDownloadManager(
             val markerJob = runCatching {
                 downloadJson.decodeFromString<DealerAsrDownloadJob>(marker.readText())
             }.getOrNull() ?: return@forEach
-            jobs[markerJob.key] = markerJob.copy(state = DealerAsrDownloadState.READY)
+            val existing = jobs[markerJob.key]
+            jobs[markerJob.key] = when {
+                existing == null -> markerJob.copy(state = DealerAsrDownloadState.READY, repairing = false)
+                existing.repairing -> existing
+                existing.state in setOf(
+                    DealerAsrDownloadState.QUEUED,
+                    DealerAsrDownloadState.DOWNLOADING,
+                ) -> existing.copy(state = DealerAsrDownloadState.READY, repairing = false)
+                else -> existing
+            }
         }
         jobs = jobs.mapValuesTo(linkedMapOf()) { (_, job) ->
             when {
+                job.state == DealerAsrDownloadState.DOWNLOADING && isReady(job.key) ->
+                    job.copy(state = DealerAsrDownloadState.READY, repairing = false)
                 job.state == DealerAsrDownloadState.DOWNLOADING -> job.copy(state = DealerAsrDownloadState.QUEUED)
-                job.state == DealerAsrDownloadState.READY && !isInstalled(job.key) ->
+                job.state == DealerAsrDownloadState.READY && !isHealthy(job) ->
                     job.copy(
-                        state = DealerAsrDownloadState.QUEUED,
-                        artifacts = job.artifacts.map { it.copy(downloadedBytes = 0, validator = null, sourceUrl = null, complete = false) },
+                        state = DealerAsrDownloadState.REPAIR_NEEDED,
+                        error = if (isReady(job.key)) "pack-digest-mismatch" else "model-pack-not-installed",
+                        repairing = false,
                     )
                 else -> job
             }
@@ -872,18 +1058,25 @@ internal class DealerAsrDownloadManager(
             document.nextOrder,
             (jobs.values.maxOfOrNull { it.order } ?: 0L) + 1L,
         )
-        if (defaultPack != null && !isInstalled(defaultPack!!)) defaultPack = null
-        if (defaultPack == null) {
+        if (defaultPack != null && jobs[defaultPack] == null) defaultPack = null
+        if (defaultPack == null && !persistenceBlocked) {
             defaultPack = jobs.values
-                .filter { it.state == DealerAsrDownloadState.READY && isInstalled(it.key) }
+                .filter { it.state == DealerAsrDownloadState.READY && isHealthy(it) }
                 .minByOrNull(DealerAsrDownloadJob::order)
                 ?.key
         }
-        persistLocked()
+        if (!persistenceBlocked) {
+            runCatching { persistLocked() }.onFailure {
+                managerError = "download-state-migration-failed"
+                persistenceBlocked = true
+            }
+        }
     }
 
     private fun publishLocked() {
-        val ready = jobs.values.filter { it.state == DealerAsrDownloadState.READY && isInstalled(it.key) }
+        val ready = jobs.values.filter {
+            it.state in setOf(DealerAsrDownloadState.READY, DealerAsrDownloadState.REPAIR_NEEDED)
+        }
         state.value = DealerAsrDownloadUiState(
             jobs = jobs.values.sortedBy(DealerAsrDownloadJob::order),
             installed = ready.map { job ->
@@ -891,6 +1084,8 @@ internal class DealerAsrDownloadManager(
                     key = job.key,
                     displayName = job.displayName,
                     isDefault = job.key == defaultPack,
+                    isActive = job.key in activePacks,
+                    profileJson = job.currentProfileJson,
                 )
             },
             defaultPack = defaultPack,
@@ -900,9 +1095,11 @@ internal class DealerAsrDownloadManager(
     }
 
     private fun persistLocked() {
+        check(!persistenceBlocked) { "download-state-persistence-failed" }
         val parent = stateFile.parentFile ?: throw DownloadRejected("download-storage-unavailable")
         require(parent.isDirectory || parent.mkdirs()) { "download-storage-unavailable" }
         val document = PersistedDownloadDocument(
+            schemaVersion = STATE_SCHEMA_VERSION,
             nextOrder = nextOrder,
             defaultPack = defaultPack,
             mirrorBaseUrl = configuredMirrorBaseUrl,
@@ -964,10 +1161,23 @@ internal class DealerAsrDownloadManager(
         }
     }
 
-    private fun isInstalled(key: DealerAsrPackKey): Boolean = isReady(key)
-
     private fun isReady(key: DealerAsrPackKey): Boolean =
         installedRootFor(key).resolve(READY_MARKER).isFile
+
+    private fun isHealthy(job: DealerAsrDownloadJob): Boolean {
+        if (job.repairing || !isReady(job.key)) return false
+        return job.artifacts.all { artifact ->
+            runCatching {
+                val file = installedRootFor(job.key).resolve(artifact.path)
+                requireSafeArtifactFile(file, installedRootFor(job.key))
+                isArtifactDigestValid(
+                    file,
+                    artifact.sha256,
+                    artifact.bytes,
+                )
+            }.getOrDefault(false)
+        }
+    }
 
     private fun partialRootFor(key: DealerAsrPackKey): File =
         partialRoot.resolve(key.packId).resolve(key.revision)
@@ -985,6 +1195,14 @@ internal class DealerAsrDownloadManager(
 
     private fun deleteArtifactFile(key: DealerAsrPackKey, path: String) {
         partialArtifact(key, path).delete()
+    }
+
+    private fun moveDirectory(source: File, target: File) {
+        try {
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(source.toPath(), target.toPath())
+        }
     }
 
     private fun requireSafeDirectory(directory: File, root: File) {
@@ -1044,6 +1262,7 @@ internal class DealerAsrDownloadManager(
 
 @Serializable
 private data class PersistedDownloadDocument(
+    val schemaVersion: Int = 1,
     val nextOrder: Long = 1L,
     val defaultPack: DealerAsrPackKey? = null,
     val mirrorBaseUrl: String? = null,
@@ -1055,3 +1274,5 @@ private class DownloadRejected(val reason: String) : Exception(reason)
 private class DownloadPaused : Exception()
 
 private class DownloadCancelled : Exception()
+
+private const val STATE_SCHEMA_VERSION = 2
