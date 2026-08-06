@@ -135,12 +135,9 @@ class ThreadPileReducer {
     }
 
     fun manualWake() {
-        val target = automaticFocus()
-            ?: lastViewed?.takeIf { piles[it]?.let { pile -> pile.available && pile.workState == ThreadWorkState.BUSY } == true }
-            ?: knownPiles().firstOrNull { it.available && it.workState == ThreadWorkState.BUSY }?.locator
+        val target = restoreLastViewed()
         focused = target
         hudVisible = target != null
-        target?.let { lastViewed = it }
     }
 
     fun view(locator: CodexThreadLocator) {
@@ -210,10 +207,9 @@ class ThreadPileReducer {
         if (focused == locator && current.workState != null && workState == null) {
             focusNearest(oldIndex)
         }
-        if (wake && changed && !hudVisible && workState in ELIGIBLE_STATES) {
-            focused = automaticFocus()
+        if (wake && changed && !hudVisible) {
+            focused = restoreLastViewed()
             hudVisible = focused != null
-            focused?.let { lastViewed = it }
         }
     }
 
@@ -239,13 +235,9 @@ class ThreadPileReducer {
         }
     }
 
-    private fun automaticFocus(): CodexThreadLocator? = knownPiles()
-        .firstOrNull { it.available && it.workState == ThreadWorkState.ATTENTION_REQUIRED }
-        ?.locator
-        ?: knownPiles().firstOrNull { it.available && it.workState == ThreadWorkState.READY }?.locator
+    private fun restoreLastViewed(): CodexThreadLocator? = lastViewed?.takeIf { it in piles }
 
     private companion object {
-        val ELIGIBLE_STATES = setOf(ThreadWorkState.ATTENTION_REQUIRED, ThreadWorkState.READY)
         val PROMINENT_OUTCOMES = setOf(TurnOutcome.FAILED, TurnOutcome.INTERRUPTED)
         val STATE_ORDER = mapOf(
             ThreadWorkState.BUSY to 0,

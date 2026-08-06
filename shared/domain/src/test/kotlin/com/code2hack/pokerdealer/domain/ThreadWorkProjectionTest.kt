@@ -63,20 +63,41 @@ class ThreadWorkProjectionTest {
     }
 
     @Test
-    fun `manual hide survives existing eligibility and a new transition wakes highest priority`() {
+    fun `manual wake and event wake preserve the last viewed pile`() {
         val reducer = ThreadPileReducer()
         reducer.attach(readyOld, evidence(false), atMs = 1)
         reducer.attach(attentionOld, evidence(true), atMs = 2)
         reducer.manualWake()
-        assertEquals(readyOld, reducer.metadata().focused)
+        assertNull(reducer.metadata().focused)
+        assertFalse(reducer.metadata().hudVisible)
 
+        reducer.view(readyOld)
         reducer.manualHide()
         reducer.reconcile(readyOld, evidence(false), atMs = 3, available = true)
         assertFalse(reducer.metadata().hudVisible)
 
         reducer.transition(attentionOld, evidence(true, 1), atMs = 4)
         assertTrue(reducer.metadata().hudVisible)
-        assertEquals(attentionOld, reducer.metadata().focused)
+        assertEquals(readyOld, reducer.metadata().focused)
+    }
+
+    @Test
+    fun `manual wake restores a focused busy pile despite attention and ready piles`() {
+        val reducer = ThreadPileReducer()
+        reducer.attach(busy, evidence(true), atMs = 1)
+        reducer.attach(attentionOld, evidence(true), atMs = 2)
+        reducer.attach(readyOld, evidence(false), atMs = 3)
+
+        reducer.view(busy)
+        reducer.manualHide()
+        reducer.transition(attentionOld, evidence(true, 1), atMs = 4)
+        assertTrue(reducer.metadata().hudVisible)
+        assertEquals(busy, reducer.metadata().focused)
+
+        reducer.manualHide()
+        reducer.manualWake()
+        assertTrue(reducer.metadata().hudVisible)
+        assertEquals(busy, reducer.metadata().focused)
     }
 
     @Test
@@ -85,14 +106,14 @@ class ThreadWorkProjectionTest {
         reducer.attach(readyOld, evidence(false), atMs = 1)
         reducer.attach(attentionOld, evidence(true), atMs = 2)
         reducer.attach(readyTie, evidence(false), atMs = 3)
-        reducer.manualWake()
+        reducer.view(readyOld)
 
         reducer.transition(attentionOld, evidence(true, 1), atMs = 4)
         assertEquals(readyOld, reducer.metadata().focused)
 
         reducer.manualHide()
         reducer.manualWake()
-        assertEquals(attentionOld, reducer.metadata().focused)
+        assertEquals(readyOld, reducer.metadata().focused)
         reducer.view(readyOld)
         reducer.transition(readyOld, evidence(true), atMs = 5)
         assertEquals(readyOld, reducer.metadata().focused)
@@ -153,6 +174,8 @@ class ThreadWorkProjectionTest {
         reducer.reconcile(busy, evidence(false), atMs = 3, available = true)
         assertFalse(reducer.metadata().hudVisible)
 
+        reducer.view(busy)
+        reducer.manualHide()
         reducer.turnEnded(busy, TurnOutcome.FAILED, atMs = 4)
         assertTrue(reducer.metadata().hudVisible)
         assertEquals(TurnOutcome.FAILED, reducer.metadata().orderedPiles.single { it.locator == busy }.outcome)
@@ -168,7 +191,8 @@ class ThreadWorkProjectionTest {
         assertEquals(busy, reducer.metadata().focused)
         reducer.manualHide()
         reducer.manualWake()
-        assertFalse(reducer.metadata().hudVisible)
+        assertTrue(reducer.metadata().hudVisible)
+        assertEquals(busy, reducer.metadata().focused)
         reducer.view(readyOld)
         assertEquals(readyOld, reducer.metadata().focused)
     }
