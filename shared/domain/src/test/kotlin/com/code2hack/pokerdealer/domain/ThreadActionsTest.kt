@@ -113,4 +113,23 @@ class ThreadActionsTest {
         assertEquals(draft.copy(revision = 1), pending.draft)
         assertEquals("before📷after", pending.draftText)
     }
+
+    @Test
+    fun `uncertain mixed draft keeps the frozen photo reference locked`() {
+        val draft = ComposerDraft(
+            elements = listOf(
+                ComposerElement.Text("before"),
+                ComposerElement.Photo("asset"),
+                ComposerElement.Text("after"),
+            ),
+        )
+        val state = ThreadActionState().editComposerDraft(thread, draft)
+        val (started, pending) = state.beginInput(thread, ThreadWorkState.READY, null, true, "photo-turn")
+        val uncertain = started.inputUncertain(thread, pending.clientId)
+
+        assertEquals(pending.draft, uncertain.pendingInputs.getValue(thread).draft)
+        assertThrows(IllegalArgumentException::class.java) {
+            uncertain.beginInput(thread, ThreadWorkState.READY, null, true, "other")
+        }
+    }
 }

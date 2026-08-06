@@ -1,6 +1,8 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.domain.CardRole
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
@@ -17,6 +19,7 @@ import com.code2hack.pokerdealer.protocol.host.RouteConnectionException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import kotlinx.serialization.json.JsonElement
@@ -26,6 +29,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -37,6 +41,87 @@ class CodexAppServerM1Test {
         assertEquals("image", input["type"]?.jsonPrimitive?.content)
         assertEquals("data:image/jpeg;base64,AA==", input["image_url"]?.jsonPrimitive?.content)
         assertEquals("original", input["detail"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `draft input preserves text photo order and exact bytes for every accepted format`() = runTest {
+        val assets = linkedMapOf(
+            "png" to AppServerPhotoAsset("image/png", byteArrayOf(1, 2, 3)),
+            "jpeg" to AppServerPhotoAsset("image/jpeg", byteArrayOf(4, 5, 6)),
+            "webp" to AppServerPhotoAsset("image/webp", byteArrayOf(7, 8, 9)),
+            "gif" to AppServerPhotoAsset("image/gif", byteArrayOf(10, 11, 12)),
+        )
+        val draft = ComposerDraft(
+            elements = listOf(
+                ComposerElement.Text("before"),
+                ComposerElement.Photo("png"),
+                ComposerElement.Text("between"),
+                ComposerElement.Photo("jpeg"),
+                ComposerElement.Photo("webp"),
+                ComposerElement.Text("after"),
+                ComposerElement.Photo("gif"),
+            ),
+        )
+
+        val input = AppServerTurnInput.fromDraft(draft) { assets[it] }
+
+        assertEquals(
+            listOf("text", "image", "text", "image", "image", "text", "image"),
+            input.map { it["type"]?.jsonPrimitive?.content },
+        )
+        assertEquals(
+            listOf(
+                "data:image/png;base64,AQID",
+                "data:image/jpeg;base64,BAUG",
+                "data:image/webp;base64,BwgJ",
+                "data:image/gif;base64,CgsM",
+            ),
+            input.filter { it["type"]?.jsonPrimitive?.content == "image" }
+                .map { it["image_url"]?.jsonPrimitive?.content },
+        )
+        assertTrue(
+            input.filter { it["type"]?.jsonPrimitive?.content == "image" }
+                .all { it["detail"]?.jsonPrimitive?.content == "original" },
+        )
+    }
+
+    @Test
+    fun `turn start and steer send the same ordered mixed input without changing it`() = runTest {
+        val input = mixedPhotoInput()
+        val peer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("turn-start-mixed-request.json", "turn-start-response.json"),
+                fixture("turn-steer-mixed-request.json", "turn-steer-response.json"),
+            ),
+        )
+        val session = CodexAppServerSession(peer)
+        session.initialize()
+
+        session.turnStart("thr_photo", input, "client-photo-start")
+        session.turnSteer("thr_photo", "turn_active", input, "client-photo-steer")
+
+        assertEquals(listOf("initialize", "turn/start", "turn/steer"), peer.requests)
+    }
+
+    @Test
+    fun `original detail rejection is surfaced and never retried`() = runTest {
+        val peer = FixtureJsonRpcPeer(
+            exchanges = listOf(
+                fixture("initialize-request.json", "initialize-response.json"),
+                fixture("turn-start-mixed-request.json", "turn-start-original-detail-rejection.json"),
+            ),
+        )
+        val session = CodexAppServerSession(peer)
+        session.initialize()
+
+        assertThrows(JsonRpcRemoteException::class.java) {
+            runBlocking {
+                session.turnStart("thr_photo", mixedPhotoInput(), "client-photo-start")
+            }
+        }
+        assertEquals(listOf("initialize", "turn/start"), peer.requests)
+        assertTrue(peer.closed)
     }
 
     @Test
@@ -760,6 +845,24 @@ class CodexAppServerM1Test {
 
     private fun fixture(request: String, response: String) = FixtureExchange(request, response)
 
+    private suspend fun mixedPhotoInput() = AppServerTurnInput.fromDraft(
+        ComposerDraft(
+            elements = listOf(
+                ComposerElement.Text("before"),
+                ComposerElement.Photo("jpeg"),
+                ComposerElement.Text("between"),
+                ComposerElement.Photo("png"),
+                ComposerElement.Text("after"),
+            ),
+        ),
+    ) { assetId ->
+        when (assetId) {
+            "jpeg" -> AppServerPhotoAsset("image/jpeg", byteArrayOf(1, 2, 3))
+            "png" -> AppServerPhotoAsset("image/png", byteArrayOf(4, 5, 6))
+            else -> null
+        }
+    }
+
     private fun completeFirstPeer() = FixtureJsonRpcPeer(
         exchanges = listOf(
             fixture("initialize-request.json", "initialize-response.json"),
@@ -812,7 +915,9 @@ private class FixtureJsonRpcPeer(
         requests += method
         if (method == failOnRequestMethod) error("$method disconnected before response")
         if (method == waitOnRequestMethod) awaitCancellation()
-        return loadFixture(exchange.responseFixture).jsonObject["result"] ?: JsonObject(emptyMap())
+        val response = loadFixture(exchange.responseFixture).jsonObject
+        response["error"]?.let { throw JsonRpcRemoteException(method, it) }
+        return response["result"] ?: JsonObject(emptyMap())
     }
 
     override suspend fun notify(method: String, params: JsonElement?) {

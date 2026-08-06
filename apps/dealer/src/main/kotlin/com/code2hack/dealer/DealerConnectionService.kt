@@ -67,6 +67,7 @@ import com.code2hack.pokerdealer.protocol.appserver.M1TurnOutcome
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnRecoveryException
 import com.code2hack.pokerdealer.protocol.appserver.M1TurnInput
 import com.code2hack.pokerdealer.protocol.appserver.AppServerTurnInput
+import com.code2hack.pokerdealer.protocol.appserver.AppServerPhotoAsset
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnectionConfig
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
@@ -2734,16 +2735,9 @@ class DealerConnectionService : Service() {
                 return@launch
             }
             try {
-                val input = pending.draft.elements.map { element ->
-                    when (element) {
-                        is ComposerElement.Text -> AppServerTurnInput.text(element.value)
-                        is ComposerElement.Photo -> {
-                            val image = photoAssets.read(element.assetId)
-                                ?: error("Photo asset ${element.assetId} is unavailable")
-                            AppServerTurnInput.image(
-                                PhotoAssetCodec.dataUrl(image.mimeType, image.bytes),
-                            )
-                        }
+                val input = AppServerTurnInput.fromDraft(pending.draft) { assetId ->
+                    photoAssets.read(assetId)?.let { image ->
+                        AppServerPhotoAsset(image.mimeType, image.bytes)
                     }
                 }
                 val response = when (pending.action) {
