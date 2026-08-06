@@ -419,7 +419,7 @@ class DealerConnectionService : Service() {
             val restoreErrors = mutableListOf<String>()
             val (restoredAttachments, restoredActions) = try {
                 threadAttachmentStore.read() to threadAttachmentStore.readActions()
-            } catch (_: Throwable) {
+            } catch (failure: Throwable) {
                 restoreErrors += "Unable to restore Dealer thread state: ${failure.message}"
                 emptySet<CodexThreadLocator>() to ThreadActionState()
             }
