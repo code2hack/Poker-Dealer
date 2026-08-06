@@ -406,6 +406,17 @@ class DealerConnectionService : Service() {
                     fontRevision = restoredPokerFont.revision,
                 ),
             )
+            runCatching { purgeUnusedPhotoAssets() }
+                .onFailure { failure ->
+                    mutableState.update { current ->
+                        current.copy(
+                            error = listOfNotNull(
+                                current.error,
+                                "Unable to purge abandoned photo assets: ${failure.message}",
+                            ).joinToString("; "),
+                        )
+                    }
+                }
             handlePokerConnectionState(pokerConnectionOwner.connectionState)
             sendCurrentPokerBindings()
             sendCurrentPokerFont()
@@ -1654,12 +1665,18 @@ class DealerConnectionService : Service() {
         val rejection = when {
             target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
                 "Photo connection epoch is stale"
-            session == null || session.target.modeSession != target.modeSession ->
+            session == null ||
+                session.target.locator != target.locator ||
+                session.target.controlGeneration != target.controlGeneration ||
+                session.target.connectionEpoch != target.connectionEpoch ||
+                session.target.modeSession != target.modeSession ->
                 "Photo session is no longer active"
             target.draftRevision != current.revision ||
                 target.cursorPosition !in 0 until current.cursorCount ->
                 "Photo draft target is stale"
             unit?.photoAssetId != target.assetId -> "Photo token is no longer present"
+            target.assetId !in session.committedAssetIds ->
+                "Photo was not captured in this session"
             else -> null
         }
         if (rejection != null) {
@@ -1668,18 +1685,24 @@ class DealerConnectionService : Service() {
             sendPokerPhotoDeleteResult(envelope, result)
             return
         }
+        val activeSession = checkNotNull(session)
         val next = current
             .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
             .withRevision(current.revision + 1)
         val result = try {
-            draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
-            mutableState.update {
-                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+            val deleted = photoAssets.deleteAfter(target.assetId) {
+                draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
+                mutableState.update {
+                    it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                }
             }
-            photoAssets.delete(target.assetId)
-            session?.committedAssetIds?.remove(target.assetId)
-            session?.cursorPosition = target.cursorPosition
-            PhotoDeleteResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+            if (!deleted) {
+                PhotoDeleteResult(target, PhotoCaptureOutcome.REJECTED, current, "Photo asset is unavailable")
+            } else {
+                activeSession.committedAssetIds.remove(target.assetId)
+                activeSession.cursorPosition = target.cursorPosition
+                PhotoDeleteResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+            }
         } catch (failure: Throwable) {
             PhotoDeleteResult(
                 target,
@@ -2541,14 +2564,22 @@ class DealerConnectionService : Service() {
                         .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
                         .withRevision(current.revision + 1)
                     runCatching {
-                        draftMutex.withLock {
-                            threadAttachmentStore.writeDraft(target.locator, next)
+                        val deleted = photoAssets.deleteAfter(assetId) {
+                            draftMutex.withLock {
+                                threadAttachmentStore.writeDraft(target.locator, next)
+                            }
+                            mutableState.update {
+                                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                            }
                         }
-                        mutableState.update {
-                            it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                        if (deleted) {
+                            result(ComposerMutationOutcome.ACKNOWLEDGED, next)
+                        } else {
+                            result(
+                                ComposerMutationOutcome.REJECTED,
+                                reason = "Photo asset is unavailable",
+                            )
                         }
-                        photoAssets.delete(assetId)
-                        result(ComposerMutationOutcome.ACKNOWLEDGED, next)
                     }.getOrElse { failure ->
                         result(
                             ComposerMutationOutcome.UNCERTAIN,

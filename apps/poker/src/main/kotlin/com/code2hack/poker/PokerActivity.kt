@@ -122,7 +122,14 @@ class PokerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         navigation = PokerNavigationReducer(viewportLineCount = 12)
-        composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
+        composerController = PokerComposerController(
+            navigation = navigation,
+            sendMutation = PokerComposerBridge::sendMutation,
+            scope = lifecycleScope,
+            onNotice = { message, durationMs ->
+                PokerNoticeRuntime.show(PokerTransientNotice(message, durationMs))
+            },
+        )
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
         morseController = PokerMorseController(
             navigation = navigation,
@@ -180,7 +187,10 @@ class PokerActivity : ComponentActivity() {
                 requestCardsByLocator = snapshot?.piles.orEmpty()
                     .associate { it.metadata.locator to it.requestCards }
                 cardTextByLocator = navigation.installPokerSnapshot(snapshot)
-                PokerComposerBridge.projections.value.values.forEach(composerController::applyProjection)
+                PokerComposerBridge.projections.value.values.forEach { projection ->
+                    photoController.onProjection(projection)
+                    composerController.applyProjection(projection)
+                }
                 PokerComposerBridge.userInputProjections.value.values.forEach(userInputController::applyProjection)
                 PokerComposerBridge.approvalProjections.value.values.forEach(approvalController::applyProjection)
                 screenState.value = currentScreenState()
@@ -193,7 +203,10 @@ class PokerActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             PokerComposerBridge.projections.collect { projections ->
-                projections.values.forEach(composerController::applyProjection)
+                projections.values.forEach { projection ->
+                    photoController.onProjection(projection)
+                    composerController.applyProjection(projection)
+                }
                 screenState.value = currentScreenState()
             }
         }
@@ -385,7 +398,7 @@ class PokerActivity : ComponentActivity() {
         foreground = hasFocus
         PokerBindingRuntime.setForeground(hasFocus)
         if (!hasFocus) {
-            if (::photoController.isInitialized) photoController.exit()
+            if (::photoController.isInitialized) photoController.onPresentationLost()
             if (::input.isInitialized) input.onFocusLost()
             if (::morseController.isInitialized) morseController.abort()
         }

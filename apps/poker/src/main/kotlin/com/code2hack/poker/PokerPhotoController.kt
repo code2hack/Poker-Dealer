@@ -15,6 +15,7 @@ import com.code2hack.pokerdealer.protocol.PhotoCaptureComplete
 import com.code2hack.pokerdealer.protocol.PhotoCaptureOutcome
 import com.code2hack.pokerdealer.protocol.PhotoCaptureResult
 import com.code2hack.pokerdealer.protocol.PhotoDeleteResult
+import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.PhotoStartOutcome
 import com.code2hack.pokerdealer.protocol.PhotoStartResult
 import com.code2hack.pokerdealer.protocol.PhotoStartTarget
@@ -72,12 +73,15 @@ internal class PokerPhotoController(
     private val waiters = mutableMapOf<String, CompletableDeferred<PhotoCaptureResult>>()
     private val deleteWaiters = mutableMapOf<String, CompletableDeferred<PhotoDeleteResult>>()
     private val committedAssetIds = linkedSetOf<String>()
+    private val committedPhotoCopies = mutableMapOf<String, ByteArray>()
     private var session: PhotoStartTarget? = null
     private var cursorPosition = 0
     private var draftRevision = 0L
     private var captureJob: Job? = null
     private var transferJob: Job? = null
     private var noticeJob: Job? = null
+    private var captureOperation: PhotoAssetTarget? = null
+    private var deleteOperation: PhotoAssetTarget? = null
     private var lastGesture: PokerOperation? = null
     private var functionStartedAtMs: Long? = null
 
@@ -191,6 +195,7 @@ internal class PokerPhotoController(
         )
         val waiter = CompletableDeferred<PhotoCaptureResult>()
         waiters[assetTarget.operationId] = waiter
+        captureOperation = assetTarget
         mutableState.value = mutableState.value.copy(
             phase = PokerPhotoPhase.TRANSFERRING,
             frozenBytes = bytes,
@@ -215,7 +220,13 @@ internal class PokerPhotoController(
                 waiter.await()
             }
             waiters.remove(assetTarget.operationId)
-            if (result == null) fail("Photo not added") else applyCaptureResult(result)
+            if (result == null) {
+                if (captureOperation == assetTarget) captureOperation = null
+                fail("Photo not added")
+            } else {
+                applyCaptureResult(result)
+                if (captureOperation == assetTarget) captureOperation = null
+            }
         }
     }
 
@@ -236,17 +247,38 @@ internal class PokerPhotoController(
         if (session != null) forceExit(null)
     }
 
+    fun onProjection(projection: ComposerDraftProjection) {
+        val target = session ?: return
+        if (projection.locator == target.locator &&
+            (!projection.hasDealerClaim ||
+                projection.controlGeneration != target.controlGeneration ||
+                projection.connectionEpoch != target.connectionEpoch ||
+                projection.modeSession != target.modeSession)
+        ) {
+            forceExit(null)
+        }
+    }
+
     fun onCaptureRequested() {
         if (mutableState.value.phase != PokerPhotoPhase.PREVIEW) return
-        mutableState.value = mutableState.value.copy(phase = PokerPhotoPhase.CAPTURING, frozenBytes = null)
+        noticeJob?.cancel()
+        mutableState.value = mutableState.value.copy(
+            phase = PokerPhotoPhase.CAPTURING,
+            frozenBytes = null,
+            notice = null,
+        )
     }
 
     fun onCaptureResult(result: PhotoCaptureResult) {
-        waiters[result.target.operationId]?.complete(result)
+        if (captureOperation == result.target) {
+            waiters[result.target.operationId]?.complete(result)
+        }
     }
 
     fun onDeleteResult(result: PhotoDeleteResult) {
-        deleteWaiters[result.target.operationId]?.complete(result)
+        if (deleteOperation == result.target) {
+            deleteWaiters[result.target.operationId]?.complete(result)
+        }
     }
 
     fun requestDelete() {
@@ -270,21 +302,36 @@ internal class PokerPhotoController(
         )
         val waiter = CompletableDeferred<PhotoDeleteResult>()
         deleteWaiters[operation.operationId] = waiter
-        mutableState.value = mutableState.value.copy(phase = PokerPhotoPhase.DELETING, frozenBytes = null)
+        deleteOperation = operation
+        noticeJob?.cancel()
+        closeCamera()
+        mutableState.value = mutableState.value.copy(
+            phase = PokerPhotoPhase.DELETING,
+            frozenBytes = committedPhotoCopies[assetId]?.copyOf(),
+        )
         scope.launch {
             val result = withTimeoutOrNull(POKER_PHOTO_DELETE_TIMEOUT_MS) {
                 if (!sendDelete(operation)) return@withTimeoutOrNull null
                 waiter.await()
             }
             deleteWaiters.remove(operation.operationId)
-            if (result == null) fail("Photo not deleted") else applyDeleteResult(result, assetId, cursor)
+            if (deleteOperation == operation) {
+                deleteOperation = null
+                if (result == null) {
+                    resumePreview("Photo not deleted")
+                } else {
+                    applyDeleteResult(result, operation)
+                }
+            }
         }
     }
 
     fun exit() {
-        if (session == null) return
+        if (session == null || mutableState.value.phase != PokerPhotoPhase.PREVIEW) return
         forceExit(null)
     }
+
+    fun onPresentationLost() = forceExit(null)
 
     fun close() {
         if (session != null) forceExit(null) else closeCamera()
@@ -317,9 +364,13 @@ internal class PokerPhotoController(
 
     private fun applyCaptureResult(result: PhotoCaptureResult) {
         if (session?.sessionId != result.target.sessionId ||
-            mutableState.value.phase != PokerPhotoPhase.TRANSFERRING
+            mutableState.value.phase != PokerPhotoPhase.TRANSFERRING ||
+            captureOperation != result.target
         ) return
         if (result.outcome == PhotoCaptureOutcome.ACKNOWLEDGED) {
+            mutableState.value.frozenBytes?.let { bytes ->
+                committedPhotoCopies[result.target.assetId] = bytes.copyOf()
+            }
             composer.applyPhotoDraft(
                 result.target.locator,
                 result.draft,
@@ -339,23 +390,31 @@ internal class PokerPhotoController(
         }
     }
 
-    private fun applyDeleteResult(result: PhotoDeleteResult, assetId: String, cursor: Int) {
+    private fun applyDeleteResult(result: PhotoDeleteResult, operation: PhotoAssetTarget) {
         if (session?.sessionId != result.target.sessionId ||
-            mutableState.value.phase != PokerPhotoPhase.DELETING
+            mutableState.value.phase != PokerPhotoPhase.DELETING ||
+            result.target != operation
         ) return
-        if (result.outcome == PhotoCaptureOutcome.ACKNOWLEDGED) {
+        val assetId = operation.assetId
+        val cursor = operation.cursorPosition
+        if (result.outcome == PhotoCaptureOutcome.ACKNOWLEDGED &&
+            result.draft.visibleUnits().none { it.photoAssetId == assetId }
+        ) {
             composer.applyPhotoDraft(result.target.locator, result.draft, cursor)
             committedAssetIds.remove(assetId)
+            committedPhotoCopies.remove(assetId)
             draftRevision = result.draft.revision
             cursorPosition = cursor
             mutableState.value = PokerPhotoState(
                 phase = PokerPhotoPhase.PREVIEW,
                 zoom = mutableState.value.zoom,
+                notice = "Photo deleted",
                 locator = result.target.locator,
             )
             openCamera()
+            showNotice("Photo deleted", 500L)
         } else {
-            fail("Photo not deleted")
+            resumePreview("Photo not deleted")
         }
     }
 
@@ -370,10 +429,13 @@ internal class PokerPhotoController(
         captureJob?.cancel()
         transferJob?.cancel()
         waiters.clear()
+        captureOperation = null
         deleteWaiters.clear()
+        deleteOperation = null
         functionStartedAtMs = null
         session = null
         committedAssetIds.clear()
+        committedPhotoCopies.clear()
         mutableState.value = PokerPhotoState(notice = reason)
         closeCamera()
         noticeJob?.cancel()
@@ -413,6 +475,28 @@ internal class PokerPhotoController(
             delay(1_000L)
             mutableState.value = mutableState.value.copy(notice = null)
             if (session != null && mutableState.value.phase == PokerPhotoPhase.PREVIEW) openCamera()
+        }
+    }
+
+    private fun resumePreview(reason: String) {
+        val target = session ?: return
+        mutableState.value = PokerPhotoState(
+            phase = PokerPhotoPhase.PREVIEW,
+            zoom = mutableState.value.zoom,
+            notice = reason,
+            locator = target.locator,
+        )
+        openCamera()
+        showNotice(reason, 1_000L)
+    }
+
+    private fun showNotice(reason: String, durationMs: Long) {
+        noticeJob?.cancel()
+        noticeJob = scope.launch {
+            delay(durationMs)
+            if (mutableState.value.notice == reason) {
+                mutableState.value = mutableState.value.copy(notice = null)
+            }
         }
     }
 }

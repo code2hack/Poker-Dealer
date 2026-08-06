@@ -82,6 +82,26 @@ internal class DealerPhotoAssetStore(context: Context) {
         staged(assetId).delete()
     }
 
+    /** Removes an asset only after the matching draft update commits, restoring it on failure. */
+    suspend fun deleteAfter(assetId: String, updateDraft: suspend () -> Unit): Boolean =
+        withContext(Dispatchers.IO) {
+            val source = stored(assetId)
+            if (!source.isFile) return@withContext false
+            val deleting = root.resolve("${safeName(assetId)}.deleting")
+            if (deleting.exists() && !deleting.delete()) return@withContext false
+            if (!source.renameTo(deleting)) return@withContext false
+            try {
+                updateDraft()
+                deleting.delete()
+                true
+            } catch (failure: Throwable) {
+                if (!deleting.renameTo(source)) {
+                    throw IllegalStateException("Unable to restore photo asset $assetId", failure)
+                }
+                throw failure
+            }
+        }
+
     suspend fun purgeExcept(assetIds: Set<String>) = withContext(Dispatchers.IO) {
         root.listFiles().orEmpty().filter { file ->
             file.nameWithoutExtension !in assetIds
