@@ -9,6 +9,8 @@ import com.code2hack.pokerdealer.domain.TurnOutcome
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
@@ -541,6 +543,11 @@ class PokerSnapshotConnectionHandler(
     private val onInstalled: (PokerSnapshot) -> Unit = {},
 ) : PokerConnectionCallbacks {
     private val snapshotSource = snapshotSource
+    private val lock = Mutex()
+    private val liveSender = if (role == PokerSnapshotRole.DEALER) PokerLiveDeltaSender() else null
+    private val liveReceiver = if (role == PokerSnapshotRole.POKER) PokerLiveDeltaReceiver() else null
+    private var liveEnabled = false
+    private var liveSend: PokerEnvelopeSender? = null
 
     init {
         require(
@@ -553,13 +560,30 @@ class PokerSnapshotConnectionHandler(
         context: PokerConnectionContext,
         send: PokerEnvelopeSender,
     ) {
-        if (role == PokerSnapshotRole.POKER && context.canUseSnapshots()) {
-            send(
-                POKER_SNAPSHOT_REQUEST_TYPE,
-                POKER_SNAPSHOT_STREAM,
-                PokerSnapshotWire.requestPayload(installer!!.requestAfterConnection()),
-                null,
-            )
+        lock.withLock {
+            liveEnabled = context.canUseLiveDeltas()
+            liveSend = send
+            liveSender?.reset()
+            if (role == PokerSnapshotRole.POKER && context.canUseSnapshots()) {
+                send(
+                    POKER_SNAPSHOT_REQUEST_TYPE,
+                    POKER_SNAPSHOT_STREAM,
+                    PokerSnapshotWire.requestPayload(installer!!.requestAfterConnection()),
+                    null,
+                )
+            }
+        }
+    }
+
+    /** Publishes the newest complete Dealer projection, using a delta when it is safe. */
+    suspend fun publish(snapshot: PokerSnapshot) {
+        if (role != PokerSnapshotRole.DEALER) return
+        lock.withLock {
+            if (!liveEnabled) return
+            val send = liveSend ?: return
+            runCatching {
+                emit(liveSender!!.publish(snapshot), send)
+            }
         }
     }
 
@@ -568,15 +592,56 @@ class PokerSnapshotConnectionHandler(
         envelope: ProtocolEnvelope,
         send: PokerEnvelopeSender,
     ) {
-        if (!context.canUseSnapshots() || envelope.stream != POKER_SNAPSHOT_STREAM) return
-        when (role) {
-            PokerSnapshotRole.DEALER -> if (envelope.type == POKER_SNAPSHOT_REQUEST_TYPE) {
-                runCatching { PokerSnapshotWire.request(envelope.payload) }
-                    .getOrNull() ?: return
-                sendSnapshot(envelope.messageId, send)
-            }
+        if (!context.canUseSnapshots()) return
+        lock.withLock {
+            liveSend = send
+            when {
+                envelope.stream == POKER_SNAPSHOT_STREAM -> when (role) {
+                    PokerSnapshotRole.DEALER -> when (envelope.type) {
+                        POKER_SNAPSHOT_REQUEST_TYPE -> sendSnapshot(envelope.messageId, send)
+                        POKER_SNAPSHOT_ACK_TYPE -> {
+                            if (liveEnabled) {
+                                val acknowledgement = runCatching {
+                                    PokerSnapshotWire.acknowledgement(envelope.payload)
+                                }.getOrNull() ?: return
+                                emit(liveSender!!.acknowledged(acknowledgement.revision), send)
+                            }
+                        }
+                        else -> Unit
+                    }
 
-            PokerSnapshotRole.POKER -> receiveSnapshot(envelope, send)
+                    PokerSnapshotRole.POKER -> receiveSnapshot(envelope, send)
+                }
+
+                envelope.stream == POKER_LIVE_DELTA_STREAM && liveEnabled -> when (role) {
+                    PokerSnapshotRole.DEALER -> if (envelope.type == POKER_LIVE_DELTA_ACK_TYPE) {
+                        val acknowledgement = runCatching {
+                            PokerLiveDeltaWire.acknowledgement(envelope.payload)
+                        }.getOrNull() ?: return
+                        emit(liveSender!!.acknowledged(acknowledgement.revision), send)
+                    }
+
+                    PokerSnapshotRole.POKER -> receiveDelta(envelope, send)
+                }
+            }
+        }
+    }
+
+    private suspend fun emit(
+        action: PokerLiveDeltaSendAction,
+        send: PokerEnvelopeSender,
+    ) {
+        when (action) {
+            PokerLiveDeltaSendAction.None -> Unit
+            is PokerLiveDeltaSendAction.Deltas -> action.deltas.forEach { delta ->
+                send(
+                    POKER_LIVE_DELTA_TYPE,
+                    POKER_LIVE_DELTA_STREAM,
+                    PokerLiveDeltaWire.deltaPayload(delta),
+                    null,
+                )
+            }
+            is PokerLiveDeltaSendAction.Snapshot -> sendSnapshot(action.snapshot, null, send)
         }
     }
 
@@ -584,7 +649,15 @@ class PokerSnapshotConnectionHandler(
         replyTo: String,
         send: PokerEnvelopeSender,
     ) {
-        val transfer = PokerSnapshotWire.encode(snapshotSource!!(), snapshotId())
+        sendSnapshot(snapshotSource!!(), replyTo, send)
+    }
+
+    private suspend fun sendSnapshot(
+        snapshot: PokerSnapshot,
+        replyTo: String?,
+        send: PokerEnvelopeSender,
+    ) {
+        val transfer = PokerSnapshotWire.encode(snapshot, snapshotId())
         send(
             POKER_SNAPSHOT_BEGIN_TYPE,
             POKER_SNAPSHOT_STREAM,
@@ -605,6 +678,7 @@ class PokerSnapshotConnectionHandler(
             PokerSnapshotWire.completePayload(PokerSnapshotComplete(transfer.manifest.snapshotId)),
             replyTo,
         )
+        liveSender?.snapshotSent(snapshot)
     }
 
     private suspend fun receiveSnapshot(
@@ -627,7 +701,10 @@ class PokerSnapshotConnectionHandler(
             PokerSnapshotInstallStatus.SUPERSEDED,
             -> result.acknowledgement?.let { acknowledgement ->
                 if (result.status == PokerSnapshotInstallStatus.INSTALLED) {
-                    result.snapshot?.let(onInstalled)
+                    result.snapshot?.let {
+                        liveReceiver?.installSnapshot(it)
+                        onInstalled(it)
+                    }
                 }
                 send(
                     POKER_SNAPSHOT_ACK_TYPE,
@@ -647,6 +724,48 @@ class PokerSnapshotConnectionHandler(
         }
     }
 
+    private suspend fun receiveDelta(
+        envelope: ProtocolEnvelope,
+        send: PokerEnvelopeSender,
+    ) {
+        val delta = runCatching { PokerLiveDeltaWire.delta(envelope.payload) }.getOrNull()
+            ?: run {
+                sendFreshRequest(send, "malformed")
+                return
+            }
+        val result = liveReceiver!!.accept(delta)
+        when (result.status) {
+            PokerLiveDeltaInstallStatus.APPLIED -> {
+                result.snapshot?.let(onInstalled)
+                send(
+                    POKER_LIVE_DELTA_ACK_TYPE,
+                    POKER_LIVE_DELTA_STREAM,
+                    PokerLiveDeltaWire.acknowledgementPayload(
+                        PokerCardDeltaAcknowledgement(checkNotNull(result.acknowledgedRevision)),
+                    ),
+                    envelope.messageId,
+                )
+            }
+            PokerLiveDeltaInstallStatus.DUPLICATE -> {
+                result.acknowledgedRevision?.let { revision ->
+                    send(
+                        POKER_LIVE_DELTA_ACK_TYPE,
+                        POKER_LIVE_DELTA_STREAM,
+                        PokerLiveDeltaWire.acknowledgementPayload(
+                            PokerCardDeltaAcknowledgement(revision),
+                        ),
+                        envelope.messageId,
+                    )
+                }
+            }
+            PokerLiveDeltaInstallStatus.RESNAPSHOT_REQUIRED,
+            PokerLiveDeltaInstallStatus.MALFORMED,
+            PokerLiveDeltaInstallStatus.QUEUE_OVERFLOW,
+            -> sendFreshRequest(send, result.reason ?: result.status.name.lowercase())
+            PokerLiveDeltaInstallStatus.QUEUED -> Unit
+        }
+    }
+
     private suspend fun sendFreshRequest(send: PokerEnvelopeSender, reason: String) {
         send(
             POKER_SNAPSHOT_REQUEST_TYPE,
@@ -660,3 +779,6 @@ class PokerSnapshotConnectionHandler(
 private fun PokerConnectionContext.canUseSnapshots(): Boolean =
     negotiation.access == PokerProtocolAccess.READ_WRITE &&
         negotiation.supports(POKER_SNAPSHOT_CAPABILITY)
+
+private fun PokerConnectionContext.canUseLiveDeltas(): Boolean =
+    canUseSnapshots() && negotiation.supports(POKER_LIVE_DELTA_CAPABILITY)

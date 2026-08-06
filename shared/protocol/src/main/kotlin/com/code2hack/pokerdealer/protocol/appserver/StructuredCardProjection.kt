@@ -69,11 +69,33 @@ object AppServerStructuredCardProjection {
                         ?: params.long("completedAtMs")
                         ?: nowMs,
                     updatedAtMs = params.long("completedAtMs") ?: nowMs,
+                    contentComplete = notification.method == "item/completed",
                     preserveOutput = prior?.fullText.takeIf {
                         notification.method == "item/started" && item.text("aggregatedOutput") == null
                     },
                 ) ?: return StructuredCardUpdate(current)
                 upsert(card, authoritative = notification.method == "item/completed")
+            }
+            "item/agentMessage/delta" -> {
+                val itemId = params.text("itemId") ?: return StructuredCardUpdate(current, true)
+                val delta = params.text("delta") ?: return StructuredCardUpdate(current, true)
+                val prior = current.firstOrNull { it.id == itemId }
+                if (prior?.state.isTerminal()) return StructuredCardUpdate(current)
+                upsert(
+                    (prior ?: placeholder(
+                        itemId,
+                        conversationId,
+                        turnId,
+                        nextSequence,
+                        CardSource.CODEX_AGENT_MESSAGE,
+                        nowMs,
+                        role = CardRole.AGENT,
+                    )).copy(
+                        fullText = prior?.fullText.orEmpty() + delta,
+                        updatedAtMs = nowMs,
+                        contentComplete = false,
+                    ),
+                )
             }
             "item/commandExecution/outputDelta", "item/fileChange/outputDelta" -> {
                 val itemId = params.text("itemId") ?: return StructuredCardUpdate(current, true)
@@ -166,6 +188,7 @@ object AppServerStructuredCardProjection {
         createdAtMs: Long,
         updatedAtMs: Long = createdAtMs,
         turnOutcome: TurnOutcome? = null,
+        contentComplete: Boolean = false,
         preserveOutput: String? = null,
     ): Card? {
         val id = text("id") ?: return null
@@ -215,6 +238,21 @@ object AppServerStructuredCardProjection {
                     contentComplete = status != null && changes.isNotEmpty(),
                 )
             }
+            "agentMessage" -> Card(
+                id = id,
+                conversationId = conversationId,
+                sequence = sequence,
+                revision = revision,
+                role = CardRole.AGENT,
+                state = if (contentComplete) CardState.COMMITTED else status.cardState(),
+                fullText = text("text") ?: preserveOutput.orEmpty(),
+                createdAtMs = createdAtMs,
+                updatedAtMs = updatedAtMs,
+                source = CardSource.CODEX_AGENT_MESSAGE,
+                turnId = turnId,
+                turnOutcome = turnOutcome,
+                contentComplete = contentComplete,
+            )
             else -> null
         }
     }
@@ -226,12 +264,13 @@ object AppServerStructuredCardProjection {
         sequence: Long,
         source: CardSource,
         nowMs: Long,
+        role: CardRole = CardRole.TOOL,
     ) = Card(
         id = id,
         conversationId = conversationId,
         sequence = sequence,
         revision = 1,
-        role = CardRole.TOOL,
+        role = role,
         state = CardState.OPEN,
         fullText = "",
         createdAtMs = nowMs,
