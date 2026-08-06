@@ -9,6 +9,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -289,6 +290,40 @@ class PokerConnectionOwnerTest {
         assertEquals(POKER_HEARTBEAT_PONG_TYPE, socket.sentTypes().last())
         assertEquals("peer-ping", PokerFrameCodec.decode(socket.sent.last()).replyTo)
         assertFalse(socket.closed)
+        owner.stop()
+    }
+
+    @Test
+    fun `application envelopes reach the owner callback and can send a reply`() = runTest {
+        val scheduler = FakeScheduler()
+        val factory = FakeFactory()
+        val received = mutableListOf<ProtocolEnvelope>()
+        lateinit var owner: PokerConnectionOwner<String>
+        owner = PokerConnectionOwner(
+            factory = factory,
+            scope = this,
+            scheduler = scheduler,
+            clock = FakeClock(),
+            reconnect = PokerReconnectController(
+                PokerReconnectPolicy(jitterFraction = 0.0),
+            ),
+            onEnvelope = { _, envelope ->
+                received += envelope
+                owner.send("composer.reply", buildJsonObject { })
+            },
+        )
+        owner.start()
+        scheduler.runNext()
+        runCurrent()
+        val socket = FakeFrameSocket().apply { offerPeerOffer() }
+        factory.listeners.single().offer(socket)
+        runCurrent()
+
+        socket.offerPeerFrame("composer.request", sequence = 2)
+        runCurrent()
+
+        assertEquals(listOf("composer.request"), received.map(ProtocolEnvelope::type))
+        assertEquals("composer.reply", socket.sentTypes().last())
         owner.stop()
     }
 

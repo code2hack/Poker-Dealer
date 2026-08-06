@@ -553,6 +553,8 @@ class PokerConnectionOwner<Snapshot>(
     private val sessionId: String = UUID.randomUUID().toString(),
     private val messageId: () -> String = { UUID.randomUUID().toString() },
     private val connector: PokerConnectionConnector? = null,
+    private val onConnected: suspend (PokerConnectionEpoch, PokerProtocolNegotiation) -> Unit = { _, _ -> },
+    private val onEnvelope: suspend (PokerConnectionEpoch, ProtocolEnvelope) -> Unit = { _, _ -> },
 ) {
     init {
         require((factory == null) xor (connector == null)) {
@@ -575,6 +577,26 @@ class PokerConnectionOwner<Snapshot>(
 
     val isListening: Boolean
         get() = synchronized(lock) { listener != null }
+
+    /** Sends one application envelope on the current negotiated epoch. */
+    suspend fun send(
+        type: String,
+        payload: JsonObject,
+        replyTo: String? = null,
+        requireWritable: Boolean = false,
+    ): Boolean {
+        val epoch = synchronized(lock) { active?.epoch }
+            ?: return false
+        if (requireWritable && !session.canMutate()) return false
+        return try {
+            send(epoch, type, payload, replyTo)
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     fun start() {
         synchronized(lock) {
@@ -765,6 +787,13 @@ class PokerConnectionOwner<Snapshot>(
                 ).jsonObject,
             )
             reconnect.markStable()
+            try {
+                onConnected(epoch, negotiation)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                // Application projection errors must not tear down an authenticated transport.
+            }
             scheduleHeartbeat(runtime)
             while (true) {
                 val envelope = receiveEnvelope(runtime) ?: return
@@ -784,6 +813,17 @@ class PokerConnectionOwner<Snapshot>(
                     }
 
                     else -> runtime.heartbeat.onTraffic(clock.nowMs())
+                }
+                if (envelope.type != POKER_HEARTBEAT_PING_TYPE &&
+                    envelope.type != POKER_HEARTBEAT_PONG_TYPE
+                ) {
+                    try {
+                        onEnvelope(epoch, envelope)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        // Unknown or malformed application payloads are isolated to the frame.
+                    }
                 }
             }
         } catch (_: CancellationException) {

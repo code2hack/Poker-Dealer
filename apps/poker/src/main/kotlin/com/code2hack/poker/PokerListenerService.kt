@@ -41,7 +41,11 @@ class PokerListenerService : Service() {
             scheduler = CoroutinePokerScheduler(serviceScope),
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
+            onEnvelope = { _, envelope -> PokerComposerBridge.receive(envelope) },
         )
+        PokerComposerBridge.attach { type, payload, requireWritable ->
+            owner.send(type, payload, requireWritable = requireWritable)
+        }
         registerNetworkCallback()
     }
 
@@ -90,6 +94,7 @@ class PokerListenerService : Service() {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }
         networkCallback = null
+        PokerComposerBridge.detach()
         owner.stop()
         serviceScope.cancel()
         if (foregroundStarted) {

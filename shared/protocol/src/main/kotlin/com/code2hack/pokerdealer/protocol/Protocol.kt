@@ -21,6 +21,9 @@ const val POKER_PROTOCOL_OFFER_TYPE = "protocol.offer"
 const val POKER_PROTOCOL_NEGOTIATED_TYPE = "protocol.negotiated"
 const val POKER_HEARTBEAT_PING_TYPE = "heartbeat.ping"
 const val POKER_HEARTBEAT_PONG_TYPE = "heartbeat.pong"
+const val POKER_COMPOSER_DRAFT_PROJECTION_TYPE = "composer.projection"
+const val POKER_COMPOSER_MUTATION_TYPE = "composer.mutation"
+const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
 const val POKER_LISTENER_PORT = 39_817
 
 val PokerProtocolJson = Json {
@@ -50,6 +53,7 @@ data class ComposerDraftProjection(
     val draft: ComposerDraft,
     @SerialName("control_generation") val controlGeneration: Long,
     @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String = "",
 )
 
 @Serializable
@@ -61,6 +65,21 @@ enum class ComposerMutationKind {
 data class ComposerMutationRequest(
     val target: ComposerEditTarget,
     val kind: ComposerMutationKind,
+)
+
+@Serializable
+enum class ComposerMutationOutcome {
+    ACKNOWLEDGED,
+    REJECTED,
+    UNCERTAIN,
+}
+
+@Serializable
+data class ComposerMutationResult(
+    val target: ComposerEditTarget,
+    val outcome: ComposerMutationOutcome,
+    val draft: ComposerDraft,
+    val reason: String? = null,
 )
 
 @Serializable

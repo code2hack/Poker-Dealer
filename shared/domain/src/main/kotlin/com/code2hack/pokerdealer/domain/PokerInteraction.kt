@@ -1,5 +1,7 @@
 package com.code2hack.pokerdealer.domain
 
+import java.util.UUID
+
 enum class PokerOperation {
     DOWN,
     UP,
@@ -193,9 +195,14 @@ data class PokerCardLayout(
 data class PokerComposerLayout(
     val positionCount: Int = 1,
     val draft: ComposerDraft? = null,
+    val controlGeneration: Long = 0L,
+    val connectionEpoch: Long = 0L,
+    val modeSession: String = "",
 ) {
     init {
         require(positionCount > 0) { "Composer position count must be positive" }
+        require(controlGeneration >= 0) { "Composer control generation must not be negative" }
+        require(connectionEpoch >= 0) { "Composer connection epoch must not be negative" }
     }
 
     val cursorPositionCount: Int
@@ -314,6 +321,14 @@ class PokerNavigationReducer(
     fun layout(locator: CodexThreadLocator): PokerPileLayout? = layouts[locator]
 
     fun anchor(locator: CodexThreadLocator): PokerPileAnchor? = anchors[locator]
+
+    fun setComposerCursor(locator: CodexThreadLocator, cursorPosition: Int) {
+        val current = anchors[locator]?.takeIf { it.mode == PokerNavigationMode.COMPOSER } ?: return
+        val composer = layouts[locator]?.composer ?: return
+        anchors[locator] = current.copy(
+            cursorPosition = cursorPosition.coerceIn(0, composer.endCursorPosition),
+        )
+    }
 
     fun anchors(): Map<CodexThreadLocator, PokerPileAnchor> = anchors.toMap()
 
@@ -610,6 +625,7 @@ data class ComposerDeletionRequest(
     val draftRevision: Long,
     val start: Int,
     val endExclusive: Int,
+    val target: ComposerEditTarget? = null,
 )
 
 private const val SHORT_FN_MAX_DURATION_MS = 500L
@@ -618,10 +634,22 @@ fun PokerNavigationReducer.shortComposerDeletion(
     locator: CodexThreadLocator,
 ): ComposerDeletionRequest? {
     val anchor = anchor(locator)?.takeIf { it.mode == PokerNavigationMode.COMPOSER } ?: return null
-    val draft = layout(locator)?.composer?.draft ?: return null
+    val composer = layout(locator)?.composer ?: return null
+    val draft = composer.draft ?: return null
     val deletion = draft.deleteThroughNextWord(anchor.cursorPosition) ?: return null
     if (deletion.containsPhoto) return null
-    return ComposerDeletionRequest(locator, draft.revision, deletion.start, deletion.endExclusive)
+    val target = composer.modeSession.takeIf(String::isNotBlank)?.let { modeSession ->
+        ComposerEditTarget(
+            locator = locator,
+            draftRevision = draft.revision,
+            cursorPosition = anchor.cursorPosition,
+            controlGeneration = composer.controlGeneration,
+            connectionEpoch = composer.connectionEpoch,
+            modeSession = modeSession,
+            operationId = UUID.randomUUID().toString(),
+        )
+    }
+    return ComposerDeletionRequest(locator, draft.revision, deletion.start, deletion.endExclusive, target)
 }
 
 class PokerInputController(

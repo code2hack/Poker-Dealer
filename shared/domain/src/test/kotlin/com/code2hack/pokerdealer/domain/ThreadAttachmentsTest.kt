@@ -1,6 +1,7 @@
 package com.code2hack.pokerdealer.domain
 
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -14,9 +15,11 @@ class ThreadAttachmentsTest {
         val observing = ThreadAttachmentState().attach(spark).attach(u4090)
 
         assertFalse(observing.hasDealerClaim(spark))
+        assertEquals(1L, observing.controlGeneration(spark))
         val claimed = observing.claim(spark).claim(u4090)
         assertTrue(claimed.hasDealerClaim(spark))
         assertTrue(claimed.hasDealerClaim(u4090))
+        assertEquals(2L, claimed.controlGeneration(spark))
     }
 
     @Test
@@ -30,6 +33,7 @@ class ThreadAttachmentsTest {
 
         assertFalse(state.hasDealerClaim(spark))
         assertTrue(state.hasDealerClaim(u4090))
+        assertEquals(3L, state.controlGeneration(spark))
     }
 
     @Test

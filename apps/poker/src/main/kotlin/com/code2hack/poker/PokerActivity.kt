@@ -10,12 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerCardLayout
 import com.code2hack.pokerdealer.domain.PokerInputController
@@ -24,21 +23,44 @@ import com.code2hack.pokerdealer.domain.PokerPileLayout
 import com.code2hack.pokerdealer.domain.ThreadPile
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import com.code2hack.pokerdealer.domain.ThreadWorkState
-import com.code2hack.pokerdealer.testing.LoopbackPokerTransport
 import com.code2hack.pokerdealer.testing.MockDeck
+import kotlinx.coroutines.launch
 
 class PokerActivity : ComponentActivity() {
     private lateinit var input: PokerAndroidInputAdapter
     private lateinit var screenState: MutableState<PokerScreenState>
+    private lateinit var navigation: PokerNavigationReducer
+    private lateinit var composerController: PokerComposerController
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val navigation = mockNavigation()
+        navigation = mockNavigation()
+        composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
         screenState = mutableStateOf(navigation.snapshot())
+        lifecycleScope.launch {
+            PokerComposerBridge.projections.collect { projections ->
+                projections.values.forEach(composerController::applyProjection)
+                screenState.value = navigation.snapshot()
+            }
+        }
+        lifecycleScope.launch {
+            PokerComposerBridge.results.collect { results ->
+                results.values.forEach(composerController::applyResult)
+                screenState.value = navigation.snapshot()
+            }
+        }
         input = PokerAndroidInputAdapter(
             PokerBuiltInInputAdapter(
                 controller = PokerInputController(navigation),
                 onNavigationChanged = { screenState.value = navigation.snapshot() },
+                onResult = { result ->
+                    result.composerDeletion?.let { deletion ->
+                        lifecycleScope.launch {
+                            composerController.requestDeletion(deletion)
+                            screenState.value = navigation.snapshot()
+                        }
+                    }
+                },
             ),
         )
         setContent {
@@ -70,14 +92,11 @@ class PokerActivity : ComponentActivity() {
 
 @Composable
 private fun PokerMockCardReader(state: PokerScreenState) {
-    val transport = remember { LoopbackPokerTransport() }
-
-    LaunchedEffect(transport) { transport.connect() }
-
     PokerPilePages(
         metadata = state.metadata,
         cardTextByLocator = MockDeck.cardTextByLocator,
         anchorByLocator = state.anchors,
+        composerTextByLocator = state.composerTextByLocator,
         modifier = Modifier.fillMaxSize(),
     )
 }
@@ -85,12 +104,19 @@ private fun PokerMockCardReader(state: PokerScreenState) {
 private data class PokerScreenState(
     val metadata: com.code2hack.pokerdealer.domain.PokerPileMetadata,
     val anchors: Map<CodexThreadLocator, com.code2hack.pokerdealer.domain.PokerPileAnchor>,
+    val composerTextByLocator: Map<CodexThreadLocator, String>,
 )
 
-private fun PokerNavigationReducer.snapshot(): PokerScreenState = PokerScreenState(
-    metadata = metadata(),
-    anchors = anchors(),
-)
+private fun PokerNavigationReducer.snapshot(): PokerScreenState {
+    val metadata = metadata()
+    return PokerScreenState(
+        metadata = metadata,
+        anchors = anchors(),
+        composerTextByLocator = metadata.orderedPiles.mapNotNull { pile ->
+            layout(pile.locator)?.composer?.draft?.displayText?.let { pile.locator to it }
+        }.toMap(),
+    )
+}
 
 private fun mockNavigation(): PokerNavigationReducer = PokerNavigationReducer(viewportLineCount = 12).also { navigation ->
     MockDeck.pileMetadata.orderedPiles.forEach { pile ->

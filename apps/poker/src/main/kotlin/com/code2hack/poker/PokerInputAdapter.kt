@@ -73,6 +73,7 @@ internal class PokerBuiltInInputAdapter(
     private val touchSlopPx: Float = 24f,
     private val monotonicNowMs: () -> Long = { SystemClock.uptimeMillis() },
     private val onNavigationChanged: () -> Unit = {},
+    private val onResult: (PokerInputController.Result) -> Unit = {},
 ) {
     private enum class Owner {
         TOUCH,
@@ -284,6 +285,7 @@ internal class PokerBuiltInInputAdapter(
 
     private fun dispatch(interaction: PokerInteraction): PokerInputController.Result? =
         controller.reduce(interaction)?.also {
+            onResult(it)
             if (it.navigationEffect != com.code2hack.pokerdealer.domain.PokerNavigationEffect.NONE) {
                 onNavigationChanged()
             }
