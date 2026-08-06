@@ -143,6 +143,7 @@ internal class PokerPrimaryActionController(
         }
 
         if (anchor.mode != PokerNavigationMode.COMPOSER) return null
+        if (composer.hasPendingDraftMutation(locator)) return null
         val composerLayout = layout.composer ?: return null
         if (composerLayout.modeSession.isBlank()) return null
         if (!composerLayout.hasDealerClaim) return null
@@ -180,7 +181,7 @@ internal class PokerPrimaryActionController(
                 controlGeneration = composerLayout.controlGeneration,
                 connectionEpoch = composerLayout.connectionEpoch,
                 modeSession = composerLayout.modeSession,
-                photoAvailable = true,
+                photoAvailable = composer.photoAvailable(locator),
                 primaryAction = primary,
                 morseAvailable = morseAvailable,
             ),
