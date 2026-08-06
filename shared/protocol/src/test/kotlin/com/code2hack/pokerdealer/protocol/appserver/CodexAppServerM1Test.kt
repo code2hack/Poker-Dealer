@@ -31,6 +31,15 @@ import org.junit.jupiter.api.Test
 
 class CodexAppServerM1Test {
     @Test
+    fun `image turn input keeps the native data URL and original detail`() {
+        val input = AppServerTurnInput.image("data:image/jpeg;base64,AA==")
+
+        assertEquals("image", input["type"]?.jsonPrimitive?.content)
+        assertEquals("data:image/jpeg;base64,AA==", input["image_url"]?.jsonPrimitive?.content)
+        assertEquals("original", input["detail"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun `steer carries the exact active turn precondition and interrupt stays bound to it`() = runTest {
         val peer = FixtureJsonRpcPeer(
             exchanges = listOf(

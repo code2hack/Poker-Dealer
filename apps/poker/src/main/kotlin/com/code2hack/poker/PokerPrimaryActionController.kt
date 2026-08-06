@@ -105,6 +105,7 @@ internal class PokerPrimaryActionController(
         if (composerLayout.modeSession.isBlank()) return null
         if (!composerLayout.hasDealerClaim) return null
         val draft = composerLayout.draft ?: return null
+        if (pile.workState !in setOf(ThreadWorkState.READY, ThreadWorkState.BUSY)) return null
         val primary = when (pile.workState) {
             ThreadWorkState.READY -> PokerPrimaryAction.SEND.takeIf { draft.isSubmittable }
             ThreadWorkState.BUSY -> when {
@@ -134,6 +135,7 @@ internal class PokerPrimaryActionController(
                 controlGeneration = composerLayout.controlGeneration,
                 connectionEpoch = composerLayout.connectionEpoch,
                 modeSession = composerLayout.modeSession,
+                photoAvailable = true,
                 primaryAction = primary,
             ),
         )

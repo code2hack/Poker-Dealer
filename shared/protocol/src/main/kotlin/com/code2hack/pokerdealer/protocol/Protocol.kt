@@ -167,12 +167,14 @@ data class PokerPrimaryActionResult(
 @Serializable
 enum class ComposerMutationKind {
     DELETE_THROUGH_NEXT_WORD,
+    DELETE_PHOTO,
 }
 
 @Serializable
 data class ComposerMutationRequest(
     val target: ComposerEditTarget,
     val kind: ComposerMutationKind,
+    @SerialName("asset_id") val assetId: String? = null,
 )
 
 @Serializable

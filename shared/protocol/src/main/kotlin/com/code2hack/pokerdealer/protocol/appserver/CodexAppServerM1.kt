@@ -459,25 +459,28 @@ class CodexAppServerSession(
         text: String,
         clientUserMessageId: String,
         effort: String? = null,
+    ): JsonObject = turnStart(
+        threadId = threadId,
+        input = listOf(AppServerTurnInput.text(text)),
+        clientUserMessageId = clientUserMessageId,
+        effort = effort,
+    )
+
+    suspend fun turnStart(
+        threadId: String,
+        input: List<JsonObject>,
+        clientUserMessageId: String,
+        effort: String? = null,
     ): JsonObject {
         checkInitialized()
+        require(input.isNotEmpty()) { "Turn input must not be empty" }
         return request(
             "turn/start",
             buildJsonObject {
                 put("threadId", JsonPrimitive(threadId))
                 put("clientUserMessageId", JsonPrimitive(clientUserMessageId))
                 effort?.let { put("effort", JsonPrimitive(it)) }
-                put(
-                    "input",
-                    buildJsonArray {
-                        add(
-                            buildJsonObject {
-                                put("type", JsonPrimitive("text"))
-                                put("text", JsonPrimitive(text))
-                            },
-                        )
-                    },
-                )
+                put("input", buildJsonArray { input.forEach(::add) })
             },
         ).jsonObject
     }
@@ -487,25 +490,28 @@ class CodexAppServerSession(
         expectedTurnId: String,
         text: String,
         clientUserMessageId: String,
+    ): JsonObject = turnSteer(
+        threadId = threadId,
+        expectedTurnId = expectedTurnId,
+        input = listOf(AppServerTurnInput.text(text)),
+        clientUserMessageId = clientUserMessageId,
+    )
+
+    suspend fun turnSteer(
+        threadId: String,
+        expectedTurnId: String,
+        input: List<JsonObject>,
+        clientUserMessageId: String,
     ): JsonObject {
         checkInitialized()
+        require(input.isNotEmpty()) { "Turn input must not be empty" }
         return actionRequest(
             "turn/steer",
             buildJsonObject {
                 put("threadId", JsonPrimitive(threadId))
                 put("expectedTurnId", JsonPrimitive(expectedTurnId))
                 put("clientUserMessageId", JsonPrimitive(clientUserMessageId))
-                put(
-                    "input",
-                    buildJsonArray {
-                        add(
-                            buildJsonObject {
-                                put("type", JsonPrimitive("text"))
-                                put("text", JsonPrimitive(text))
-                            },
-                        )
-                    },
-                )
+                put("input", buildJsonArray { input.forEach(::add) })
             },
         ).jsonObject
     }

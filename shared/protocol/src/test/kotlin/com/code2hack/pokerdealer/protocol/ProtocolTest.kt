@@ -178,4 +178,37 @@ class ProtocolTest {
             target.copy(expectedTurnId = null)
         }
     }
+
+    @Test
+    fun `photo transfer preserves exact bytes and target fences`() {
+        val bytes = ByteArray(4_001) { (it * 31).toByte() }
+        val locator = CodexThreadLocator("spark", "thread")
+        val target = PhotoAssetTarget(
+            locator = locator,
+            sessionId = "photo-session",
+            assetId = "asset-1",
+            draftRevision = 4,
+            cursorPosition = 2,
+            controlGeneration = 8,
+            connectionEpoch = 9,
+            modeSession = "composer-session",
+            operationId = "capture-1",
+        )
+        val encoded = PhotoAssetCodec.encode(bytes)
+        val chunks = PhotoAssetCodec.chunks(bytes, 1_800)
+
+        assertEquals(bytes.toList(), PhotoAssetCodec.decode(encoded).toList())
+        assertEquals(bytes.toList(), chunks.flatMap(ByteArray::asList))
+        assertEquals(
+            "1d3007bab04fab695f6cf3c8d712ac043459e17044d8c127065fd81135e3f3e0",
+            PhotoAssetCodec.sha256(bytes),
+        )
+        assertEquals(
+            target,
+            PokerProtocolJson.decodeFromString<PhotoAssetTarget>(
+                PokerProtocolJson.encodeToString(target),
+            ),
+        )
+        assertTrue(PhotoAssetCodec.dataUrl("image/jpeg", bytes).startsWith("data:image/jpeg;base64,"))
+    }
 }

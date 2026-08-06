@@ -1,6 +1,8 @@
 package com.code2hack.poker
 
+import android.Manifest
 import android.annotation.SuppressLint
+import android.graphics.BitmapFactory
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -12,15 +14,29 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.material3.Text
+import android.view.TextureView
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
@@ -47,6 +63,8 @@ class PokerActivity : ComponentActivity() {
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
     private lateinit var primaryActionController: PokerPrimaryActionController
+    private lateinit var photoController: PokerPhotoController
+    private lateinit var camera: PokerCamera2Controller
     private var postureSensorManager: SensorManager? = null
     private var postureSensor: Sensor? = null
     private val postureRotation = FloatArray(9)
@@ -87,6 +105,11 @@ class PokerActivity : ComponentActivity() {
         }
     }
     private lateinit var userInputController: PokerUserInputController
+    private val cameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) camera.open() else photoController.onPermissionDenied()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -99,6 +122,33 @@ class PokerActivity : ComponentActivity() {
             userInput = userInputController,
             sendAction = PokerComposerBridge::sendPrimaryAction,
         )
+        camera = PokerCamera2Controller(
+            activity = this,
+            onPermissionRequired = { cameraPermission.launch(Manifest.permission.CAMERA) },
+            onFailure = { photoController.onCameraFailure() },
+        )
+        photoController = PokerPhotoController(
+            navigation = navigation,
+            composer = composerController,
+            scope = lifecycleScope,
+            sendStart = PokerComposerBridge::sendPhotoStart,
+            sendBegin = PokerComposerBridge::sendPhotoCaptureBegin,
+            sendChunk = PokerComposerBridge::sendPhotoCaptureChunk,
+            sendComplete = PokerComposerBridge::sendPhotoCaptureComplete,
+            sendDelete = PokerComposerBridge::sendPhotoDelete,
+            sendCancel = PokerComposerBridge::sendPhotoCancel,
+            openCamera = camera::open,
+            closeCamera = camera::close,
+            setCameraZoom = camera::setZoom,
+        )
+        photoController.setCaptureRequestedCallback {
+            lifecycleScope.launch {
+                val bytes = kotlinx.coroutines.withTimeoutOrNull(5_000L) { camera.capture() }
+                camera.close()
+                if (bytes == null) photoController.onCaptureFailed()
+                else photoController.onCaptured(bytes)
+            }
+        }
         screenState = mutableStateOf(currentScreenState())
         lifecycleScope.launch {
             PokerSnapshotRuntime.snapshot.collect { snapshot ->
@@ -148,6 +198,26 @@ class PokerActivity : ComponentActivity() {
                 screenState.value = currentScreenState(screenState.value.wheelState)
             }
         }
+        lifecycleScope.launch {
+            PokerComposerBridge.photoStartResults.collect { results ->
+                results.values.forEach(photoController::onStartResult)
+            }
+        }
+        lifecycleScope.launch {
+            PokerComposerBridge.photoCaptureResults.collect { results ->
+                results.values.forEach(photoController::onCaptureResult)
+            }
+        }
+        lifecycleScope.launch {
+            PokerComposerBridge.photoDeleteResults.collect { results ->
+                results.values.forEach(photoController::onDeleteResult)
+            }
+        }
+        lifecycleScope.launch {
+            photoController.state.collect {
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
         val bindings = PokerBindingRuntime.controller
         val controller = PokerInputController(
             navigation = navigation,
@@ -170,7 +240,11 @@ class PokerActivity : ComponentActivity() {
                     screenState.value = currentScreenState(result.wheelState)
                     result.wheelSelection?.let { selection ->
                         lifecycleScope.launch {
-                            primaryActionController.submit(selection)
+                            if (selection.action == com.code2hack.pokerdealer.domain.PokerWheelAction.PHOTO) {
+                                photoController.start(selection)
+                            } else {
+                                primaryActionController.submit(selection)
+                            }
                             screenState.value = currentScreenState(screenState.value.wheelState)
                         }
                     }
@@ -193,6 +267,7 @@ class PokerActivity : ComponentActivity() {
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
                 },
+                photoHandler = photoController::handleInteraction,
             ),
             remote = PokerRemoteInputAdapter(
                 controller = controller,
@@ -204,7 +279,11 @@ class PokerActivity : ComponentActivity() {
                     screenState.value = currentScreenState(result.wheelState)
                     result.wheelSelection?.let { selection ->
                         lifecycleScope.launch {
-                            primaryActionController.submit(selection)
+                            if (selection.action == com.code2hack.pokerdealer.domain.PokerWheelAction.PHOTO) {
+                                photoController.start(selection)
+                            } else {
+                                primaryActionController.submit(selection)
+                            }
                             screenState.value = currentScreenState(screenState.value.wheelState)
                         }
                     }
@@ -212,6 +291,7 @@ class PokerActivity : ComponentActivity() {
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
                 },
+                photoHandler = photoController::handleInteraction,
             ),
         )
         PokerBindingRuntime.attachActivity { input.onConnectionLost() }
@@ -224,9 +304,10 @@ class PokerActivity : ComponentActivity() {
             postureSensorManager?.registerListener(postureListener, sensor, SensorManager.SENSOR_DELAY_GAME)
         }
         setContent {
+            val photoState by photoController.state.collectAsState()
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                    PokerCardReader(screenState.value)
+                    PokerCardReader(screenState.value, photoState, camera)
                 }
             }
         }
@@ -243,7 +324,10 @@ class PokerActivity : ComponentActivity() {
         super.onWindowFocusChanged(hasFocus)
         foreground = hasFocus
         PokerBindingRuntime.setForeground(hasFocus)
-        if (!hasFocus && ::input.isInitialized) input.onFocusLost()
+        if (!hasFocus) {
+            if (::photoController.isInitialized) photoController.exit()
+            if (::input.isInitialized) input.onFocusLost()
+        }
     }
 
     override fun onDestroy() {
@@ -256,6 +340,8 @@ class PokerActivity : ComponentActivity() {
         PokerBindingRuntime.detachActivity()
         PokerBindingRuntime.setForeground(false)
         if (::input.isInitialized) input.onDisconnected()
+        if (::photoController.isInitialized) photoController.close()
+        if (::camera.isInitialized) camera.close()
         super.onDestroy()
     }
 
@@ -343,53 +429,105 @@ internal fun PokerNavigationReducer.installPokerSnapshot(
 }
 
 @Composable
-private fun PokerCardReader(state: PokerScreenState) {
-    PokerPilePages(
-        metadata = state.metadata,
-        cardTextByLocator = state.cardTextByLocator,
-        anchorByLocator = state.anchors,
-        composerTextByLocator = state.composerTextByLocator,
-        requestProjectionsByLocator = state.requestProjectionsByLocator,
-        cardsByLocator = state.cardsByLocator,
-        metadataByLocator = state.metadataByLocator,
-        unreadCount = state.unreadCount,
-        onCardFinalLineVisible = { locator, cardId ->
-            PokerSnapshotRuntime.markCardRead(
-                locator,
-                cardId,
-                finalized = true,
-                finalLineVisible = true,
+private fun PokerCardReader(
+    state: PokerScreenState,
+    photoState: PokerPhotoState,
+    camera: PokerCamera2Controller,
+) {
+    if (photoState.phase != PokerPhotoPhase.IDLE) {
+        PokerPhotoSurface(photoState, camera)
+    } else {
+        Box(modifier = Modifier.fillMaxSize()) {
+            PokerPilePages(
+                metadata = state.metadata,
+                cardTextByLocator = state.cardTextByLocator,
+                anchorByLocator = state.anchors,
+                composerTextByLocator = state.composerTextByLocator,
+                requestProjectionsByLocator = state.requestProjectionsByLocator,
+                cardsByLocator = state.cardsByLocator,
+                metadataByLocator = state.metadataByLocator,
+                unreadCount = state.unreadCount,
+                onCardFinalLineVisible = { locator, cardId ->
+                    PokerSnapshotRuntime.markCardRead(
+                        locator,
+                        cardId,
+                        finalized = true,
+                        finalLineVisible = true,
+                    )
+                    state.requestCardsByLocator[locator].orEmpty()
+                        .filter { it.cardId == cardId && it.finalized }
+                        .forEach { request ->
+                            PokerSnapshotRuntime.markRequestRead(
+                                locator,
+                                request.key,
+                                finalized = true,
+                                finalLineVisible = true,
+                            )
+                        }
+                    state.requestProjectionsByLocator[locator].orEmpty()
+                        .filter {
+                            it.cardId == cardId && it.request.resolution.isFinalized()
+                        }
+                        .forEach { projection ->
+                            PokerSnapshotRuntime.markRequestRead(
+                                locator,
+                                pokerUnreadRequestKey(
+                                    "user-input",
+                                    projection.request.locator.requestId,
+                                    projection.request.fingerprint,
+                                ),
+                                finalized = true,
+                                finalLineVisible = true,
+                            )
+                        }
+                },
+                wheelState = state.wheelState,
+                modifier = Modifier.fillMaxSize(),
             )
-            state.requestCardsByLocator[locator].orEmpty()
-                .filter { it.cardId == cardId && it.finalized }
-                .forEach { request ->
-                    PokerSnapshotRuntime.markRequestRead(
-                        locator,
-                        request.key,
-                        finalized = true,
-                        finalLineVisible = true,
-                    )
-                }
-            state.requestProjectionsByLocator[locator].orEmpty()
-                .filter {
-                    it.cardId == cardId && it.request.resolution.isFinalized()
-                }
-                .forEach { projection ->
-                    PokerSnapshotRuntime.markRequestRead(
-                        locator,
-                        pokerUnreadRequestKey(
-                            "user-input",
-                            projection.request.locator.requestId,
-                            projection.request.fingerprint,
-                        ),
-                        finalized = true,
-                        finalLineVisible = true,
-                    )
-                }
-        },
-        wheelState = state.wheelState,
-        modifier = Modifier.fillMaxSize(),
-    )
+            photoState.notice?.let { notice ->
+                Text(
+                    text = notice,
+                    color = Color(0xFFFFD18A),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PokerPhotoSurface(state: PokerPhotoState, camera: PokerCamera2Controller) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        val frozen = state.frozenBytes?.let { bytes ->
+            remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+        }
+        if (frozen != null) {
+            Image(
+                bitmap = frozen.asImageBitmap(),
+                contentDescription = "Captured photo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else if (state.phase != PokerPhotoPhase.STARTING) {
+            AndroidView(
+                factory = { TextureView(it).also(camera::attach) },
+                update = camera::attach,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+        Text(
+            text = "Photo ${state.phase.name.lowercase()}  ${"%.2f".format(state.zoom)}x",
+            color = Color.White,
+            modifier = Modifier.align(Alignment.TopStart).padding(16.dp),
+        )
+        state.notice?.let { notice ->
+            Text(
+                text = notice,
+                color = Color(0xFFFFD18A),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        }
+    }
 }
 
 private data class PokerScreenState(

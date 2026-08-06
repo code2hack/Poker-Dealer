@@ -24,6 +24,7 @@ internal class PokerComposerController(
 ) {
     private val editors = mutableMapOf<CodexThreadLocator, ComposerEditorState>()
     private val pendingPrimary = mutableMapOf<CodexThreadLocator, PokerPrimaryActionTarget>()
+    private val pendingPhotoDeletion = mutableMapOf<CodexThreadLocator, com.code2hack.pokerdealer.domain.ComposerEditTarget>()
 
     fun applyProjection(projection: ComposerDraftProjection) {
         pendingPrimary[projection.locator]?.let { target ->
@@ -72,11 +73,24 @@ internal class PokerComposerController(
             PokerPrimaryAction.SEND,
             PokerPrimaryAction.STEER,
         )) return false
+        if (pendingPhotoDeletion[target.locator] != null) return false
         val current = editors[target.locator] ?: return false
         val edit = try {
             current.copy(cursorPosition = target.cursorPosition).beginTextDeletion(target)
         } catch (_: IllegalArgumentException) {
             return false
+        }
+        if (edit is ComposerEditResult.PhotoTokenBoundary && request.photoAssetId != null) {
+            pendingPhotoDeletion[target.locator] = target
+            val sent = sendMutation(
+                ComposerMutationRequest(
+                    target = target,
+                    kind = com.code2hack.pokerdealer.protocol.ComposerMutationKind.DELETE_PHOTO,
+                    assetId = request.photoAssetId,
+                ),
+            )
+            if (!sent) pendingPhotoDeletion.remove(target.locator)
+            return sent
         }
         if (edit !is ComposerEditResult.Started) return false
         editors[target.locator] = edit.editor
@@ -133,7 +147,27 @@ internal class PokerComposerController(
 
     fun isPrimaryLocked(locator: CodexThreadLocator): Boolean = pendingPrimary[locator] != null
 
+    fun applyPhotoDraft(locator: CodexThreadLocator, draft: com.code2hack.pokerdealer.domain.ComposerDraft, cursor: Int) {
+        val current = editors[locator] ?: return
+        val next = current.installAuthoritative(draft).copy(
+            cursorPosition = cursor.coerceIn(0, draft.cursorCount - 1),
+        )
+        editors[locator] = next
+        updateLayoutFor(locator, next.draft, next)
+    }
+
     fun applyResult(result: ComposerMutationResult) {
+        pendingPhotoDeletion[result.target.locator]?.let { target ->
+            if (target != result.target) return
+            pendingPhotoDeletion.remove(result.target.locator)
+            val current = editors[result.target.locator] ?: return
+            val next = current.installAuthoritative(result.draft).copy(
+                cursorPosition = result.target.cursorPosition.coerceIn(0, result.draft.cursorCount - 1),
+            )
+            editors[result.target.locator] = next
+            updateLayoutFor(result.target.locator, next.draft, next)
+            return
+        }
         val current = editors[result.target.locator] ?: return
         val pending = current.pendingMutation ?: return
         if (pending.target != result.target) return
