@@ -2,7 +2,11 @@ package com.code2hack.dealer
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.code2hack.dealer.asr.DealerAsrAdapter
+import com.code2hack.dealer.asr.DealerAsrPackManifest
+import com.code2hack.dealer.asr.DealerAsrPackVerification
 import com.code2hack.dealer.asr.DealerAsrRuntime
+import com.code2hack.dealer.asr.DealerAsrStartup
 import com.k2fsa.sherpa.onnx.WaveReader
 import java.util.Properties
 import org.junit.Assert.assertEquals
@@ -29,12 +33,32 @@ class DealerAsrRuntimeInstrumentationTest {
         }
 
         val runtime = DealerAsrRuntime(context.assets)
-        assertTrue(runtime.startup() is com.code2hack.dealer.asr.DealerAsrStartup.Ready)
-        runtime.openStreamingCtc(
-            modelPath = fixture.getProperty("model"),
-            tokensPath = fixture.getProperty("tokens"),
-            bpeVocabPath = fixture.getProperty("bpe"),
-        ).use { session ->
+        assertEquals(
+            DealerAsrStartup.Unavailable("model-pack-not-installed"),
+            runtime.startup(),
+        )
+        val verification = runtime.verifyPack(
+            DealerAsrPackManifest(
+                id = fixture.getProperty("packId"),
+                revision = fixture.getProperty("packRevision"),
+                adapter = DealerAsrAdapter.valueOf(fixture.getProperty("adapter")),
+                modelPath = fixture.getProperty("model"),
+                modelSha256 = fixture.getProperty("modelSha256"),
+                tokensPath = fixture.getProperty("tokens"),
+                tokensSha256 = fixture.getProperty("tokensSha256"),
+                bpeVocabPath = fixture.getProperty("bpe"),
+                bpeVocabSha256 = fixture.getProperty("bpeSha256"),
+            ),
+        )
+        assertTrue(verification is DealerAsrPackVerification.Verified)
+        val pack = (verification as DealerAsrPackVerification.Verified).pack
+        val startup = runtime.startup(pack)
+        assertTrue(startup is DealerAsrStartup.Ready)
+        assertEquals(
+            setOf(DealerAsrAdapter.STREAMING_CTC),
+            (startup as DealerAsrStartup.Ready).capabilities.adapters,
+        )
+        runtime.openStreamingCtc(pack).use { session ->
             session.acceptPcm16(pcm)
             assertTrue("the smoke sample was not recognized", session.finish().isNotBlank())
         }

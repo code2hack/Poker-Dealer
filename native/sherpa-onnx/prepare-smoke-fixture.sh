@@ -41,6 +41,8 @@ bpe_path=$(find "${root_dir}" -type f -name '*.model' -print | sort | head -1)
 sample_path=$(find "${root_dir}" -type f -iname '*.wav' -print | sort | head -1)
 test -n "${model_path}"
 test -n "${tokens_path}"
+model_sha256=$(sha256sum "${model_path}" | cut -d ' ' -f1)
+tokens_sha256=$(sha256sum "${tokens_path}" | cut -d ' ' -f1)
 
 if [ -z "${sample_path}" ]; then
     temp_wav=$(mktemp "${toolchain_dir}/wav.XXXXXX")
@@ -59,11 +61,17 @@ model_relative=${model_path#"${extract_dir}/"}
 tokens_relative=${tokens_path#"${extract_dir}/"}
 sample_relative=${sample_path#"${extract_dir}/"}
 {
+    printf 'packId=sherpa-smoke\n'
+    printf 'packRevision=%s\n' "${SMOKE_MODEL_NAME}"
+    printf 'adapter=STREAMING_CTC\n'
     printf 'model=%s\n' "${model_relative}"
+    printf 'modelSha256=%s\n' "${model_sha256}"
     printf 'tokens=%s\n' "${tokens_relative}"
+    printf 'tokensSha256=%s\n' "${tokens_sha256}"
     if [ -n "${bpe_path}" ]; then
         bpe_relative=${bpe_path#"${extract_dir}/"}
         printf 'bpe=%s\n' "${bpe_relative}"
+        printf 'bpeSha256=%s\n' "$(sha256sum "${bpe_path}" | cut -d ' ' -f1)"
     fi
     printf 'sample=%s\n' "${sample_relative}"
 } > "${output_dir}/sherpa-smoke.properties"
