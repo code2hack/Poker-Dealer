@@ -8,6 +8,7 @@ import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
 import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
@@ -149,5 +150,32 @@ class ProtocolTest {
                 PokerProtocolJson.encodeToString(mutation),
             ),
         )
+    }
+
+    @Test
+    fun `primary action target preserves semantic and stale fences`() {
+        val target = PokerPrimaryActionTarget(
+            locator = CodexThreadLocator("spark", "thread"),
+            action = PokerPrimaryAction.STEER,
+            wheelSession = "wheel-1",
+            controlGeneration = 2,
+            connectionEpoch = 3,
+            modeSession = "composer-mode",
+            draftRevision = 7,
+            cursorPosition = 4,
+            expectedTurnId = "turn-1",
+            operationId = "primary-1",
+        )
+        val result = PokerPrimaryActionResult(target, PokerPrimaryActionOutcome.ACCEPTED)
+
+        assertEquals(
+            result,
+            PokerProtocolJson.decodeFromString<PokerPrimaryActionResult>(
+                PokerProtocolJson.encodeToString(result),
+            ),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            target.copy(expectedTurnId = null)
+        }
     }
 }

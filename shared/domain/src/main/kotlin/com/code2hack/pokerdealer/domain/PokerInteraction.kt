@@ -192,6 +192,8 @@ data class PokerRequestPanelLayout(
     val id: String,
     val positionCount: Int = 1,
     val questions: List<PokerRequestQuestionLayout> = emptyList(),
+    val primaryActionLocked: Boolean = false,
+    val hasDealerClaim: Boolean = true,
 ) {
     init {
         require(id.isNotBlank()) { "Request-panel id must not be blank" }
@@ -259,6 +261,9 @@ data class PokerComposerLayout(
     val controlGeneration: Long = 0L,
     val connectionEpoch: Long = 0L,
     val modeSession: String = "",
+    val activeTurnId: String? = null,
+    val primaryActionLocked: Boolean = false,
+    val hasDealerClaim: Boolean = true,
 ) {
     init {
         require(positionCount > 0) { "Composer position count must be positive" }
@@ -523,6 +528,7 @@ class PokerNavigationReducer(
         delta: Int,
     ): PokerNavigationEffect {
         val composer = layout.composer ?: return reanchorWithEffect(locator)
+        if (composer.primaryActionLocked) return PokerNavigationEffect.NONE
         composer.draft?.let { draft ->
             val target = if (delta > 0) {
                 draft.nextWordStart(current.cursorPosition)
@@ -563,6 +569,7 @@ class PokerNavigationReducer(
         val panel = layout.cards[cardIndex].requestPanel
             ?.takeIf { it.id == current.inputId }
             ?: return reanchorWithEffect(locator)
+        if (panel.primaryActionLocked) return PokerNavigationEffect.NONE
         return if (delta > 0 && current.cursorPosition + 1 < panel.positionCount) {
             anchors[locator] = current.copy(cursorPosition = current.cursorPosition + 1)
             PokerNavigationEffect.SCROLLED
@@ -689,8 +696,6 @@ data class ComposerDeletionRequest(
     val target: ComposerEditTarget? = null,
 )
 
-private const val SHORT_FN_MAX_DURATION_MS = 500L
-
 fun PokerNavigationReducer.shortComposerDeletion(
     locator: CodexThreadLocator,
 ): ComposerDeletionRequest? {
@@ -716,19 +721,52 @@ fun PokerNavigationReducer.shortComposerDeletion(
 class PokerInputController(
     private val navigation: PokerNavigationReducer,
     private val interactions: PokerInteractionReducer = PokerInteractionReducer(),
+    private val wheelContext: () -> PokerWheelContext = { PokerWheelContext() },
+    private val longPressTimeoutMs: Long = PokerActionWheel.DEFAULT_LONG_PRESS_TIMEOUT_MS,
 ) {
     data class Result(
         val interaction: PokerInteraction,
         val navigationEffect: PokerNavigationEffect,
         val composerDeletion: ComposerDeletionRequest? = null,
+        val wheelState: PokerWheelState = PokerWheelState(),
+        val wheelSelection: PokerWheelSelection? = null,
     )
+
+    private val wheel = PokerActionWheel(longPressTimeoutMs = longPressTimeoutMs)
+    private var lastPosture: PokerPostureSample? = null
 
     fun reduce(interaction: PokerInteraction): Result? {
         val accepted = interactions.reduce(interaction) ?: return null
+        val context = wheelContext()
+        val selection = when {
+            accepted.phase == PokerInteractionPhase.BEGIN &&
+                accepted.operation == PokerOperation.FN &&
+                context.targetId.isNotBlank() -> {
+                wheel.begin(
+                    context = context,
+                    baseline = lastPosture ?: PokerPostureSample(0f, 0f, accepted.eventTimeMs),
+                    atMs = accepted.eventTimeMs,
+                )
+                null
+            }
+            accepted.phase == PokerInteractionPhase.RELEASE &&
+                accepted.operation == PokerOperation.FN &&
+                accepted.durationMs >= longPressTimeoutMs -> wheel.release(accepted.eventTimeMs, context)
+            else -> null
+        }
+        if (accepted.phase == PokerInteractionPhase.CANCEL && accepted.operation == PokerOperation.FN) {
+            wheel.cancel()
+        } else if (
+            accepted.phase == PokerInteractionPhase.RELEASE &&
+            accepted.operation == PokerOperation.FN &&
+            accepted.durationMs < longPressTimeoutMs
+        ) {
+            wheel.cancel()
+        }
         val deletion = if (
             accepted.phase == PokerInteractionPhase.RELEASE &&
             accepted.operation == PokerOperation.FN &&
-            accepted.durationMs < SHORT_FN_MAX_DURATION_MS
+            accepted.durationMs < longPressTimeoutMs
         ) {
             navigation.metadata().focused?.let(navigation::shortComposerDeletion)
         } else {
@@ -741,11 +779,24 @@ class PokerInputController(
         } else {
             PokerNavigationEffect.NONE
         }
-        return Result(accepted, effect, deletion)
+        return Result(accepted, effect, deletion, wheel.state(), selection)
     }
 
     fun cancel(reason: PokerCancellationReason, eventTimeMs: Long? = null): Result? =
-        interactions.cancelActive(reason, eventTimeMs)?.let { Result(it, PokerNavigationEffect.NONE) }
+        interactions.cancelActive(reason, eventTimeMs)?.let {
+            val wheelState = if (it.operation == PokerOperation.FN) {
+                wheel.cancel()
+            } else {
+                wheel.state()
+            }
+            Result(it, PokerNavigationEffect.NONE, wheelState = wheelState)
+        }
+
+    fun updatePosture(sample: PokerPostureSample): PokerWheelState? {
+        lastPosture = sample
+        if (wheel.state().sessionId == null) return null
+        return wheel.update(sample, wheelContext())
+    }
 
     fun onFocusLost(eventTimeMs: Long? = null): Result? = cancel(PokerCancellationReason.FOCUS_LOST, eventTimeMs)
 

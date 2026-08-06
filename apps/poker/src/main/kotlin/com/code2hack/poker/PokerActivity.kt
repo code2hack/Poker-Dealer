@@ -1,10 +1,16 @@
 package com.code2hack.poker
 
 import android.annotation.SuppressLint
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.input.InputManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,6 +27,8 @@ import com.code2hack.pokerdealer.domain.PokerCardLayout
 import com.code2hack.pokerdealer.domain.PokerInputController
 import com.code2hack.pokerdealer.domain.PokerNavigationReducer
 import com.code2hack.pokerdealer.domain.PokerPileLayout
+import com.code2hack.pokerdealer.domain.PokerPostureSample
+import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshot
@@ -33,6 +41,33 @@ class PokerActivity : ComponentActivity() {
     private lateinit var screenState: MutableState<PokerScreenState>
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
+    private lateinit var primaryActionController: PokerPrimaryActionController
+    private var postureSensorManager: SensorManager? = null
+    private var postureSensor: Sensor? = null
+    private val postureRotation = FloatArray(9)
+    private val postureOrientation = FloatArray(3)
+    private val postureListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            if (!::input.isInitialized || event.values.isEmpty()) return
+            SensorManager.getRotationMatrixFromVector(postureRotation, event.values)
+            SensorManager.getOrientation(postureRotation, postureOrientation)
+            input.onPosture(
+                PokerPostureSample(
+                    pitchDegrees = Math.toDegrees(postureOrientation[1].toDouble()).toFloat(),
+                    rollDegrees = Math.toDegrees(postureOrientation[2].toDouble()).toFloat(),
+                    eventTimeMs = SystemClock.uptimeMillis(),
+                ),
+            )?.let { wheelState ->
+                screenState.value = navigation.snapshot(
+                    cardTextByLocator,
+                    currentRequestProjections(),
+                    wheelState,
+                )
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
     private var cardTextByLocator: Map<CodexThreadLocator, String> = emptyMap()
     private var foreground = false
     private val inputDeviceDescriptors = mutableMapOf<Int, String>()
@@ -54,6 +89,12 @@ class PokerActivity : ComponentActivity() {
         navigation = PokerNavigationReducer(viewportLineCount = 12)
         composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
+        primaryActionController = PokerPrimaryActionController(
+            navigation = navigation,
+            composer = composerController,
+            userInput = userInputController,
+            sendAction = PokerComposerBridge::sendPrimaryAction,
+        )
         screenState = mutableStateOf(navigation.snapshot(cardTextByLocator, currentRequestProjections()))
         lifecycleScope.launch {
             PokerSnapshotRuntime.snapshot.collect { snapshot ->
@@ -87,10 +128,28 @@ class PokerActivity : ComponentActivity() {
                 screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
             }
         }
+        lifecycleScope.launch {
+            PokerComposerBridge.primaryResults.collect { results ->
+                results.values.forEach(primaryActionController::applyResult)
+                screenState.value = navigation.snapshot(
+                    cardTextByLocator,
+                    currentRequestProjections(),
+                    screenState.value.wheelState,
+                )
+            }
+        }
         val bindings = PokerBindingRuntime.controller
-        val controller = PokerInputController(navigation)
+        val controller = PokerInputController(
+            navigation = navigation,
+            wheelContext = primaryActionController::wheelContext,
+            longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
+        )
         val onNavigationChanged = {
-            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+            screenState.value = navigation.snapshot(
+                cardTextByLocator,
+                currentRequestProjections(),
+                screenState.value.wheelState,
+            )
         }
         val onBindingChanged = {
             screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
@@ -102,6 +161,21 @@ class PokerActivity : ComponentActivity() {
                 bindings = bindings,
                 onNavigationChanged = onNavigationChanged,
                 onResult = { result ->
+                    screenState.value = navigation.snapshot(
+                        cardTextByLocator,
+                        currentRequestProjections(),
+                        result.wheelState,
+                    )
+                    result.wheelSelection?.let { selection ->
+                        lifecycleScope.launch {
+                            primaryActionController.submit(selection)
+                            screenState.value = navigation.snapshot(
+                                cardTextByLocator,
+                                currentRequestProjections(),
+                                screenState.value.wheelState,
+                            )
+                        }
+                    }
                     if (
                         result.interaction.phase == com.code2hack.pokerdealer.domain.PokerInteractionPhase.RELEASE &&
                         result.interaction.operation == com.code2hack.pokerdealer.domain.PokerOperation.TAP
@@ -118,6 +192,13 @@ class PokerActivity : ComponentActivity() {
                         }
                     }
                 },
+                onWheelChanged = { wheelState ->
+                    screenState.value = navigation.snapshot(
+                        cardTextByLocator,
+                        currentRequestProjections(),
+                        wheelState,
+                    )
+                },
             ),
             remote = PokerRemoteInputAdapter(
                 controller = controller,
@@ -125,12 +206,41 @@ class PokerActivity : ComponentActivity() {
                 isForeground = { foreground },
                 onNavigationChanged = onNavigationChanged,
                 onBindingChanged = onBindingChanged,
+                onResult = { result ->
+                    screenState.value = navigation.snapshot(
+                        cardTextByLocator,
+                        currentRequestProjections(),
+                        result.wheelState,
+                    )
+                    result.wheelSelection?.let { selection ->
+                        lifecycleScope.launch {
+                            primaryActionController.submit(selection)
+                            screenState.value = navigation.snapshot(
+                                cardTextByLocator,
+                                currentRequestProjections(),
+                                screenState.value.wheelState,
+                            )
+                        }
+                    }
+                },
+                onWheelChanged = { wheelState ->
+                    screenState.value = navigation.snapshot(
+                        cardTextByLocator,
+                        currentRequestProjections(),
+                        wheelState,
+                    )
+                },
             ),
         )
         PokerBindingRuntime.attachActivity { input.onConnectionLost() }
         getSystemService(InputManager::class.java)
             ?.registerInputDeviceListener(inputDeviceListener, null)
         android.view.InputDevice.getDeviceIds().forEach(::rememberInputDevice)
+        postureSensorManager = getSystemService(SensorManager::class.java)
+        postureSensor = postureSensorManager?.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        postureSensor?.let { sensor ->
+            postureSensorManager?.registerListener(postureListener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -157,6 +267,9 @@ class PokerActivity : ComponentActivity() {
     override fun onDestroy() {
         getSystemService(InputManager::class.java)
             ?.unregisterInputDeviceListener(inputDeviceListener)
+        postureSensorManager?.unregisterListener(postureListener)
+        postureSensorManager = null
+        postureSensor = null
         inputDeviceDescriptors.clear()
         PokerBindingRuntime.detachActivity()
         PokerBindingRuntime.setForeground(false)
@@ -245,6 +358,7 @@ private fun PokerCardReader(state: PokerScreenState) {
         anchorByLocator = state.anchors,
         composerTextByLocator = state.composerTextByLocator,
         requestProjectionsByLocator = state.requestProjectionsByLocator,
+        wheelState = state.wheelState,
         modifier = Modifier.fillMaxSize(),
     )
 }
@@ -255,11 +369,13 @@ private data class PokerScreenState(
     val cardTextByLocator: Map<CodexThreadLocator, String>,
     val composerTextByLocator: Map<CodexThreadLocator, String>,
     val requestProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.UserInputRequestProjection>>,
+    val wheelState: PokerWheelState = PokerWheelState(),
 )
 
 private fun PokerNavigationReducer.snapshot(
     cardTextByLocator: Map<CodexThreadLocator, String>,
     requestProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.UserInputRequestProjection>> = emptyMap(),
+    wheelState: PokerWheelState = PokerWheelState(),
 ): PokerScreenState {
     val metadata = metadata()
     return PokerScreenState(
@@ -270,6 +386,7 @@ private fun PokerNavigationReducer.snapshot(
             layout(pile.locator)?.composer?.draft?.displayText?.let { pile.locator to it }
         }.toMap(),
         requestProjectionsByLocator = requestProjectionsByLocator,
+        wheelState = wheelState,
     )
 }
 

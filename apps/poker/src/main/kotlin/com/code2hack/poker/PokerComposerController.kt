@@ -12,6 +12,10 @@ import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.ComposerMutationRequest
 import com.code2hack.pokerdealer.protocol.ComposerMutationOutcome
 import com.code2hack.pokerdealer.protocol.ComposerMutationResult
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
 
 /** Applies Dealer projections locally and serializes one exact optimistic edit at a time. */
 internal class PokerComposerController(
@@ -19,8 +23,21 @@ internal class PokerComposerController(
     private val sendMutation: suspend (ComposerMutationRequest) -> Boolean,
 ) {
     private val editors = mutableMapOf<CodexThreadLocator, ComposerEditorState>()
+    private val pendingPrimary = mutableMapOf<CodexThreadLocator, PokerPrimaryActionTarget>()
 
     fun applyProjection(projection: ComposerDraftProjection) {
+        pendingPrimary[projection.locator]?.let { target ->
+            if (target.controlGeneration != projection.controlGeneration ||
+                target.connectionEpoch != projection.connectionEpoch ||
+                target.modeSession != projection.modeSession ||
+                (target.action == PokerPrimaryAction.INTERRUPT &&
+                    target.expectedTurnId != projection.activeTurnId) ||
+                (target.action != PokerPrimaryAction.INTERRUPT &&
+                    target.draftRevision != projection.draft.revision)
+            ) {
+                pendingPrimary.remove(projection.locator)
+            }
+        }
         val editor = if (projection.modeSession.isBlank()) {
             null
         } else {
@@ -51,6 +68,10 @@ internal class PokerComposerController(
     suspend fun requestDeletion(request: ComposerDeletionRequest): Boolean {
         val target = request.target ?: return false
         if (target.surface != ComposerSurface.THREAD_COMPOSER) return false
+        if (pendingPrimary[target.locator]?.action in setOf(
+            PokerPrimaryAction.SEND,
+            PokerPrimaryAction.STEER,
+        )) return false
         val current = editors[target.locator] ?: return false
         val edit = try {
             current.copy(cursorPosition = target.cursorPosition).beginTextDeletion(target)
@@ -67,6 +88,50 @@ internal class PokerComposerController(
             ),
         )
     }
+
+    fun beginPrimary(target: PokerPrimaryActionTarget): Boolean {
+        if (target.action == PokerPrimaryAction.REQUEST) return false
+        if (pendingPrimary[target.locator] != null) return false
+        val current = editors[target.locator] ?: return false
+        if (navigation.layout(target.locator)?.composer?.hasDealerClaim != true) return false
+        if (current.controlGeneration != target.controlGeneration ||
+            current.connectionEpoch != target.connectionEpoch ||
+            current.modeSession != target.modeSession
+        ) return false
+        when (target.action) {
+            PokerPrimaryAction.SEND,
+            PokerPrimaryAction.STEER,
+            -> if (target.draftRevision != current.draft.revision ||
+                target.cursorPosition != current.cursorPosition
+            ) return false
+            PokerPrimaryAction.INTERRUPT -> {
+                val activeTurnId = navigation.layout(target.locator)?.composer?.activeTurnId
+                if (activeTurnId != target.expectedTurnId) return false
+            }
+            PokerPrimaryAction.REQUEST -> return false
+        }
+        pendingPrimary[target.locator] = target
+        setPrimaryLock(
+            target.locator,
+            target.action == PokerPrimaryAction.SEND || target.action == PokerPrimaryAction.STEER,
+        )
+        return true
+    }
+
+    fun applyPrimaryResult(result: PokerPrimaryActionResult) {
+        val target = pendingPrimary[result.target.locator] ?: return
+        if (target != result.target) return
+        when (result.outcome) {
+            PokerPrimaryActionOutcome.REJECTED -> {
+                pendingPrimary.remove(target.locator)
+                setPrimaryLock(target.locator, false)
+            }
+            PokerPrimaryActionOutcome.ACCEPTED,
+            PokerPrimaryActionOutcome.UNKNOWN -> Unit
+        }
+    }
+
+    fun isPrimaryLocked(locator: CodexThreadLocator): Boolean = pendingPrimary[locator] != null
 
     fun applyResult(result: ComposerMutationResult) {
         val current = editors[result.target.locator] ?: return
@@ -114,8 +179,23 @@ internal class PokerComposerController(
                     ?: editor?.modeSession
                     ?: oldComposer?.modeSession
             ).orEmpty(),
+            activeTurnId = projection?.activeTurnId ?: oldComposer?.activeTurnId,
+            primaryActionLocked = pendingPrimary[locator]?.action in setOf(
+                PokerPrimaryAction.SEND,
+                PokerPrimaryAction.STEER,
+            ),
+            hasDealerClaim = projection?.hasDealerClaim ?: oldComposer?.hasDealerClaim ?: true,
         )
         navigation.setLayout(locator, PokerPileLayout(existing.cards, composer))
         editor?.let { navigation.setComposerCursor(locator, it.cursorPosition) }
+    }
+
+    private fun setPrimaryLock(locator: CodexThreadLocator, locked: Boolean) {
+        val existing = navigation.layout(locator) ?: return
+        val composer = existing.composer ?: return
+        navigation.setLayout(
+            locator,
+            PokerPileLayout(existing.cards, composer.copy(primaryActionLocked = locked)),
+        )
     }
 }

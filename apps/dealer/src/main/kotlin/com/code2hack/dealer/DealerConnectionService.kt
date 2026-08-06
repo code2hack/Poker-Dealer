@@ -40,6 +40,7 @@ import com.code2hack.pokerdealer.domain.PokerBindingDevice
 import com.code2hack.pokerdealer.domain.PokerBindingInstallResult
 import com.code2hack.pokerdealer.domain.PokerBindingState
 import com.code2hack.pokerdealer.domain.PokerOperation
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -98,6 +99,12 @@ import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationKind
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationOutcome
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
@@ -184,6 +191,7 @@ class DealerConnectionService : Service() {
     private var pokerComposerEpoch: PokerConnectionEpoch? = null
     private val pokerComposerBindings = mutableMapOf<CodexThreadLocator, PokerComposerBinding>()
     private val pokerComposerResults = mutableMapOf<CodexThreadLocator, ComposerMutationResult>()
+    private val pokerPrimaryResults = mutableMapOf<String, PokerPrimaryActionResult>()
     private val pokerUserInputBindings = mutableMapOf<ServerRequestLocator, PokerUserInputBinding>()
     private val pokerUserInputResults = mutableMapOf<String, UserInputAnswerMutationResult>()
     private val tailnetEngine = Engine()
@@ -251,6 +259,7 @@ class DealerConnectionService : Service() {
                     POKER_BINDINGS_CAPABILITY,
                     POKER_SNAPSHOT_CAPABILITY,
                     POKER_LIVE_DELTA_CAPABILITY,
+                    POKER_PRIMARY_ACTION_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,
@@ -969,6 +978,7 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch = epoch
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
+        pokerPrimaryResults.clear()
         pokerUserInputBindings.clear()
         pokerUserInputResults.clear()
         mutableState.value.threadAttachments.attached
@@ -999,6 +1009,15 @@ class DealerConnectionService : Service() {
                 }.getOrNull() ?: return
                 handlePokerUserInputMutation(epoch, envelope, request)
             }
+            POKER_PRIMARY_ACTION_TYPE -> {
+                val target = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        PokerPrimaryActionTarget.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerPrimaryAction(epoch, envelope, target)
+            }
         }
     }
 
@@ -1028,6 +1047,8 @@ class DealerConnectionService : Service() {
             controlGeneration = controlGeneration,
             connectionEpoch = epoch.value,
             modeSession = modeSession,
+            activeTurnId = state.threads[locator]?.activeTurnId,
+            hasDealerClaim = state.threadAttachments.hasDealerClaim(locator),
         )
         val payload = PokerProtocolJson.encodeToJsonElement(
             ComposerDraftProjection.serializer(),
@@ -1069,6 +1090,7 @@ class DealerConnectionService : Service() {
             controlGeneration = controlGeneration,
             connectionEpoch = epoch.value,
             modeSession = modeSession,
+            hasDealerClaim = state.threadAttachments.hasDealerClaim(request.thread),
         )
         val payload = PokerProtocolJson.encodeToJsonElement(
             UserInputRequestProjection.serializer(),
@@ -1081,7 +1103,7 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch?.let { epoch ->
             scope.launch {
                 mutableState.value.userInputRequests.requests.values
-                    .filter { it.thread == locator && it.resolution != RequestResolutionState.RESOLVED }
+                    .filter { it.thread == locator }
                     .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
             }
         }
@@ -1204,6 +1226,173 @@ class DealerConnectionService : Service() {
         ).jsonObject
         pokerConnectionOwner.send(
             type = POKER_USER_INPUT_MUTATION_RESULT_TYPE,
+            payload = payload,
+            replyTo = envelope.messageId,
+        )
+    }
+
+    private suspend fun handlePokerPrimaryAction(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        target: PokerPrimaryActionTarget,
+    ) {
+        pokerPrimaryResults[target.operationId]?.let { cached ->
+            if (cached.target == target) {
+                sendPokerPrimaryActionResult(envelope, cached)
+            } else {
+                sendPokerPrimaryActionResult(
+                    envelope,
+                    PokerPrimaryActionResult(
+                        target = target,
+                        outcome = PokerPrimaryActionOutcome.REJECTED,
+                        reason = "Primary operation ID was reused for another target",
+                    ),
+                )
+            }
+            return
+        }
+        val state = mutableState.value
+        val rejection = when {
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                "Primary connection epoch is stale"
+            target.action == PokerPrimaryAction.REQUEST -> {
+                val requestLocator = target.requestLocator
+                val request = requestLocator?.let { state.userInputRequests.requests[it] }
+                val binding = requestLocator?.let(pokerUserInputBindings::get)
+                val buffer = requestLocator?.let(state.userInputAnswers::buffer)
+                when {
+                    requestLocator == null || request == null -> "User-input request is no longer known"
+                    target.locator != request.thread -> "Primary request thread target is stale"
+                    request.resolution != RequestResolutionState.PENDING ->
+                        "User-input request is no longer editable"
+                    !state.threadAttachments.hasDealerClaim(request.thread) ->
+                        "Dealer control is unavailable"
+                    binding == null || binding.epoch != epoch.value ||
+                        binding.controlGeneration != target.controlGeneration ||
+                        binding.modeSession != target.modeSession ->
+                        "Primary request control target is stale"
+                    target.answerRevision != buffer?.revision -> "User-input answer revision is stale"
+                    target.requestFingerprint != request.fingerprint ->
+                        "User-input request fingerprint is stale"
+                    buffer == null || !buffer.isComplete(request) ->
+                        "User-input response is incomplete"
+                    else -> null
+                }
+            }
+            else -> {
+                val locator = target.locator
+                val thread = state.threads[locator]
+                val draft = state.threadActions.composerDraft(locator)
+                val binding = pokerComposerBindings[locator]
+                val expectedAction = when (thread?.workState) {
+                    ThreadWorkState.READY -> PokerPrimaryAction.SEND.takeIf { draft.isSubmittable }
+                    ThreadWorkState.BUSY -> when {
+                        thread.activeTurnId == null -> null
+                        draft.isSubmittable -> PokerPrimaryAction.STEER
+                        else -> PokerPrimaryAction.INTERRUPT
+                    }
+                    ThreadWorkState.ATTENTION_REQUIRED,
+                    null,
+                    -> null
+                }
+                when {
+                    locator !in state.threadAttachments.attached ||
+                        !state.threadAttachments.hasDealerClaim(locator) ->
+                        "Dealer control is unavailable"
+                    binding == null || binding.epoch != epoch.value ||
+                        binding.controlGeneration != target.controlGeneration ||
+                        binding.modeSession != target.modeSession ->
+                        "Primary composer control target is stale"
+                    expectedAction != target.action ->
+                        "Primary semantic action is stale"
+                    target.draftRevision != null && target.draftRevision != draft.revision ->
+                        "Composer draft revision is stale"
+                    target.cursorPosition != null &&
+                        target.cursorPosition !in 0 until draft.cursorCount ->
+                        "Composer cursor is stale"
+                    target.action == PokerPrimaryAction.STEER &&
+                        target.expectedTurnId != thread?.activeTurnId ->
+                        "Steer turn target is stale"
+                    target.action == PokerPrimaryAction.INTERRUPT &&
+                        target.expectedTurnId != thread?.activeTurnId ->
+                        "Interrupt turn target is stale"
+                    else -> null
+                }
+            }
+        }
+        if (rejection != null) {
+            sendPokerPrimaryActionResult(
+                envelope,
+                PokerPrimaryActionResult(
+                    target = target,
+                    outcome = PokerPrimaryActionOutcome.REJECTED,
+                    reason = rejection,
+                ),
+            )
+            return
+        }
+
+        pokerPrimaryResults[target.operationId] = PokerPrimaryActionResult(
+            target = target,
+            outcome = PokerPrimaryActionOutcome.UNKNOWN,
+            reason = "Primary action is in flight",
+        )
+
+        val complete: (PokerPrimaryActionOutcome) -> Unit = { outcome ->
+            scope.launch {
+                sendPokerPrimaryActionResult(
+                    envelope,
+                    PokerPrimaryActionResult(target, outcome),
+                )
+            }
+        }
+        when (target.action) {
+            PokerPrimaryAction.REQUEST -> {
+                val requestLocator = checkNotNull(target.requestLocator)
+                val answers = state.userInputAnswers.buffer(requestLocator)
+                    .response(state.userInputRequests.requests.getValue(requestLocator))
+                respondUserInput(
+                    locator = requestLocator,
+                    answers = answers,
+                    outcome = UserInputOutcome.ANSWERED,
+                    requireControl = true,
+                    onOutcome = complete,
+                )
+            }
+            PokerPrimaryAction.SEND -> submitDraft(
+                locator = target.locator,
+                expectedDraftRevision = target.draftRevision,
+                expectedCursorPosition = target.cursorPosition,
+                expectedAction = ComposerAction.START,
+                onOutcome = complete,
+            )
+            PokerPrimaryAction.STEER -> submitDraft(
+                locator = target.locator,
+                expectedDraftRevision = target.draftRevision,
+                expectedCursorPosition = target.cursorPosition,
+                expectedAction = ComposerAction.STEER,
+                expectedTurnId = target.expectedTurnId,
+                onOutcome = complete,
+            )
+            PokerPrimaryAction.INTERRUPT -> interrupt(
+                locator = target.locator,
+                expectedTurnId = target.expectedTurnId,
+                onOutcome = complete,
+            )
+        }
+    }
+
+    private suspend fun sendPokerPrimaryActionResult(
+        envelope: ProtocolEnvelope,
+        result: PokerPrimaryActionResult,
+    ) {
+        pokerPrimaryResults[result.target.operationId] = result
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            PokerPrimaryActionResult.serializer(),
+            result,
+        ).jsonObject
+        pokerConnectionOwner.send(
+            type = POKER_PRIMARY_ACTION_RESULT_TYPE,
             payload = payload,
             replyTo = envelope.messageId,
         )
@@ -1335,9 +1524,33 @@ class DealerConnectionService : Service() {
         )
     }
 
-    fun submitDraft(locator: CodexThreadLocator) {
+    fun submitDraft(
+        locator: CodexThreadLocator,
+        expectedDraftRevision: Long? = null,
+        expectedCursorPosition: Int? = null,
+        expectedAction: ComposerAction? = null,
+        expectedTurnId: String? = null,
+        onOutcome: (PokerPrimaryActionOutcome) -> Unit = {},
+    ) {
         val state = mutableState.value
         val thread = state.threads[locator]
+        val draft = state.threadActions.composerDraft(locator)
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
+        if (appServer == null) {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before sending") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
+        if (expectedDraftRevision != null && expectedDraftRevision != draft.revision) {
+            mutableState.update { it.copy(error = "Composer draft revision is stale") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
+        if (expectedCursorPosition != null && expectedCursorPosition !in 0 until draft.cursorCount) {
+            mutableState.update { it.copy(error = "Composer cursor is stale") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         val clientId = UUID.randomUUID().toString()
         val (actions, pending) = try {
             state.threadActions.beginInput(
@@ -1349,16 +1562,21 @@ class DealerConnectionService : Service() {
             )
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
+        if (expectedAction != null && pending.action != expectedAction ||
+            expectedTurnId != null && pending.expectedTurnId != expectedTurnId
+        ) {
+            mutableState.update { it.copy(error = "Primary semantic action is stale") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         if (pending.draft.elements.any { it is ComposerElement.Photo }) {
             mutableState.update {
                 it.copy(error = "Photo drafts require image submission support")
             }
-            return
-        }
-        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
-            mutableState.update { it.copy(error = "Connect ${locator.hostId} before sending") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         val text = actions.drafts.getValue(locator)
@@ -1394,6 +1612,7 @@ class DealerConnectionService : Service() {
                         error = "Unable to persist the pending input; nothing was sent: ${failure.message}",
                     )
                 }
+                onOutcome(PokerPrimaryActionOutcome.REJECTED)
                 return@launch
             }
             try {
@@ -1463,6 +1682,7 @@ class DealerConnectionService : Service() {
                     }
                 }
                 refreshPokerProjection(locator)
+                onOutcome(PokerPrimaryActionOutcome.ACCEPTED)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (rejected: JsonRpcRemoteException) {
@@ -1486,6 +1706,13 @@ class DealerConnectionService : Service() {
                     )
                 }
                 browseThread(locator)
+                onOutcome(
+                    if (cleanupFailure == null) {
+                        PokerPrimaryActionOutcome.REJECTED
+                    } else {
+                        PokerPrimaryActionOutcome.UNKNOWN
+                    },
+                )
             } catch (failure: Throwable) {
                 mutableState.update { current ->
                     val matching = current.threadActions.pendingInputs[locator]?.clientId == clientId
@@ -1500,12 +1727,28 @@ class DealerConnectionService : Service() {
                     )
                 }
                 browseThread(locator)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
     }
 
-    fun interrupt(locator: CodexThreadLocator) {
+    fun interrupt(
+        locator: CodexThreadLocator,
+        expectedTurnId: String? = null,
+        onOutcome: (PokerPrimaryActionOutcome) -> Unit = {},
+    ) {
         val state = mutableState.value
+        val currentTurnId = state.threads[locator]?.activeTurnId
+        if (expectedTurnId != null && expectedTurnId != currentTurnId) {
+            mutableState.update { it.copy(error = "Interrupt turn target is stale") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
+        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
+            mutableState.update { it.copy(error = "Connect ${locator.hostId} before interrupting") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         val (actions, turnId) = try {
             state.threadActions.beginInterrupt(
                 locator,
@@ -1514,10 +1757,7 @@ class DealerConnectionService : Service() {
             )
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
-            return
-        }
-        val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
-            mutableState.update { it.copy(error = "Connect ${locator.hostId} before interrupting") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         mutableState.update { it.copy(threadActions = actions, error = null) }
@@ -1531,6 +1771,7 @@ class DealerConnectionService : Service() {
                         error = "Unable to persist Interrupt; nothing was sent: ${failure.message}",
                     )
                 }
+                onOutcome(PokerPrimaryActionOutcome.REJECTED)
                 return@launch
             }
             try {
@@ -1554,11 +1795,13 @@ class DealerConnectionService : Service() {
                     )
                 }
                 browseThread(locator)
+                onOutcome(PokerPrimaryActionOutcome.REJECTED)
             } catch (failure: Throwable) {
                 mutableState.update {
                     it.copy(error = "${failure.message ?: failure::class.java.simpleName}; interrupt was not replayed")
                 }
                 browseThread(locator)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
     }
@@ -2634,17 +2877,23 @@ class DealerConnectionService : Service() {
         answers: Map<String, List<String>>,
         outcome: UserInputOutcome,
         requireControl: Boolean,
+        onOutcome: (PokerPrimaryActionOutcome) -> Unit = {},
     ) {
         val state = mutableState.value
-        val request = state.userInputRequests.requests[locator] ?: return
+        val request = state.userInputRequests.requests[locator] ?: run {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         if (requireControl && !state.threadAttachments.hasDealerClaim(request.thread)) {
             mutableState.update { it.copy(error = "Take control before answering this request") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         val response = try {
             UserInputProtocol.response(request, answers)
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
@@ -2658,10 +2907,14 @@ class DealerConnectionService : Service() {
                     .copy(error = "User-input request is no longer connected; no response was replayed")
             }
             refreshPokerUserInputProjection(request.thread)
+            onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             return
         }
         val responding = state.userInputRequests.begin(locator, outcome)
-        if (responding == state.userInputRequests) return
+        if (responding == state.userInputRequests) {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         userInputTimeoutJobs.remove(locator)?.let {
             if (outcome != UserInputOutcome.AUTO_RESOLVED) it.cancel()
         }
@@ -2685,10 +2938,12 @@ class DealerConnectionService : Service() {
                         .copy(error = "Response was not sent because recovery storage failed: ${failure.message}")
                 }
                 refreshPokerUserInputProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
                 return@launch
             }
             try {
                 appServer.respond(wire, response)
+                onOutcome(PokerPrimaryActionOutcome.ACCEPTED)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -2700,6 +2955,7 @@ class DealerConnectionService : Service() {
                         )
                 }
                 refreshPokerUserInputProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
     }
@@ -3475,6 +3731,7 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch = null
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
+        pokerPrimaryResults.clear()
         pokerUserInputBindings.clear()
         pokerUserInputResults.clear()
         pokerConnectionOwner.stop()
