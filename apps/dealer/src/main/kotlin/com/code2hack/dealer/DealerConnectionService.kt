@@ -13,8 +13,10 @@ import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
 import com.code2hack.dealer.asr.DealerAsrProcess
-import com.code2hack.dealer.asr.DealerAsrProcessSession
 import com.code2hack.dealer.asr.DealerAsrDownloadState
+import com.code2hack.dealer.asr.DealerAsrSliceSession
+import com.code2hack.dealer.asr.dealerAsrCursorAfter
+import com.code2hack.dealer.asr.insertDealerAsrText
 import com.code2hack.tailnet.embeddedtailnet.Engine
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardRevisionStore
@@ -283,7 +285,7 @@ class DealerConnectionService : Service() {
     private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val pokerAsrResults = mutableMapOf<String, Any>()
     private lateinit var asrProcess: DealerAsrProcess
-    private var pokerAsrSession: DealerPokerAsrSession? = null
+    private var pokerAsrSession: DealerAsrSliceSession? = null
     private var pokerAsrPreparing: PokerAsrStartRequest? = null
     private val pokerAsrCancelledSessions = mutableSetOf<String>()
     private val tailnetEngine = Engine()
@@ -1513,7 +1515,7 @@ class DealerConnectionService : Service() {
                 opened.close()
                 PokerAsrStartResult(request.target, request.sessionId, PokerAsrStartOutcome.CANCELLED)
             } else {
-                pokerAsrSession = DealerPokerAsrSession(
+                pokerAsrSession = DealerAsrSliceSession(
                     sessionId = request.sessionId,
                     target = request.target,
                     pack = pack,
@@ -1550,29 +1552,15 @@ class DealerConnectionService : Service() {
 
     private suspend fun handlePokerAsrAudio(epoch: PokerConnectionEpoch, frame: PokerAsrAudioFrame) {
         val session = pokerAsrSession ?: return
-        if (pokerComposerEpoch != epoch || session.sessionId != frame.sessionId) {
+        if (pokerComposerEpoch != epoch) {
             terminatePokerAsr(epoch, "audio-session-invalid")
             return
         }
-        val pcm = runCatching { frame.decodePcm16() }.getOrElse {
-            terminatePokerAsr(epoch, "audio-frame-invalid")
+        session.accept(frame)?.let { reason ->
+            terminatePokerAsr(epoch, reason)
             return
         }
-        val samples = pcm.size / 2
-        if (frame.firstSampleOffset != session.nextSampleOffset ||
-            samples > Long.MAX_VALUE - session.nextSampleOffset
-        ) {
-            terminatePokerAsr(epoch, "audio-sequence-invalid")
-            return
-        }
-        try {
-            session.recognizer.acceptPcm16(pcm)
-            session.nextSampleOffset += samples
-        } catch (_: Throwable) {
-            terminatePokerAsr(epoch, "runtime-decode-failed")
-            return
-        }
-        val text = runCatching { session.recognizer.provisionalText() }.getOrElse {
+        val text = runCatching { session.provisionalText() }.getOrElse {
             terminatePokerAsr(epoch, "runtime-decode-failed")
             return
         }
@@ -1612,7 +1600,7 @@ class DealerConnectionService : Service() {
 
         val active = checkNotNull(session)
         val committedText = try {
-            active.recognizer.commitSlice()
+            active.commitSlice(request.fenceSampleOffset)
         } catch (failure: Throwable) {
             terminatePokerAsr(epoch, "runtime-decode-failed")
             val result = PokerAsrCommitResult(
@@ -1643,7 +1631,6 @@ class DealerConnectionService : Service() {
             return
         }
         active.target = nextTarget
-        active.sliceRevision++
         mutableState.update {
             it.copy(asr = it.asr.copy(target = nextTarget, provisionalText = ""))
         }
@@ -1690,7 +1677,7 @@ class DealerConnectionService : Service() {
         }
         val active = checkNotNull(session)
         try {
-            active.recognizer.discardSlice()
+            active.discardSlice()
         } catch (failure: Throwable) {
             terminatePokerAsr(epoch, "runtime-decode-failed")
             val result = PokerAsrDiscardResult(
@@ -1704,7 +1691,6 @@ class DealerConnectionService : Service() {
             sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
             return
         }
-        active.sliceRevision++
         mutableState.update { it.copy(asr = it.asr.copy(provisionalText = "")) }
         val result = PokerAsrDiscardResult(
             request.target,
@@ -1824,7 +1810,7 @@ class DealerConnectionService : Service() {
         return when (target.field) {
             PokerAsrTargetField.COMPOSER -> {
                 val draft = mutableState.value.threadActions.composerDraft(target.locator)
-                val next = draft.insertText(target.cursorPosition, text).withRevision(draft.revision + 1)
+                val next = insertDealerAsrText(draft, target.cursorPosition, text)
                 draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
                 mutableState.update {
                     it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
@@ -1832,7 +1818,7 @@ class DealerConnectionService : Service() {
                 pokerComposerEpoch?.let { epoch -> sendPokerProjection(epoch, target.locator) }
                 target.copy(
                     targetRevision = next.revision,
-                    cursorPosition = target.cursorPosition + ComposerDraft.fromText(text).cursorCount - 1,
+                    cursorPosition = dealerAsrCursorAfter(target.cursorPosition, text),
                 )
             }
             PokerAsrTargetField.REQUEST_TEXT -> {
@@ -1842,15 +1828,13 @@ class DealerConnectionService : Service() {
                 val buffer = state.userInputAnswers.buffer(requestLocator)
                 val question = request.questions.first { it.id == target.questionId }
                 val currentText = buffer.activeValue(question)
-                val units = ComposerDraft.fromText(currentText).visibleUnits()
-                val charOffset = units.take(target.cursorPosition).sumOf { it.text?.length ?: 0 }
-                val nextText = currentText.substring(0, charOffset) + text + currentText.substring(charOffset)
+                val nextText = insertDealerAsrText(currentText, target.cursorPosition, text)
                 val next = buffer.edit(request, question.id, UserInputAnswerEdit.SetText(nextText))
                 mutableState.update { it.copy(userInputAnswers = it.userInputAnswers.copy(buffers = it.userInputAnswers.buffers + (requestLocator to next))) }
                 pokerComposerEpoch?.let { epoch -> sendPokerUserInputProjection(epoch, requestLocator) }
                 target.copy(
                     targetRevision = next.revision,
-                    cursorPosition = target.cursorPosition + ComposerDraft.fromText(text).cursorCount - 1,
+                    cursorPosition = dealerAsrCursorAfter(target.cursorPosition, text),
                 )
             }
         }
@@ -1858,20 +1842,11 @@ class DealerConnectionService : Service() {
 
     private suspend fun sendPokerAsrProjection(
         epoch: PokerConnectionEpoch,
-        session: DealerPokerAsrSession,
+        session: DealerAsrSliceSession,
         immediate: Boolean,
     ) {
         if (pokerComposerEpoch != epoch) return
-        val now = System.currentTimeMillis()
-        if (!immediate && now - session.lastProjectionAtMs < 100L) return
-        session.lastProjectionAtMs = now
-        val projection = PokerAsrProjection(
-            target = session.target,
-            sessionId = session.sessionId,
-            sliceRevision = session.sliceRevision,
-            sliceText = runCatching { session.recognizer.provisionalText() }.getOrDefault(""),
-            sampleOffset = session.nextSampleOffset,
-        )
+        val projection = session.projection(immediate) ?: return
         sendPokerAsr(
             epoch = epoch,
             type = POKER_ASR_PROJECTION_TYPE,
@@ -1904,7 +1879,7 @@ class DealerConnectionService : Service() {
         pokerAsrSession = null
         mutableState.update { it.copy(asr = DealerAsrUiState()) }
         scope.launch {
-            runCatching { session.recognizer.close() }
+            runCatching { session.close() }
         }
     }
 
@@ -5480,7 +5455,7 @@ class DealerConnectionService : Service() {
         pokerApprovalBindings.clear()
         pokerAsrSession?.let { session ->
             pokerAsrSession = null
-            scope.launch { runCatching { session.recognizer.close() } }
+            scope.launch { runCatching { session.close() } }
         }
         if (::asrProcess.isInitialized) DealerAsrProcess.closeShared(asrProcess)
         pokerConnectionOwner.stop()
@@ -5883,16 +5858,6 @@ enum class DealerRunState(
     CANCELLED("Cancelled"),
     ERROR("Error"),
 }
-
-private class DealerPokerAsrSession(
-    val sessionId: String,
-    var target: PokerAsrTarget,
-    val pack: com.code2hack.pokerdealer.protocol.PokerAsrPackSelection,
-    internal val recognizer: DealerAsrProcessSession,
-    var sliceRevision: Long = 0,
-    var nextSampleOffset: Long = 0,
-    var lastProjectionAtMs: Long = 0,
-)
 
 data class DealerAsrUiState(
     val active: Boolean = false,

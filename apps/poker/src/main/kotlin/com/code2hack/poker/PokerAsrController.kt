@@ -41,6 +41,7 @@ internal class PokerAsrController(
     private var target: PokerAsrTarget? = null
     private var nextSampleOffset = 0L
     private var pendingOperationId: String? = null
+    private var pendingExitOperationId: String? = null
     private var exitWasActive = false
 
     fun isInputCaptured(): Boolean = state != PokerAsrState.IDLE
@@ -55,6 +56,7 @@ internal class PokerAsrController(
         target = nextTarget
         nextSampleOffset = 0
         pendingOperationId = null
+        pendingExitOperationId = null
         state = PokerAsrState.PREPARING
         val sent = PokerAsrBridge.sendStart(PokerAsrStartRequest(nextTarget, nextSession))
         if (!sent) reset()
@@ -63,6 +65,10 @@ internal class PokerAsrController(
 
     suspend fun handleInteraction(interaction: PokerInteraction) {
         if (interaction.phase != PokerInteractionPhase.RELEASE) return
+        if (state == PokerAsrState.PREPARING) {
+            if (interaction.operation == PokerOperation.FN && interaction.durationMs >= 500L) exit()
+            return
+        }
         if (state != PokerAsrState.ACTIVE || pendingOperationId != null) return
         when (interaction.operation) {
             PokerOperation.DOWN -> commit()
@@ -74,7 +80,7 @@ internal class PokerAsrController(
     suspend fun sendAudio(pcm16: ByteArray): Boolean {
         if (state != PokerAsrState.ACTIVE || pcm16.isEmpty() || pcm16.size % 2 != 0) return false
         if (pendingOperationId != null) return true
-        require(pcm16.size <= com.code2hack.pokerdealer.protocol.POKER_ASR_MAX_AUDIO_BYTES)
+        if (pcm16.size > com.code2hack.pokerdealer.protocol.POKER_ASR_MAX_AUDIO_BYTES) return false
         val id = sessionId ?: return false
         val offset = nextSampleOffset
         val sent = PokerAsrBridge.sendAudio(id, offset, pcm16)
@@ -83,7 +89,7 @@ internal class PokerAsrController(
     }
 
     fun onStartResult(result: PokerAsrStartResult) {
-        if (result.sessionId != sessionId || state != PokerAsrState.PREPARING) return
+        if (result.sessionId != sessionId || result.target != target || state != PokerAsrState.PREPARING) return
         when (result.outcome) {
             PokerAsrStartOutcome.READY -> {
                 target = result.target
@@ -101,7 +107,7 @@ internal class PokerAsrController(
     }
 
     fun onCommitResult(result: PokerAsrCommitResult) {
-        if (result.sessionId != sessionId || result.operationId != pendingOperationId) return
+        if (result.sessionId != sessionId || result.target != target || result.operationId != pendingOperationId) return
         pendingOperationId = null
         if (result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) {
             target = result.nextTarget ?: result.target
@@ -112,7 +118,7 @@ internal class PokerAsrController(
     }
 
     fun onDiscardResult(result: PokerAsrDiscardResult) {
-        if (result.sessionId != sessionId || result.operationId != pendingOperationId) return
+        if (result.sessionId != sessionId || result.target != target || result.operationId != pendingOperationId) return
         pendingOperationId = null
         if (result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) {
             target = result.nextTarget ?: result.target
@@ -123,7 +129,8 @@ internal class PokerAsrController(
     }
 
     fun onExitResult(result: PokerAsrExitResult) {
-        if (result.sessionId != sessionId) return
+        if (result.sessionId != sessionId || result.target != target || result.operationId != pendingExitOperationId) return
+        pendingExitOperationId = null
         if (exitWasActive && result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) onExitNotice()
         reset()
     }
@@ -167,6 +174,7 @@ internal class PokerAsrController(
         exitWasActive = state == PokerAsrState.ACTIVE
         state = PokerAsrState.EXITING
         val operation = UUID.randomUUID().toString()
+        pendingExitOperationId = operation
         if (!PokerAsrBridge.sendExit(PokerAsrExitRequest(current, id, operation))) reset()
     }
 
@@ -177,6 +185,7 @@ internal class PokerAsrController(
         target = null
         nextSampleOffset = 0
         pendingOperationId = null
+        pendingExitOperationId = null
         exitWasActive = false
     }
 

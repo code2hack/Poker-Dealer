@@ -91,11 +91,56 @@ internal class DealerAsrProcess private constructor(context: Context) {
     }
 }
 
+internal interface DealerAsrRecognizer {
+    fun acceptPcm16(pcm: ByteArray)
+
+    fun provisionalText(): String
+
+    fun commitSlice(): String
+
+    fun discardSlice()
+
+    fun close()
+}
+
+private class DealerAsrSessionRecognizer(
+    private val session: DealerAsrSession,
+) : DealerAsrRecognizer {
+    override fun acceptPcm16(pcm: ByteArray) = session.acceptPcm16(pcm)
+
+    override fun provisionalText(): String = session.provisionalText()
+
+    override fun commitSlice(): String = session.commitSlice()
+
+    override fun discardSlice() = session.discardSlice()
+
+    override fun close() = session.close()
+}
+
 internal class DealerAsrProcessSession internal constructor(
-    private val recognizer: DealerAsrSession,
-    private val manager: DealerAsrDownloadManager,
-    private val profile: DealerAsrSessionProfile,
+    private val recognizer: DealerAsrRecognizer,
+    private val endSession: suspend () -> Unit,
+    private val profile: DealerAsrProfile,
 ) {
+    internal constructor(
+        recognizer: DealerAsrSession,
+        manager: DealerAsrDownloadManager,
+        profile: DealerAsrSessionProfile,
+    ) : this(
+        recognizer = DealerAsrSessionRecognizer(recognizer),
+        endSession = { manager.endAsrSession(profile) },
+        profile = profile.profile,
+    )
+
+    internal constructor(
+        recognizer: DealerAsrRecognizer,
+        profile: DealerAsrProfile,
+    ) : this(
+        recognizer = recognizer,
+        endSession = {},
+        profile = profile,
+    )
+
     private var closed = false
 
     fun acceptPcm16(pcm: ByteArray) {
@@ -105,7 +150,7 @@ internal class DealerAsrProcessSession internal constructor(
 
     fun provisionalText(): String = recognizer.provisionalText()
 
-    fun commitSlice(): String = recognizer.commitSlice().withPausePunctuation(profile.profile.pausePunctuation)
+    fun commitSlice(): String = recognizer.commitSlice().withPausePunctuation(profile.pausePunctuation)
 
     fun discardSlice() = recognizer.discardSlice()
 
@@ -115,12 +160,12 @@ internal class DealerAsrProcessSession internal constructor(
         try {
             recognizer.close()
         } finally {
-            manager.endAsrSession(profile)
+            endSession()
         }
     }
 }
 
-private fun String.withPausePunctuation(mark: String): String {
+internal fun String.withPausePunctuation(mark: String): String {
     if (isBlank() || mark.isEmpty()) return this
     val trimmed = trimEnd()
     if (trimmed.lastOrNull() in setOf('.', '?', '!', ',', ';', ':')) return this
