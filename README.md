@@ -208,6 +208,11 @@ verifies the Go archive SHA-256 and Go module checksums, then produces only
 `jni/arm64-v8a/libgojni.so`. `ANDROID_NDK_HOME` may point at the pinned NDK when it is not installed
 below `ANDROID_HOME`.
 
+Dealer's sherpa-onnx AAR and CPU ONNX Runtime compatibility version are pinned in
+`native/sherpa-onnx/versions.env`. `native/sherpa-onnx/build.sh` verifies the AAR digest, ARM64 native
+libraries, and license notice before Gradle packages it. The smoke model is generated only for
+instrumentation tests; `verifySherpaOnnxPackaging` rejects ASR model files in the production APK.
+
 On DGX Spark, the same build entry point runs transparently in the pinned `linux/amd64` Docker builder
 required by `gomobile` and the Android NDK's `linux-x86_64` host tools. Its preflight installs only the
 amd64 binfmt registration through a pinned privileged Docker helper when the registration is absent or
