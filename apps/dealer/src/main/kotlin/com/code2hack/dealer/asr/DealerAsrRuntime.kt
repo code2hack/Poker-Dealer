@@ -16,10 +16,8 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.security.MessageDigest
 import java.util.ArrayDeque
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 
 enum class DealerAsrAdapter {
     PARAKEET_UNIFIED_STREAMING,
@@ -140,43 +138,30 @@ private object NoopDealerAsrRuntimeCallbacks : DealerAsrRuntimeCallbacks {
 
 internal class DealerAsrDownloadLifecycle(
     private val manager: () -> DealerAsrDownloadManager,
-    private val scope: CoroutineScope,
 ) : DealerAsrRuntimeCallbacks {
-    private val lock = Mutex()
+    private val lock = Any()
     private val sessions = mutableMapOf<DealerAsrPackKey, ArrayDeque<DealerAsrSessionProfile>>()
 
     override fun onSessionStarted(key: DealerAsrPackKey) {
-        scope.launch {
-            lock.withLock {
-                runCatching {
-                    val profile = manager().beginAsrSession(key)
-                    sessions.getOrPut(key, ::ArrayDeque).addLast(profile)
-                }
-            }
+        synchronized(lock) {
+            val profile = runBlocking(Dispatchers.IO) { manager().beginAsrSession(key) }
+            sessions.getOrPut(key, ::ArrayDeque).addLast(profile)
         }
     }
 
     override fun onSessionClosed(key: DealerAsrPackKey) {
-        scope.launch {
-            lock.withLock {
-                val session = sessions[key]?.let { pending ->
-                    if (pending.isEmpty()) null else pending.removeLast().also {
-                        if (pending.isEmpty()) sessions.remove(key)
-                    }
-                }
-                runCatching {
-                    if (session == null) manager().setActive(key, false)
-                    else manager().endAsrSession(session)
-                }
-            }
+        synchronized(lock) {
+            val pending = sessions[key] ?: return@synchronized
+            val session = pending.lastOrNull() ?: return@synchronized
+            runBlocking(Dispatchers.IO) { manager().endAsrSession(session) }
+            pending.removeLast()
+            if (pending.isEmpty()) sessions.remove(key)
         }
     }
 
     override fun onPackFailure(key: DealerAsrPackKey, reason: String) {
-        scope.launch {
-            lock.withLock {
-                runCatching { manager().markRepairNeeded(key, reason) }
-            }
+        synchronized(lock) {
+            runBlocking(Dispatchers.IO) { manager().markRepairNeeded(key, reason) }
         }
     }
 
@@ -326,8 +311,12 @@ class DealerAsrRuntime private constructor(
             "ASR adapter is not implemented"
         }
         val key = DealerAsrPackKey(pack.id, pack.revision)
+        var sessionStarted = false
+        var recognizer: OnlineRecognizer? = null
         return try {
             pack.source.revalidate()
+            callbacks.onSessionStarted(key)
+            sessionStarted = true
             val paths = when (val source = pack.source) {
                 is VerifiedAsrPackSource.Assets -> RecognizerPaths(
                     assetManager = source.assetManager,
@@ -344,7 +333,7 @@ class DealerAsrRuntime private constructor(
                     tokens = source.tokens.path,
                 )
             }
-            val recognizer = OnlineRecognizer(
+            val createdRecognizer = OnlineRecognizer(
                 assetManager = paths.assetManager,
                 config = OnlineRecognizerConfig(
                     featConfig = FeatureConfig(sampleRate = 16_000, featureDim = featureDim),
@@ -361,16 +350,34 @@ class DealerAsrRuntime private constructor(
                     enableEndpoint = true,
                 ),
             )
+            recognizer = createdRecognizer
             val session = DealerAsrSession(
-                recognizer = recognizer,
-                stream = recognizer.createStream(),
+                recognizer = createdRecognizer,
+                stream = createdRecognizer.createStream(),
                 profile = profile,
                 onClosed = { callbacks.onSessionClosed(key) },
             )
-            callbacks.onSessionStarted(key)
             session
         } catch (failure: Throwable) {
-            notifyPackFailure(key, "pack-unloadable")
+            recognizer?.let {
+                try {
+                    it.release()
+                } catch (cleanupFailure: Throwable) {
+                    failure.addSuppressed(cleanupFailure)
+                }
+            }
+            if (sessionStarted) {
+                try {
+                    callbacks.onSessionClosed(key)
+                } catch (cleanupFailure: Throwable) {
+                    failure.addSuppressed(cleanupFailure)
+                }
+            }
+            try {
+                callbacks.onPackFailure(key, "pack-unloadable")
+            } catch (notificationFailure: Throwable) {
+                failure.addSuppressed(notificationFailure)
+            }
             throw failure
         }
     }
@@ -386,7 +393,7 @@ class DealerAsrRuntime private constructor(
     }
 
     private fun notifyPackFailure(key: DealerAsrPackKey, reason: String) {
-        runCatching { callbacks.onPackFailure(key, reason) }
+        callbacks.onPackFailure(key, reason)
     }
 
     private fun validate(manifest: DealerAsrPackManifest): String? {

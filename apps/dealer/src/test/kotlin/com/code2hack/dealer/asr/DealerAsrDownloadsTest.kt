@@ -7,7 +7,6 @@ import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -86,24 +85,21 @@ class DealerAsrDownloadsTest {
     }
 
     @Test
-    fun productionLifecycleCallbacksDriveActiveProtectionAndIdleUnload() = runBlocking {
+    fun productionOpenReservesBeforeDefaultDeleteAndRapidCloseOrdering() = runBlocking {
         val fixture = fixture()
         val second = fixture.entry.withPackId("second-pack")
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
         val unloaded = mutableListOf<DealerAsrPackKey>()
         val manager = manager(fixture.root, transport, unloadIdleDefault = unloaded::add)
-        val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val lifecycle = DealerAsrDownloadLifecycle({ manager }, lifecycleScope)
+        val lifecycle = DealerAsrDownloadLifecycle({ manager })
         try {
             val first = manager.queue(fixture.entry)
             val secondJob = manager.queue(second)
             await { manager.stateFlow.value.jobs.all { it.state == DealerAsrDownloadState.READY } }
 
             lifecycle.onSessionStarted(first.key)
-            await {
-                manager.stateFlow.value.activeSessions.contains(first.key) &&
-                    manager.stateFlow.value.installed.first { it.key == first.key }.isActive
-            }
+            assertTrue(manager.stateFlow.value.activeSessions.contains(first.key))
+            assertTrue(manager.stateFlow.value.installed.first { it.key == first.key }.isActive)
             manager.setDefault(secondJob.key)
             assertTrue(unloaded.isEmpty())
             assertEquals(
@@ -112,13 +108,25 @@ class DealerAsrDownloadsTest {
             )
 
             lifecycle.onSessionClosed(first.key)
-            await {
-                first.key !in manager.stateFlow.value.activeSessions &&
-                    !manager.stateFlow.value.installed.first { it.key == first.key }.isActive
-            }
+            assertFalse(manager.stateFlow.value.activeSessions.contains(first.key))
+            assertFalse(manager.stateFlow.value.installed.first { it.key == first.key }.isActive)
             assertEquals(listOf(first.key), unloaded)
+
+            lifecycle.onSessionStarted(first.key)
+            lifecycle.onSessionStarted(first.key)
+            assertTrue(manager.stateFlow.value.activeSessions.contains(first.key))
+            lifecycle.onSessionClosed(first.key)
+            assertTrue(manager.stateFlow.value.activeSessions.contains(first.key))
+            lifecycle.onSessionClosed(first.key)
+            assertFalse(manager.stateFlow.value.activeSessions.contains(first.key))
+
+            assertEquals(
+                "model-pack-not-installed",
+                runCatching {
+                    lifecycle.onSessionStarted(DealerAsrPackKey("missing-pack", "r1"))
+                }.exceptionOrNull()?.message,
+            )
         } finally {
-            lifecycleScope.cancel()
             manager.close()
             fixture.root.deleteRecursively()
         }

@@ -149,7 +149,7 @@ class DealerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         openThreadNotification(intent)
         asrCatalogStore = DealerAsrCatalogStore(this)
-        asrDownloadLifecycle = DealerAsrDownloadLifecycle({ asrDownloadManager }, lifecycleScope)
+        asrDownloadLifecycle = DealerAsrDownloadLifecycle({ asrDownloadManager })
         asrRuntime = DealerAsrRuntime(this, asrDownloadLifecycle)
         asrDownloadManager = DealerAsrDownloadManager(
             context = this,

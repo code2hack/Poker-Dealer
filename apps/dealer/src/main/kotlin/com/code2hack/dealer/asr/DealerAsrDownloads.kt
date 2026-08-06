@@ -563,27 +563,35 @@ internal class DealerAsrDownloadManager(
         val unload = withContext(Dispatchers.IO) {
             lock.withLock {
                 val result = if (active) {
-                    val job = jobs[key]
-                    require(job?.state == DealerAsrDownloadState.READY && isHealthy(job)) {
-                        "model-pack-not-installed"
-                    }
-                    activePacks += key
-                    pendingIdleUnloads -= key
+                    activateLocked(key)
                     null
                 } else {
-                    activePacks -= key
-                    if (key in pendingIdleUnloads) {
-                        pendingIdleUnloads -= key
-                        key
-                    } else {
-                        null
-                    }
+                    deactivateLocked(key)
                 }
                 publishLocked()
                 result
             }
         }
         unload?.let { runCatching { unloadIdleDefault(it) } }
+    }
+
+    private fun activateLocked(key: DealerAsrPackKey) {
+        val job = jobs[key]
+        require(job?.state == DealerAsrDownloadState.READY && isHealthy(job)) {
+            "model-pack-not-installed"
+        }
+        activePacks += key
+        pendingIdleUnloads -= key
+    }
+
+    private fun deactivateLocked(key: DealerAsrPackKey): DealerAsrPackKey? {
+        activePacks -= key
+        return if (key in pendingIdleUnloads) {
+            pendingIdleUnloads -= key
+            key
+        } else {
+            null
+        }
     }
 
     suspend fun markRepairNeeded(key: DealerAsrPackKey, reason: String = "pack-unloadable") {
@@ -693,7 +701,7 @@ internal class DealerAsrDownloadManager(
 
     suspend fun beginAsrSession(key: DealerAsrPackKey): DealerAsrSessionProfile {
         start()
-        val session = withContext(Dispatchers.IO) {
+        return withContext(Dispatchers.IO) {
             lock.withLock {
                 val job = jobs[key]
                 require(job?.state == DealerAsrDownloadState.READY && isInstalled(key)) {
@@ -705,25 +713,40 @@ internal class DealerAsrDownloadManager(
                     key.revision,
                 )
                 val session = profileStore.beginSession(key, schema)
-                jobs[key] = job.copy(profileJson = session.profile.json.toString(), profileError = null)
-                persistLocked()
-                publishLocked()
-                session
+                val wasActive = key in activePacks
+                val wasPendingUnload = key in pendingIdleUnloads
+                try {
+                    jobs[key] = job.copy(profileJson = session.profile.json.toString(), profileError = null)
+                    activateLocked(key)
+                    persistLocked()
+                    publishLocked()
+                    session
+                } catch (failure: Throwable) {
+                    jobs[key] = job
+                    if (!wasActive) activePacks -= key
+                    if (wasPendingUnload) pendingIdleUnloads += key else pendingIdleUnloads -= key
+                    profileStore.endSession(session)
+                    publishLocked()
+                    throw failure
+                }
             }
         }
-        setActive(key, true)
-        return session
     }
 
     suspend fun endAsrSession(session: DealerAsrSessionProfile) {
         start()
-        withContext(Dispatchers.IO) {
+        val unload = withContext(Dispatchers.IO) {
             lock.withLock {
-                profileStore.endSession(session)
+                val unload = if (profileStore.endSession(session)) {
+                    deactivateLocked(session.key)
+                } else {
+                    null
+                }
                 publishLocked()
+                unload
             }
         }
-        setActive(session.key, false)
+        unload?.let { runCatching { unloadIdleDefault(it) } }
     }
 
     suspend fun retainWarmRecognizer(

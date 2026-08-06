@@ -345,14 +345,16 @@ internal class DealerAsrProfileStore(
         DealerAsrSessionProfile(key, profile)
     }
 
-    fun endSession(session: DealerAsrSessionProfile) = synchronized(this) {
-        val count = activeSessions[session.key] ?: return@synchronized
+    fun endSession(session: DealerAsrSessionProfile): Boolean = synchronized(this) {
+        val count = activeSessions[session.key] ?: return@synchronized false
         if (count <= 1) activeSessions.remove(session.key) else activeSessions[session.key] = count - 1
-        if ((activeSessions[session.key] ?: 0) == 0) {
+        val ended = (activeSessions[session.key] ?: 0) == 0
+        if (ended) {
             warmRecognizers[session.key]?.expiresAtMillis =
                 nowMillis() + session.profile.warmRetentionSeconds * 1_000L
         }
         evictWarmLocked(nowMillis())
+        ended
     }
 
     fun retainWarmRecognizer(
