@@ -1,10 +1,15 @@
 package com.code2hack.pokerdealer.protocol
 
+import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
+import java.nio.ByteBuffer
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonObject
@@ -452,6 +457,49 @@ interface PokerFrameSocket : PokerEpochConnection {
     suspend fun receiveFrame(): ByteArray?
 }
 
+/** Length-prefixes frames without coupling the protocol owner to a socket implementation. */
+class LengthPrefixedPokerFrameSocket(
+    private val stream: DuplexByteStream,
+    private val closeAction: () -> Unit,
+) : PokerFrameSocket {
+    private val sendLock = Mutex()
+
+    override suspend fun sendFrame(frame: ByteArray) {
+        require(frame.isNotEmpty() && frame.size <= DEFAULT_MAX_FRAME_BYTES) {
+            "Poker frame size is invalid"
+        }
+        val header = ByteBuffer.allocate(Int.SIZE_BYTES).putInt(frame.size).array()
+        sendLock.withLock {
+            stream.write(header)
+            stream.write(frame)
+        }
+    }
+
+    override suspend fun receiveFrame(): ByteArray? {
+        val header = ByteArray(Int.SIZE_BYTES)
+        if (!readFully(header, allowEof = true)) return null
+        val size = ByteBuffer.wrap(header).int
+        require(size in 1..DEFAULT_MAX_FRAME_BYTES) { "Poker frame size is invalid" }
+        return ByteArray(size).also { readFully(it) }
+    }
+
+    override fun close() = closeAction()
+
+    private suspend fun readFully(buffer: ByteArray, allowEof: Boolean = false): Boolean {
+        var offset = 0
+        while (offset < buffer.size) {
+            val read = stream.read(buffer, offset, buffer.size - offset)
+            if (read < 0) {
+                if (allowEof && offset == 0) return false
+                throw IllegalStateException("Poker socket closed mid-frame")
+            }
+            require(read > 0) { "Poker socket made no read progress" }
+            offset += read
+        }
+        return true
+    }
+}
+
 interface PokerListenerSocket : PokerEpochConnection {
     suspend fun accept(): PokerFrameSocket
 }
@@ -460,12 +508,29 @@ fun interface PokerListenerFactory {
     fun open(): PokerListenerSocket
 }
 
+fun interface PokerConnectionConnector {
+    suspend fun connect(): PokerFrameSocket
+}
+
 fun interface PokerScheduledTask {
     fun cancel()
 }
 
 interface PokerScheduler {
     fun schedule(delayMs: Long, task: () -> Unit): PokerScheduledTask
+}
+
+class CoroutinePokerScheduler(
+    private val scope: CoroutineScope,
+) : PokerScheduler {
+    override fun schedule(delayMs: Long, task: () -> Unit): PokerScheduledTask {
+        require(delayMs >= 0) { "Poker schedule delay must not be negative" }
+        val job = scope.launch {
+            delay(delayMs)
+            task()
+        }
+        return PokerScheduledTask { job.cancel() }
+    }
 }
 
 fun interface PokerClock {
@@ -477,7 +542,7 @@ fun interface PokerClock {
  * a frame socket; this class owns framing, protocol negotiation, epochs, heartbeat, and retry.
  */
 class PokerConnectionOwner<Snapshot>(
-    private val factory: PokerListenerFactory,
+    private val factory: PokerListenerFactory?,
     private val scope: CoroutineScope,
     private val localOffer: PokerProtocolOffer = PokerProtocolOffer(),
     private val session: PokerConnectionSession<Snapshot> = PokerConnectionSession(localOffer),
@@ -487,7 +552,14 @@ class PokerConnectionOwner<Snapshot>(
     private val reconnect: PokerReconnectController = PokerReconnectController(),
     private val sessionId: String = UUID.randomUUID().toString(),
     private val messageId: () -> String = { UUID.randomUUID().toString() },
+    private val connector: PokerConnectionConnector? = null,
 ) {
+    init {
+        require((factory == null) xor (connector == null)) {
+            "Exactly one Poker connection source is required"
+        }
+    }
+
     private val lock = Any()
     private var running = false
     private var generation = 0L
@@ -495,6 +567,8 @@ class PokerConnectionOwner<Snapshot>(
     private var listenerJob: Job? = null
     private var retryTask: PokerScheduledTask? = null
     private var active: ActiveConnection? = null
+    private var nextAcceptOrdinal = 0L
+    private var newestAcceptOrdinal = 0L
 
     val isRunning: Boolean
         get() = synchronized(lock) { running }
@@ -565,19 +639,30 @@ class PokerConnectionOwner<Snapshot>(
         val job = scope.launch {
             var opened: PokerListenerSocket? = null
             try {
-                val bound = factory.open()
-                opened = bound
-                synchronized(lock) {
-                    if (!running || generation != expectedGeneration) {
-                        bound.close()
-                        return@launch
+                if (connector != null) {
+                    val socket = connector.connect()
+                    val ordinal = assignAcceptOrdinal(socket, expectedGeneration)
+                    if (ordinal != null) {
+                        handleConnection(socket, expectedGeneration, ordinal)
                     }
-                    listener = bound
-                    coroutineContext[Job]?.invokeOnCompletion { bound.close() }
-                }
-                while (true) {
-                    val socket = bound.accept()
-                    scope.launch { handleConnection(socket, expectedGeneration) }
+                } else {
+                    val bound = checkNotNull(factory).open()
+                    opened = bound
+                    synchronized(lock) {
+                        if (!running || generation != expectedGeneration) {
+                            bound.close()
+                            return@launch
+                        }
+                        listener = bound
+                        coroutineContext[Job]?.invokeOnCompletion { bound.close() }
+                    }
+                    while (true) {
+                        val socket = bound.accept()
+                        val ordinal = assignAcceptOrdinal(socket, expectedGeneration)
+                        if (ordinal != null) {
+                            scope.launch { handleConnection(socket, expectedGeneration, ordinal) }
+                        }
+                    }
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -603,6 +688,19 @@ class PokerConnectionOwner<Snapshot>(
         listenerJob = job
     }
 
+    private fun assignAcceptOrdinal(
+        socket: PokerFrameSocket,
+        expectedGeneration: Long,
+    ): Long? = synchronized(lock) {
+        if (!running || generation != expectedGeneration) {
+            socket.close()
+            return@synchronized null
+        }
+        val ordinal = ++nextAcceptOrdinal
+        newestAcceptOrdinal = ordinal
+        ordinal
+    }
+
     private fun scheduleFailure(expectedGeneration: Long) {
         synchronized(lock) {
             if (!running || generation != expectedGeneration || retryTask != null) return
@@ -611,10 +709,14 @@ class PokerConnectionOwner<Snapshot>(
         }
     }
 
-    private suspend fun handleConnection(socket: PokerFrameSocket, expectedGeneration: Long) {
+    private suspend fun handleConnection(
+        socket: PokerFrameSocket,
+        expectedGeneration: Long,
+        acceptOrdinal: Long,
+    ) {
         val job = kotlinx.coroutines.currentCoroutineContext()[Job]!!
         val runtime = synchronized(lock) {
-            if (!running || generation != expectedGeneration) {
+            if (!running || generation != expectedGeneration || acceptOrdinal != newestAcceptOrdinal) {
                 socket.close()
                 null
             } else {
@@ -696,7 +798,11 @@ class PokerConnectionOwner<Snapshot>(
     private suspend fun receiveEnvelope(runtime: ActiveConnection): ProtocolEnvelope? {
         val envelope = runtime.socket.receiveFrame()?.let(PokerFrameCodec::decode) ?: return null
         require(envelope.protocol == POKER_PROTOCOL_NAME) { "Unexpected Poker protocol" }
-        require(envelope.version == POKER_PROTOCOL_VERSION) { "Unexpected Poker protocol version" }
+        if (envelope.type != POKER_PROTOCOL_OFFER_TYPE) {
+            require(envelope.version == POKER_PROTOCOL_VERSION) {
+                "Unexpected Poker protocol version"
+            }
+        }
         require(envelope.epoch == 0L || envelope.epoch == runtime.epoch.value) {
             "Unexpected Poker epoch"
         }

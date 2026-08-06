@@ -1,7 +1,12 @@
 package com.code2hack.pokerdealer.protocol
 
 import java.util.ArrayDeque
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonObject
@@ -81,6 +86,28 @@ class PokerConnectionOwnerTest {
     }
 
     @Test
+    fun `outbound connector negotiates through the same owner and closes on stop`() = runTest {
+        val scheduler = FakeScheduler()
+        val connector = FakeConnector()
+        val owner = clientOwner(connector, scheduler, this)
+
+        owner.start()
+        scheduler.runNext()
+        runCurrent()
+        val socket = FakeFrameSocket().apply { offerPeerOffer() }
+        connector.offer(socket)
+        runCurrent()
+
+        assertEquals(
+            listOf(POKER_PROTOCOL_OFFER_TYPE, POKER_PROTOCOL_NEGOTIATED_TYPE),
+            socket.sentTypes(),
+        )
+        owner.stop()
+        runCurrent()
+        assertTrue(socket.closed)
+    }
+
+    @Test
     fun `new authenticated socket replaces the old epoch without closing the new one`() = runTest {
         val scheduler = FakeScheduler()
         val factory = FakeFactory()
@@ -110,6 +137,73 @@ class PokerConnectionOwnerTest {
         )
         owner.stop()
     }
+
+    @Test
+    fun `newest accepted socket wins even when the earlier handler runs last`() = runTest {
+        val dispatcher = LifoDispatcher()
+        val connectionScope = CoroutineScope(SupervisorJob() + dispatcher)
+        val scheduler = FakeScheduler()
+        val factory = FakeFactory()
+        val owner = owner(factory, scheduler, connectionScope)
+
+        owner.start()
+        scheduler.runNext()
+        dispatcher.runNext()
+        val listener = factory.listeners.single()
+        val first = FakeFrameSocket().apply { offerPeerOffer() }
+        val second = FakeFrameSocket().apply { offerPeerOffer() }
+        listener.offer(first)
+        listener.offer(second)
+        repeat(3) { dispatcher.runNext() }
+
+        assertTrue(first.closed)
+        assertEquals(
+            listOf(POKER_PROTOCOL_OFFER_TYPE, POKER_PROTOCOL_NEGOTIATED_TYPE),
+            second.sentTypes(),
+        )
+        assertFalse(second.closed)
+        owner.stop()
+        connectionScope.cancel()
+    }
+
+    @Test
+    fun `incompatible major reaches negotiation and fences mutations while retaining snapshot`() =
+        runTest {
+            val scheduler = FakeScheduler()
+            val factory = FakeFactory()
+            val session = PokerConnectionSession<String>().also {
+                it.retainCompleteSnapshot("complete snapshot")
+            }
+            val owner = owner(factory, scheduler, this, session)
+            owner.start()
+            scheduler.runNext()
+            runCurrent()
+            val socket = FakeFrameSocket().apply {
+                offerPeerOffer(
+                    major = POKER_PROTOCOL_MAJOR + 1,
+                    version = POKER_PROTOCOL_VERSION + 1,
+                )
+            }
+            factory.listeners.single().offer(socket)
+            runCurrent()
+
+            assertEquals(PokerConnectionState.READ_ONLY, session.state)
+            assertEquals("complete snapshot", session.completeSnapshot())
+            assertFalse(session.canMutate())
+            assertEquals(
+                PokerMutationResult.Rejected(PokerMutationRejection.READ_ONLY),
+                session.applyMutation(
+                    epoch = PokerConnectionEpoch(1),
+                    stream = POKER_CONTROL_STREAM,
+                    sequence = 2,
+                ) { "must not apply" },
+            )
+            assertEquals(
+                listOf(POKER_PROTOCOL_OFFER_TYPE, POKER_PROTOCOL_NEGOTIATED_TYPE),
+                socket.sentTypes(),
+            )
+            owner.stop()
+        }
 
     @Test
     fun `heartbeat sends three pings and closes an unanswered socket`() = runTest {
@@ -238,6 +332,21 @@ class PokerConnectionOwnerTest {
         ),
     )
 
+    private fun clientOwner(
+        connector: FakeConnector,
+        scheduler: FakeScheduler,
+        scope: CoroutineScope,
+    ) = PokerConnectionOwner<String>(
+        factory = null,
+        connector = connector,
+        scope = scope,
+        scheduler = scheduler,
+        clock = FakeClock(),
+        reconnect = PokerReconnectController(
+            PokerReconnectPolicy(jitterFraction = 0.0),
+        ),
+    )
+
     private class FakeFactory : PokerListenerFactory {
         var failuresRemaining = 0
         var openCount = 0
@@ -250,6 +359,21 @@ class PokerConnectionOwnerTest {
                 error("listener unavailable")
             }
             return FakeListener().also(listeners::add)
+        }
+    }
+
+    private class FakeConnector : PokerConnectionConnector {
+        private val sockets = Channel<PokerFrameSocket>(Channel.UNLIMITED)
+        var attempts = 0
+            private set
+
+        override suspend fun connect(): PokerFrameSocket {
+            attempts++
+            return sockets.receive()
+        }
+
+        fun offer(socket: PokerFrameSocket) {
+            sockets.trySend(socket)
         }
     }
 
@@ -277,15 +401,19 @@ class PokerConnectionOwnerTest {
         var closed = false
             private set
 
-        fun offerPeerOffer() {
+        fun offerPeerOffer(
+            major: Int = POKER_PROTOCOL_MAJOR,
+            version: Int = POKER_PROTOCOL_VERSION,
+        ) {
             offerPeerFrame(
                 type = POKER_PROTOCOL_OFFER_TYPE,
                 sequence = 1,
                 messageId = "peer-offer",
                 payload = PokerProtocolJson.encodeToJsonElement(
                     PokerProtocolOffer.serializer(),
-                    PokerProtocolOffer(),
+                    PokerProtocolOffer(major = major),
                 ).jsonObject,
+                version = version,
             )
         }
 
@@ -294,6 +422,7 @@ class PokerConnectionOwnerTest {
             sequence: Long,
             messageId: String = "peer-message-$sequence",
             payload: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.buildJsonObject { },
+            version: Int = POKER_PROTOCOL_VERSION,
         ) {
             incoming.trySend(
                 PokerFrameCodec.encode(
@@ -302,6 +431,7 @@ class PokerConnectionOwnerTest {
                         messageId = messageId,
                         sessionId = "dealer",
                         sentAtMs = 0,
+                        version = version,
                         sequence = sequence,
                         payload = payload,
                     ),
@@ -358,5 +488,18 @@ class PokerConnectionOwnerTest {
 
     private class FakeClock(var nowMs: Long = 0) : PokerClock {
         override fun nowMs(): Long = nowMs
+    }
+
+    private class LifoDispatcher : CoroutineDispatcher() {
+        private val queue = ArrayDeque<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queue.addFirst(block)
+        }
+
+        fun runNext() {
+            check(queue.isNotEmpty()) { "No queued coroutine" }
+            queue.removeFirst().run()
+        }
     }
 }

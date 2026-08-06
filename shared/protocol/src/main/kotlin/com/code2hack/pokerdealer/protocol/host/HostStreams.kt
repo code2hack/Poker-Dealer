@@ -122,7 +122,7 @@ class SocketHostTcpDialer(
             socket.cancellableIo {
                 connect(InetSocketAddress(endpoint.hostName, endpointPort), connectTimeoutMs)
             }
-            return SocketByteStream(socket)
+            return SocketDuplexByteStream(socket)
         } catch (failure: Throwable) {
             socket.close()
             throw failure
@@ -130,7 +130,8 @@ class SocketHostTcpDialer(
     }
 }
 
-private class SocketByteStream(
+/** A cancellable socket stream shared by route-neutral TCP clients. */
+class SocketDuplexByteStream(
     private val socket: Socket,
 ) : DuplexByteStream {
     override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int = socket.cancellableIo {

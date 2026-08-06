@@ -12,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
+import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
 import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
 import com.code2hack.pokerdealer.protocol.PokerClock
