@@ -202,6 +202,9 @@ class DealerActivity : ComponentActivity() {
                         dealerFontScale = dealerFontState,
                         onDealerFontScale = ::setDealerFontScale,
                         onPokerFontScale = { service?.setPokerFontScale(it) },
+                        onBeginPokerPairing = { host, port, code ->
+                            service?.beginPokerPairing(host, port, code)
+                        },
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
@@ -492,6 +495,7 @@ private fun DealerApp(
     dealerFontScale: PokerFontScaleState,
     onDealerFontScale: (Int) -> Unit,
     onPokerFontScale: (Int) -> Unit,
+    onBeginPokerPairing: (String, Int, String) -> Unit,
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
@@ -767,6 +771,11 @@ private fun DealerApp(
                     Text("Fold6 Termux")
                 }
             }
+            DealerPokerPairingPanel(
+                state = state,
+                serviceReady = setup.serviceReady,
+                onBegin = onBeginPokerPairing,
+            )
             PokerBindingsPanel(
                 state = state.pokerBindings,
                 connected = state.pokerConnected,

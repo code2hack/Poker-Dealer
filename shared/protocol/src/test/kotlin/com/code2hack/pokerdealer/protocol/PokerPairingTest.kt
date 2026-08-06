@@ -1,5 +1,7 @@
 package com.code2hack.pokerdealer.protocol
 
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.Signature
@@ -91,6 +93,25 @@ class PokerPairingTest {
         )
         assertFalse(enrollment.toString().contains(enrollment.displayCode))
         assertFalse(enrollment.toString().contains(enrollment.challenge.challengeId))
+    }
+
+    @Test
+    fun `pairing wire round trip carries only the PAKE transcript`() {
+        val poker = controller(
+            PokerPairingRole.POKER,
+            FakeIdentity(byteArrayOf(1, 2, 3)),
+            "123456",
+        )
+        val enrollment = poker.openEnrollment(0, physicalEnrollmentConfirmed = true)
+        val output = ByteArrayOutputStream()
+
+        PokerPairingWire.write(output, PokerPairingWire.challenge(enrollment.challenge))
+        val captured = output.toByteArray()
+        val decoded = PokerPairingWire.read(ByteArrayInputStream(captured))
+
+        assertEquals(POKER_PAIRING_CHALLENGE_TYPE, decoded?.type)
+        assertFalse(captured.toString(Charsets.UTF_8).contains(enrollment.displayCode))
+        assertTrue(decoded?.toString()?.contains("redacted") == true)
     }
 
     @Test

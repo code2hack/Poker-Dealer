@@ -503,7 +503,7 @@ class PokerPairingController(
     }
 
     /** Dealer-only commit after Poker acknowledges the verified proof. */
-    fun confirmDealerPairing(confirmation: PokerPairingConfirmation) {
+    fun confirmDealerPairing(confirmation: PokerPairingConfirmation): AuthenticatedPokerPeer {
         requireRole(PokerPairingRole.DEALER)
         val pending = pendingDealerRecord
         val challenge = pendingChallenge
@@ -559,6 +559,7 @@ class PokerPairingController(
         pendingClientProof = null
         pendingSessionKey = null
         failure = PokerPairingFailure.NONE
+        return AuthenticatedPokerPeer(this, fingerprint(pending.pokerPublicKey))
     }
 
     fun authenticatePeer(peerPublicKey: ByteArray): AuthenticatedPokerPeer {

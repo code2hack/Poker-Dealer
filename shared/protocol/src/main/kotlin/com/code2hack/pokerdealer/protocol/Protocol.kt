@@ -63,7 +63,7 @@ const val POKER_APPROVAL_PROJECTION_TYPE = "approval.projection"
 const val POKER_PRIMARY_ACTION_CAPABILITY = "primary-action.v1"
 const val POKER_PRIMARY_ACTION_TYPE = "primary.action"
 const val POKER_PRIMARY_ACTION_RESULT_TYPE = "primary.action.result"
-const val POKER_LISTENER_PORT = 39_817
+const val POKER_LISTENER_PORT = 8_341
 const val POKER_BINDINGS_CAPABILITY = "bindings.v1"
 
 val PokerProtocolJson = Json {

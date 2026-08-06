@@ -48,22 +48,22 @@ class AndroidPokerListenerFactory(
         }
         return AndroidPokerListenerSocket(server, pairing)
     }
+}
 
-    private fun activeWifiAddress(context: Context): Inet4Address {
-        val connectivity = context.getSystemService(ConnectivityManager::class.java)
-        val network = connectivity.activeNetwork
-            ?: throw PokerListenerUnavailableException("No active Wi-Fi network")
-        val capabilities = connectivity.getNetworkCapabilities(network)
-        if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
-            throw PokerListenerUnavailableException("The active network is not Wi-Fi")
-        }
-        return connectivity.getLinkProperties(network)?.linkAddresses
-            ?.asSequence()
-            ?.map { it.address }
-            ?.filterIsInstance<Inet4Address>()
-            ?.firstOrNull { !it.isLoopbackAddress && !it.isAnyLocalAddress }
-            ?: throw PokerListenerUnavailableException("The active Wi-Fi interface has no IPv4 address")
+internal fun activeWifiAddress(context: Context): Inet4Address {
+    val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    val network = connectivity.activeNetwork
+        ?: throw PokerListenerUnavailableException("No active Wi-Fi network")
+    val capabilities = connectivity.getNetworkCapabilities(network)
+    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
+        throw PokerListenerUnavailableException("The active network is not Wi-Fi")
     }
+    return connectivity.getLinkProperties(network)?.linkAddresses
+        ?.asSequence()
+        ?.map { it.address }
+        ?.filterIsInstance<Inet4Address>()
+        ?.firstOrNull { !it.isLoopbackAddress && !it.isAnyLocalAddress }
+        ?: throw PokerListenerUnavailableException("The active Wi-Fi interface has no IPv4 address")
 }
 
 private class AndroidPokerListenerSocket(

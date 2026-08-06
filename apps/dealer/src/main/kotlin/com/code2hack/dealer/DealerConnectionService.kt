@@ -151,6 +151,8 @@ import com.code2hack.pokerdealer.protocol.PokerFontScaleInstallResult
 import com.code2hack.pokerdealer.protocol.PokerFontScaleProtocol
 import com.code2hack.pokerdealer.protocol.PokerFontScaleState
 import com.code2hack.pokerdealer.protocol.PokerPairingController
+import com.code2hack.pokerdealer.protocol.PokerHotspotEndpoint
+import com.code2hack.pokerdealer.protocol.PokerPairingState
 import com.code2hack.pokerdealer.protocol.PokerWakeCapability
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
 import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
@@ -212,6 +214,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -235,6 +238,7 @@ class DealerConnectionService : Service() {
     private lateinit var pokerConnectionOwner: PokerConnectionOwner<Unit>
     private lateinit var pokerSnapshotSource: DealerPokerSnapshotSource
     private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
+    private lateinit var pokerPairingIdentity: AndroidKeystorePairingIdentity
     private lateinit var pokerPairing: PokerPairingController
     private lateinit var pokerFontStore: FilePokerFontScaleStore
     private val pokerSnapshotReady = CompletableDeferred<Unit>()
@@ -285,6 +289,8 @@ class DealerConnectionService : Service() {
     private var pokerBindingPersistenceAvailable = true
     private var pokerFontPersistenceAvailable = true
     private var pendingRequestPersistenceAvailable = true
+    @Volatile
+    private var pokerPairingBusy = false
 
     private val mutableState: MutableStateFlow<DealerUiState>
         get() = DealerServiceState.mutableState
@@ -300,8 +306,8 @@ class DealerConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        val pairingIdentity = AndroidKeystorePairingIdentity()
-        pokerPairing = pairingIdentity.pairingController(this)
+        pokerPairingIdentity = AndroidKeystorePairingIdentity()
+        pokerPairing = pokerPairingIdentity.pairingController(this)
         pokerFontStore = FilePokerFontScaleStore(
             noBackupFilesDir.resolve("poker-font-v1.json"),
         )
@@ -321,7 +327,7 @@ class DealerConnectionService : Service() {
         )
         pokerConnectionOwner = PokerConnectionOwner(
             factory = null,
-            connector = AndroidPokerClientConnector(pairingIdentity, pokerPairing),
+            connector = AndroidPokerClientConnector(pokerPairingIdentity, pokerPairing),
             scope = scope,
             localOffer = PokerProtocolOffer(
                 major = POKER_PROTOCOL_MAJOR,
@@ -372,7 +378,7 @@ class DealerConnectionService : Service() {
             val restoreErrors = mutableListOf<String>()
             val (restoredAttachments, restoredActions) = try {
                 threadAttachmentStore.read() to threadAttachmentStore.readActions()
-            } catch (failure: Throwable) {
+            } catch (_: Throwable) {
                 restoreErrors += "Unable to restore Dealer thread state: ${failure.message}"
                 emptySet<CodexThreadLocator>() to ThreadActionState()
             }
@@ -988,6 +994,66 @@ class DealerConnectionService : Service() {
     /** Requests one immediate, fenced Dealer-to-Poker reconnect attempt. */
     fun retryPokerConnection(): Long? =
         pokerConnectionOwner.retry(PokerReconnectTrigger.MANUAL_RETRY)
+
+    fun beginPokerPairing(host: String, port: Int, code: String): Boolean {
+        if (pokerPairingBusy) return false
+        val endpoint = runCatching { PokerHotspotEndpoint(host.trim(), port) }
+            .getOrElse {
+                mutableState.update { it.copy(error = "Poker endpoint is invalid") }
+                return false
+            }
+        if (code.trim().length != 6 || code.trim().any { it !in '0'..'9' }) {
+            mutableState.update { it.copy(error = "Pairing code must be six digits") }
+            return false
+        }
+        pokerPairingBusy = true
+        pokerConnectionOwner.stop()
+        mutableState.update {
+            it.copy(
+                pokerPairingBusy = true,
+                error = null,
+                pokerDiagnostics = it.pokerDiagnostics.copy(lastFailure = PokerDiagnosticFailure.NONE),
+            )
+        }
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    pokerPairingIdentity.createForExplicitEnrollment()
+                    val peer = PokerPairingEnrollmentClient(pokerPairing).enroll(endpoint, code)
+                    pokerPairing.updateEndpoint(peer, endpoint)
+                }
+                mutableState.update {
+                    it.copy(
+                        pokerPairingBusy = false,
+                        error = null,
+                        pokerDiagnostics = it.pokerDiagnostics.copy(
+                            pairing = pokerPairing.status.state,
+                            lastFailure = PokerDiagnosticFailure.NONE,
+                        ),
+                    )
+                }
+                pokerPairingBusy = false
+                pokerConnectionOwner.start()
+            } catch (cancelled: CancellationException) {
+                pokerPairingBusy = false
+                mutableState.update { it.copy(pokerPairingBusy = false) }
+                throw cancelled
+            } catch (_: Throwable) {
+                pokerPairingBusy = false
+                mutableState.update {
+                    it.copy(
+                        pokerPairingBusy = false,
+                        error = "Poker pairing failed: ${pokerPairing.status.failure}",
+                        pokerDiagnostics = it.pokerDiagnostics.copy(
+                            pairing = pokerPairing.status.state,
+                            lastFailure = PokerDiagnosticFailure.PAIRING,
+                        ),
+                    )
+                }
+            }
+        }
+        return true
+    }
 
     fun enableHost(
         config: DealerHostConnectionConfig,
@@ -5469,6 +5535,7 @@ data class DealerUiState(
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val pokerBindings: PokerBindingState = PokerBindingState(),
     val pokerConnected: Boolean = false,
+    val pokerPairingBusy: Boolean = false,
     val pokerFont: PokerFontScaleState = PokerFontScaleState(),
     val pokerDiagnostics: DealerPokerDiagnostics = DealerPokerDiagnostics(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),

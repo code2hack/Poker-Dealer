@@ -378,6 +378,7 @@ class PokerActivity : ComponentActivity() {
         }
         setContent {
             val photoState by photoController.state.collectAsState()
+            val pairingState by PokerPairingRuntime.state.collectAsState()
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
                     val fontScale by PokerPresentationRuntime.fontScale.collectAsState()
@@ -389,10 +390,27 @@ class PokerActivity : ComponentActivity() {
                             fontScale = density.fontScale * fontScale.factor,
                         ),
                     ) {
-                        PokerCardReader(screenState.value, photoState, camera, notice)
+                        PokerCardReader(
+                            state = screenState.value,
+                            photoState = photoState,
+                            camera = camera,
+                            notice = notice,
+                            pairingState = pairingState,
+                            onPair = { PokerListenerService.openEnrollment(this@PokerActivity, false) },
+                            onReplace = { PokerListenerService.openEnrollment(this@PokerActivity, true) },
+                        )
                     }
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (PokerListenerService.isEnabled(this)) {
+            PokerListenerService.resume(this)
+        } else {
+            PokerListenerService.enable(this)
         }
     }
 
@@ -521,6 +539,9 @@ private fun PokerCardReader(
     photoState: PokerPhotoState,
     camera: PokerCamera2Controller,
     notice: PokerTransientNotice?,
+    pairingState: PokerPairingUiState,
+    onPair: () -> Unit,
+    onReplace: () -> Unit,
 ) {
     if (photoState.phase != PokerPhotoPhase.IDLE) {
         PokerPhotoSurface(photoState, camera)
@@ -583,6 +604,7 @@ private fun PokerCardReader(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
+            PokerPairingPanel(pairingState, onPair, onReplace)
         }
     }
 }
