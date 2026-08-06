@@ -129,6 +129,7 @@ import com.code2hack.pokerdealer.protocol.sendBindingSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotConnectionHandler
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
 import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_LIVE_DELTA_CAPABILITY
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
@@ -229,6 +230,7 @@ class DealerConnectionService : Service() {
         super.onCreate()
         val pairingIdentity = AndroidKeystorePairingIdentity()
         val pokerPairing = pairingIdentity.pairingController(this)
+        val pokerScheduler = CoroutinePokerScheduler(scope)
         pokerSnapshotSource = DealerPokerSnapshotSource { mutableState.value }
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.DEALER,
@@ -236,6 +238,8 @@ class DealerConnectionService : Service() {
                 pokerSnapshotReady.await()
                 pokerSnapshotSource.current()
             },
+            scheduler = pokerScheduler,
+            scope = scope,
         )
         pokerConnectionOwner = PokerConnectionOwner(
             factory = null,
@@ -243,9 +247,13 @@ class DealerConnectionService : Service() {
             scope = scope,
             localOffer = PokerProtocolOffer(
                 major = POKER_PROTOCOL_MAJOR,
-                capabilities = setOf(POKER_BINDINGS_CAPABILITY, POKER_SNAPSHOT_CAPABILITY),
+                capabilities = setOf(
+                    POKER_BINDINGS_CAPABILITY,
+                    POKER_SNAPSHOT_CAPABILITY,
+                    POKER_LIVE_DELTA_CAPABILITY,
+                ),
             ),
-            scheduler = CoroutinePokerScheduler(scope),
+            scheduler = pokerScheduler,
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
             onConnected = { epoch, _ ->
@@ -949,7 +957,10 @@ class DealerConnectionService : Service() {
 
     private fun refreshPokerProjection(locator: CodexThreadLocator) {
         pokerComposerEpoch?.let { epoch ->
-            scope.launch { sendPokerProjection(epoch, locator) }
+            scope.launch {
+                sendPokerProjection(epoch, locator)
+                pokerSnapshotHandler.publish(pokerSnapshotSource.current())
+            }
         }
         refreshPokerUserInputProjection(locator)
     }
@@ -2840,6 +2851,7 @@ class DealerConnectionService : Service() {
                             error = retained.error ?: state.error,
                         )
                     }
+                    refreshPokerProjection(locator)
                     if (projected.requiresReread) {
                         scope.launch {
                             delay(INCOMPLETE_CARD_REREAD_DELAY_MILLIS)
@@ -3634,6 +3646,7 @@ class DealerConnectionService : Service() {
         val STRUCTURED_CARD_NOTIFICATIONS = setOf(
             "item/started",
             "item/completed",
+            "item/agentMessage/delta",
             "item/commandExecution/outputDelta",
             "item/fileChange/outputDelta",
             "item/fileChange/patchUpdated",

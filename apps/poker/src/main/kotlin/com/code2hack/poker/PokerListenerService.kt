@@ -35,6 +35,7 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshotConnectionHandler
 import com.code2hack.pokerdealer.protocol.PokerSnapshotInstaller
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
 import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_LIVE_DELTA_CAPABILITY
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,21 +59,28 @@ class PokerListenerService : Service() {
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val identity = AndroidKeystorePairingIdentity()
         val pairing = identity.pairingController(this)
+        val pokerScheduler = CoroutinePokerScheduler(serviceScope)
         PokerBindingRuntime.attachService { serviceScope.launch { sendBindingState() } }
         PokerSnapshotRuntime.clearForRestart()
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.POKER,
             installer = PokerSnapshotInstaller(),
             onInstalled = PokerSnapshotRuntime::install,
+            scheduler = pokerScheduler,
+            scope = serviceScope,
         )
         owner = PokerConnectionOwner(
             factory = AndroidPokerListenerFactory(this, identity, pairing),
             scope = serviceScope,
             localOffer = PokerProtocolOffer(
                 major = POKER_PROTOCOL_MAJOR,
-                capabilities = setOf(POKER_BINDINGS_CAPABILITY, POKER_SNAPSHOT_CAPABILITY),
+                capabilities = setOf(
+                    POKER_BINDINGS_CAPABILITY,
+                    POKER_SNAPSHOT_CAPABILITY,
+                    POKER_LIVE_DELTA_CAPABILITY,
+                ),
             ),
-            scheduler = CoroutinePokerScheduler(serviceScope),
+            scheduler = pokerScheduler,
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
             onConnected = { _, negotiation ->

@@ -45,6 +45,38 @@ class StructuredCardProjectionTest {
     }
 
     @Test
+    fun `agent message deltas grow one card and completion is authoritative`() {
+        var cards = apply(emptyList(), "agent-delta-notification-1.json").cards
+        cards = apply(cards, "agent-delta-notification-2.json").cards
+
+        assertEquals(CardRole.AGENT, cards.single().role)
+        assertEquals(CardSource.CODEX_AGENT_MESSAGE, cards.single().source)
+        assertEquals("streamed answer", cards.single().fullText)
+        assertTrue(!cards.single().contentComplete)
+
+        val completed = applyRaw(
+            cards,
+            """
+            {
+              "method": "item/completed",
+              "params": {
+                "threadId": "thr_u4090_m1",
+                "turnId": "turn_new",
+                "item": {
+                  "id": "item_agent_stream",
+                  "type": "agentMessage",
+                  "text": "Final answer"
+                }
+              }
+            }
+            """.trimIndent(),
+        ).cards.single()
+        assertEquals("Final answer", completed.fullText)
+        assertEquals(CardState.COMMITTED, completed.state)
+        assertTrue(completed.contentComplete)
+    }
+
+    @Test
     fun `file lifecycle refreshes paths and aggregate diff without truncation`() {
         var cards = apply(emptyList(), "file-item-started-notification.json").cards
         cards = apply(cards, "file-output-delta-notification.json").cards
