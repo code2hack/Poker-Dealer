@@ -144,6 +144,7 @@ class PokerPrimaryActionControllerTest {
             navigation = navigation,
             composer = composer,
             userInput = userInput,
+            approvals = PokerApprovalController(navigation),
             sendAction = { sent += it; true },
         )
         val context = primary.wheelContext()
@@ -311,6 +312,7 @@ class PokerPrimaryActionControllerTest {
             navigation = navigation,
             composer = composer,
             userInput = userInput,
+            approvals = PokerApprovalController(navigation),
             sendAction = { sent += it; true },
         )
         return ComposerFixture(locator, navigation, composer, primary, sent)

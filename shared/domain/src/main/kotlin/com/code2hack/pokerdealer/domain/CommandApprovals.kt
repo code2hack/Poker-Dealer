@@ -44,6 +44,8 @@ data class CommandApprovalRequest(
     val scope: CommandApprovalScope,
     val proposedExecpolicyAmendment: List<String>?,
     val offeredDecisions: Set<CommandApprovalDecision>,
+    /** Preserves the server's safe-choice order for clients that render every choice. */
+    val offeredDecisionOrder: List<CommandApprovalDecision> = emptyList(),
     val fingerprint: String,
     val createdAtMs: Long,
     val resolution: RequestResolutionState = RequestResolutionState.PENDING,

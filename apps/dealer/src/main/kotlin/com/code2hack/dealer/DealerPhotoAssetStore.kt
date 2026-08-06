@@ -57,7 +57,7 @@ internal class DealerPhotoAssetStore(context: Context) {
             return@withContext null
         }
         val bytes = file.readBytes()
-        if (PhotoAssetCodec.sha256(bytes) != expectedSha256 || !PhotoImageFormat.matches(bytes, mimeType)) {
+        if (!validatePhotoAsset(bytes, mimeType, expectedLength, expectedSha256)) {
             file.delete()
             return@withContext null
         }
@@ -95,7 +95,7 @@ internal class DealerPhotoAssetStore(context: Context) {
                 manager.getAllocatableBytes(manager.getUuidForPath(root))
             }.getOrNull()
         } ?: StatFs(root.path).availableBytes
-        return allocatable >= bytes
+        return photoStorageHasRoom(allocatable, bytes)
     }
 
     private fun stored(assetId: String) = root.resolve(safeName(assetId))
@@ -113,7 +113,7 @@ internal class DealerPhotoAssetStore(context: Context) {
 }
 
 internal object PhotoImageFormat {
-    fun detect(bytes: ByteArray): String? = when {
+    fun headerMime(bytes: ByteArray): String? = when {
         bytes.startsWith(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) -> "image/jpeg"
         bytes.startsWith(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) -> "image/png"
         bytes.size >= 12 && bytes.copyOfRange(0, 4).contentEquals("RIFF".encodeToByteArray()) &&
@@ -121,15 +121,33 @@ internal object PhotoImageFormat {
         bytes.size >= 6 && (bytes.copyOfRange(0, 6).contentEquals("GIF87a".encodeToByteArray()) ||
             bytes.copyOfRange(0, 6).contentEquals("GIF89a".encodeToByteArray())) -> "image/gif"
         else -> null
-    }?.takeIf { mime ->
+    }
+
+    fun detect(bytes: ByteArray): String? = headerMime(bytes)?.takeIf { mime ->
         val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         bounds.outWidth > 0 && bounds.outHeight > 0 &&
             (mime != "image/gif" || Movie.decodeByteArray(bytes, 0, bytes.size)?.duration() == 0)
     }
 
-    fun matches(bytes: ByteArray, mimeType: String): Boolean = detect(bytes) == mimeType
 }
+
+internal fun validatePhotoAsset(
+    bytes: ByteArray,
+    mimeType: String,
+    expectedLength: Long,
+    expectedSha256: String,
+    detectFormat: (ByteArray) -> String? = PhotoImageFormat::detect,
+): Boolean = bytes.size.toLong() == expectedLength &&
+    PhotoAssetCodec.sha256(bytes) == expectedSha256 &&
+    detectFormat(bytes) == mimeType
+
+internal fun photoStorageHasRoom(
+    availableBytes: Long,
+    requiredBytes: Long,
+    lowStorageBytes: Long = 0L,
+): Boolean = requiredBytes >= 0L && lowStorageBytes >= 0L &&
+    availableBytes >= requiredBytes && availableBytes - requiredBytes >= lowStorageBytes
 
 private fun ByteArray.startsWith(prefix: ByteArray): Boolean =
     size >= prefix.size && prefix.indices.all { this[it] == prefix[it] }

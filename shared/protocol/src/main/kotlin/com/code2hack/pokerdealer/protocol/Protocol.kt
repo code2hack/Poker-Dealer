@@ -8,8 +8,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerEditTarget
+import com.code2hack.pokerdealer.domain.CommandApprovalDecision
+import com.code2hack.pokerdealer.domain.CommandApprovalRequest
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.FileApprovalDecision
+import com.code2hack.pokerdealer.domain.FileApprovalRequest
+import com.code2hack.pokerdealer.domain.FileChangeContent
 import com.code2hack.pokerdealer.domain.PokerPrimaryAction
+import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
 import com.code2hack.pokerdealer.domain.UserInputRequest
@@ -44,6 +50,7 @@ const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
 const val POKER_USER_INPUT_PROJECTION_TYPE = "user-input.projection"
 const val POKER_USER_INPUT_MUTATION_TYPE = "user-input.mutation"
 const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
+const val POKER_APPROVAL_PROJECTION_TYPE = "approval.projection"
 const val POKER_PRIMARY_ACTION_CAPABILITY = "primary-action.v1"
 const val POKER_PRIMARY_ACTION_TYPE = "primary.action"
 const val POKER_PRIMARY_ACTION_RESULT_TYPE = "primary.action.result"
@@ -83,6 +90,169 @@ data class ComposerDraftProjection(
 )
 
 @Serializable
+enum class PokerApprovalKind {
+    COMMAND,
+    FILE_CHANGE,
+}
+
+@Serializable
+enum class PokerApprovalDecision(val wireName: String) {
+    ACCEPT("accept"),
+    ACCEPT_FOR_SESSION("acceptForSession"),
+    ACCEPT_WITH_EXECPOLICY_AMENDMENT("acceptWithExecpolicyAmendment"),
+    DECLINE("decline"),
+    CANCEL("cancel"),
+}
+
+@Serializable
+data class PokerApprovalScopeProjection(
+    val command: String? = null,
+    val workingDirectory: String? = null,
+    val networkHost: String? = null,
+    val networkProtocol: String? = null,
+    val reason: String? = null,
+    val grantRoot: String? = null,
+    val fileChanges: List<FileChangeContent> = emptyList(),
+)
+
+@Serializable
+data class PokerApprovalRequestProjection(
+    val locator: ServerRequestLocator,
+    val thread: CodexThreadLocator,
+    val turnId: String,
+    val itemId: String,
+    @SerialName("card_id") val cardId: String = "",
+    val kind: PokerApprovalKind,
+    val scope: PokerApprovalScopeProjection,
+    @SerialName("proposed_execpolicy_amendment")
+    val proposedExecpolicyAmendment: List<String>? = null,
+    val choices: List<PokerApprovalDecision> = emptyList(),
+    val fingerprint: String,
+    val complete: Boolean,
+    val actionable: Boolean,
+    val resolution: RequestResolutionState,
+    val decision: PokerApprovalDecision? = null,
+    val resolvedElsewhere: Boolean = false,
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String,
+    @SerialName("has_dealer_claim") val hasDealerClaim: Boolean = true,
+) {
+    val panelId: String
+        get() = "approval:${kind.name.lowercase()}:${locator.requestId}"
+}
+
+fun CommandApprovalRequest.toPokerApprovalProjection(
+    controlGeneration: Long,
+    connectionEpoch: Long,
+    modeSession: String,
+    hasDealerClaim: Boolean,
+): PokerApprovalRequestProjection {
+    val networkComplete = !scope.networkHost.isNullOrBlank() && !scope.networkProtocol.isNullOrBlank()
+    val commandComplete = !scope.command.isNullOrBlank()
+    val complete = (commandComplete || networkComplete) &&
+        (scope.networkHost == null && scope.networkProtocol == null || networkComplete)
+    val choices = offeredDecisionOrder.ifEmpty {
+        CommandApprovalDecision.entries.filter { it in offeredDecisions }
+    }.map(CommandApprovalDecision::toPokerApprovalDecision)
+    return PokerApprovalRequestProjection(
+        locator = locator,
+        thread = thread,
+        turnId = turnId,
+        itemId = itemId,
+        cardId = itemId,
+        kind = PokerApprovalKind.COMMAND,
+        scope = PokerApprovalScopeProjection(
+            command = scope.command,
+            workingDirectory = scope.workingDirectory,
+            networkHost = scope.networkHost,
+            networkProtocol = scope.networkProtocol,
+        ),
+        proposedExecpolicyAmendment = proposedExecpolicyAmendment,
+        choices = choices,
+        fingerprint = fingerprint,
+        complete = complete,
+        actionable = complete && commandApprovalIsSafe(scope) && choices.isNotEmpty(),
+        resolution = resolution,
+        decision = decision?.toPokerApprovalDecision(),
+        resolvedElsewhere = resolvedElsewhere,
+        controlGeneration = controlGeneration,
+        connectionEpoch = connectionEpoch,
+        modeSession = modeSession,
+        hasDealerClaim = hasDealerClaim,
+    )
+}
+
+fun FileApprovalRequest.toPokerApprovalProjection(
+    controlGeneration: Long,
+    connectionEpoch: Long,
+    modeSession: String,
+    hasDealerClaim: Boolean,
+): PokerApprovalRequestProjection {
+    val complete = reviewComplete && fileChanges.isNotEmpty() &&
+        fileChanges.all { it.path.isNotBlank() && it.kind.isNotBlank() }
+    return PokerApprovalRequestProjection(
+        locator = locator,
+        thread = thread,
+        turnId = turnId,
+        itemId = itemId,
+        cardId = itemId,
+        kind = PokerApprovalKind.FILE_CHANGE,
+        scope = PokerApprovalScopeProjection(
+            reason = reason,
+            grantRoot = grantRoot,
+            fileChanges = fileChanges,
+        ),
+        choices = FileApprovalDecision.entries.map(FileApprovalDecision::toPokerApprovalDecision),
+        fingerprint = fingerprint,
+        complete = complete,
+        actionable = complete && hasSafeFileScope(fileChanges),
+        resolution = resolution,
+        decision = decision?.toPokerApprovalDecision(),
+        resolvedElsewhere = resolvedElsewhere,
+        controlGeneration = controlGeneration,
+        connectionEpoch = connectionEpoch,
+        modeSession = modeSession,
+        hasDealerClaim = hasDealerClaim,
+    )
+}
+
+fun PokerApprovalDecision.toCommandApprovalDecision(): CommandApprovalDecision =
+    CommandApprovalDecision.entries.first { it.wireName == wireName }
+
+fun PokerApprovalDecision.toFileApprovalDecision(): FileApprovalDecision =
+    FileApprovalDecision.entries.first { it.wireName == wireName }
+
+private fun CommandApprovalDecision.toPokerApprovalDecision(): PokerApprovalDecision =
+    PokerApprovalDecision.entries.first { it.wireName == wireName }
+
+private fun FileApprovalDecision.toPokerApprovalDecision(): PokerApprovalDecision =
+    PokerApprovalDecision.entries.first { it.wireName == wireName }
+
+private fun commandApprovalIsSafe(scope: com.code2hack.pokerdealer.domain.CommandApprovalScope): Boolean {
+    val command = scope.command
+    if (command != null) {
+        // ponytail: conservative string gate until app-server exposes structured risk metadata.
+        val dangerous = Regex(
+            "(^|[;&|<>]|\\$\\(|`)\\s*(sudo|rm|rmdir|dd|mkfs|shutdown|reboot|poweroff|kill|pkill|chmod|chown|git\\s+(reset|clean)|curl|wget|ssh)\\b",
+            RegexOption.IGNORE_CASE,
+        )
+        if (dangerous.containsMatchIn(command) || command.any { it in ";&|<>*" } ||
+            command.contains("$(") || command.contains("`")) return false
+        return command.isNotBlank()
+    }
+    val host = scope.networkHost ?: return false
+    return host.isNotBlank() && !host.contains('*') && !host.contains('/') &&
+        !host.any(Char::isWhitespace) && !scope.networkProtocol.isNullOrBlank()
+}
+
+private fun hasSafeFileScope(changes: List<FileChangeContent>): Boolean =
+    changes.none { change ->
+        change.kind.contains("delete", ignoreCase = true) ||
+            change.path == "/" || change.path == "*" || change.path.contains("../")
+    }
+
+@Serializable
 data class PokerPrimaryActionTarget(
     val locator: CodexThreadLocator,
     val action: PokerPrimaryAction,
@@ -94,6 +264,7 @@ data class PokerPrimaryActionTarget(
     @SerialName("cursor_position") val cursorPosition: Int? = null,
     @SerialName("expected_turn_id") val expectedTurnId: String? = null,
     @SerialName("request_locator") val requestLocator: ServerRequestLocator? = null,
+    @SerialName("approval_decision") val approvalDecision: PokerApprovalDecision? = null,
     @SerialName("answer_revision") val answerRevision: Long? = null,
     @SerialName("request_fingerprint") val requestFingerprint: String? = null,
     @SerialName("operation_id") val operationId: String,
@@ -110,8 +281,14 @@ data class PokerPrimaryActionTarget(
                     "Request action cannot target a composer or turn"
                 }
                 require(requestLocator != null) { "Request action requires a request locator" }
-                require(answerRevision != null && answerRevision >= 0) {
-                    "Request action requires an answer revision"
+                if (approvalDecision == null) {
+                    require(answerRevision != null && answerRevision >= 0) {
+                        "Request action requires an answer revision"
+                    }
+                } else {
+                    require(answerRevision == null) {
+                        "Approval action cannot target an answer revision"
+                    }
                 }
                 require(!requestFingerprint.isNullOrBlank()) {
                     "Request action requires a request fingerprint"
@@ -120,7 +297,7 @@ data class PokerPrimaryActionTarget(
             PokerPrimaryAction.SEND,
             PokerPrimaryAction.STEER,
             -> {
-                require(requestLocator == null && answerRevision == null && requestFingerprint == null) {
+                require(requestLocator == null && approvalDecision == null && answerRevision == null && requestFingerprint == null) {
                     "Composer action cannot target a request"
                 }
                 require(draftRevision != null && draftRevision >= 0) {
@@ -138,7 +315,7 @@ data class PokerPrimaryActionTarget(
                 }
             }
             PokerPrimaryAction.INTERRUPT -> {
-                require(requestLocator == null && draftRevision == null && cursorPosition == null) {
+                require(requestLocator == null && approvalDecision == null && draftRevision == null && cursorPosition == null) {
                     "Interrupt cannot target a request or draft"
                 }
                 require(answerRevision == null && requestFingerprint == null) {

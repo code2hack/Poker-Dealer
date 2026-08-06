@@ -4,6 +4,12 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ThreadPileReducer
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.domain.RequestResolutionState
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.protocol.PokerApprovalDecision
+import com.code2hack.pokerdealer.protocol.PokerApprovalKind
+import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
+import com.code2hack.pokerdealer.protocol.PokerApprovalScopeProjection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -79,5 +85,37 @@ class PokerPilePagesRenderingTest {
         val afterPrecedingNeighbor = reducer.metadata().toPokerPileRenderProjection(cardText)
         assertEquals(busy, afterPrecedingNeighbor.focusedLocator)
         assertEquals("busy card", afterPrecedingNeighbor.visiblePage?.cardText)
+    }
+
+    @Test
+    fun `approval render projection retains complete scope and server choice order`() {
+        val thread = CodexThreadLocator("spark", "attention")
+        val reducer = ThreadPileReducer()
+        reducer.attach(thread, ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 1), atMs = 1)
+        reducer.view(thread)
+        val approval = PokerApprovalRequestProjection(
+            locator = ServerRequestLocator("spark", 1, "approval"),
+            thread = thread,
+            turnId = "turn",
+            itemId = "item",
+            kind = PokerApprovalKind.COMMAND,
+            scope = PokerApprovalScopeProjection(command = "echo hi", workingDirectory = "/work"),
+            choices = listOf(PokerApprovalDecision.DECLINE, PokerApprovalDecision.ACCEPT),
+            fingerprint = "fingerprint",
+            complete = true,
+            actionable = true,
+            resolution = RequestResolutionState.PENDING,
+            controlGeneration = 1,
+            connectionEpoch = 2,
+            modeSession = "mode",
+        )
+
+        val page = reducer.metadata().toPokerPileRenderProjection(
+            cardTextByLocator = mapOf(thread to "card"),
+            approvalProjectionsByLocator = mapOf(thread to listOf(approval)),
+        ).visiblePage
+
+        assertEquals(listOf(PokerApprovalDecision.DECLINE, PokerApprovalDecision.ACCEPT), page?.approvalProjections?.single()?.choices)
+        assertEquals("echo hi", page?.approvalProjections?.single()?.scope?.command)
     }
 }

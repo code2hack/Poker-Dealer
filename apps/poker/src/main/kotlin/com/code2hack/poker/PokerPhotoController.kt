@@ -45,6 +45,10 @@ internal data class PokerPhotoState(
     val locator: CodexThreadLocator? = null,
 )
 
+internal const val POKER_PHOTO_CAPTURE_TIMEOUT_MS = 5_000L
+internal const val POKER_PHOTO_TRANSFER_TIMEOUT_MS = 15_000L
+internal const val POKER_PHOTO_DELETE_TIMEOUT_MS = 5_000L
+
 internal fun photoZoomStep(value: Float, increase: Boolean): Float =
     (value * if (increase) 1.25f else 1f / 1.25f).coerceIn(1f, 8f)
 
@@ -62,6 +66,7 @@ internal class PokerPhotoController(
     private val openCamera: () -> Unit = {},
     private val closeCamera: () -> Unit = {},
     private val setCameraZoom: (Float) -> Unit = {},
+    private val storageAvailable: () -> Boolean = { true },
 ) {
     private val mutableState = MutableStateFlow(PokerPhotoState())
     private val waiters = mutableMapOf<String, CompletableDeferred<PhotoCaptureResult>>()
@@ -70,6 +75,7 @@ internal class PokerPhotoController(
     private var session: PhotoStartTarget? = null
     private var cursorPosition = 0
     private var draftRevision = 0L
+    private var captureJob: Job? = null
     private var transferJob: Job? = null
     private var noticeJob: Job? = null
     private var lastGesture: PokerOperation? = null
@@ -168,6 +174,10 @@ internal class PokerPhotoController(
     fun onCaptured(bytes: ByteArray, mimeType: String = "image/jpeg") {
         val target = session ?: return
         if (mutableState.value.phase != PokerPhotoPhase.CAPTURING) return
+        if (!storageAvailable()) {
+            fail("Photo not added")
+            return
+        }
         val assetTarget = PhotoAssetTarget(
             locator = target.locator,
             sessionId = target.sessionId,
@@ -187,7 +197,7 @@ internal class PokerPhotoController(
         )
         transferJob?.cancel()
         transferJob = scope.launch {
-            val result = withTimeoutOrNull(15_000L) {
+            val result = withTimeoutOrNull(POKER_PHOTO_TRANSFER_TIMEOUT_MS) {
                 if (!sendBegin(PhotoCaptureBegin(assetTarget, mimeType, bytes.size.toLong()))) return@withTimeoutOrNull null
                 PhotoAssetCodec.chunks(bytes).forEachIndexed { index, chunk ->
                     val sent = sendChunk(
@@ -214,21 +224,16 @@ internal class PokerPhotoController(
     }
 
     fun onPermissionDenied() {
-        if (session == null) return
-        session = null
-        committedAssetIds.clear()
-        closeCamera()
-        mutableState.value = PokerPhotoState(notice = "Camera permission denied")
+        if (session != null) forceExit("Camera permission denied")
     }
 
     fun onCameraFailure() {
-        if (mutableState.value.phase == PokerPhotoPhase.STARTING) {
-            fail("Photo not added")
-        } else if (mutableState.value.phase == PokerPhotoPhase.CAPTURING) {
-            fail("Photo not added")
-        } else if (mutableState.value.phase != PokerPhotoPhase.IDLE) {
-            mutableState.value = mutableState.value.copy(notice = "Photo not added")
-        }
+        if (mutableState.value.phase == PokerPhotoPhase.IDLE) return
+        forceExit(if (mutableState.value.phase == PokerPhotoPhase.PREVIEW) "Photo unavailable" else "Photo not added")
+    }
+
+    fun onConnectionLost() {
+        if (session != null) forceExit(null)
     }
 
     fun onCaptureRequested() {
@@ -267,41 +272,46 @@ internal class PokerPhotoController(
         deleteWaiters[operation.operationId] = waiter
         mutableState.value = mutableState.value.copy(phase = PokerPhotoPhase.DELETING, frozenBytes = null)
         scope.launch {
-            val result = withTimeoutOrNull(15_000L) {
+            val result = withTimeoutOrNull(POKER_PHOTO_DELETE_TIMEOUT_MS) {
                 if (!sendDelete(operation)) return@withTimeoutOrNull null
                 waiter.await()
             }
             deleteWaiters.remove(operation.operationId)
-            if (result == null) fail("Photo not added") else applyDeleteResult(result, assetId, cursor)
+            if (result == null) fail("Photo not deleted") else applyDeleteResult(result, assetId, cursor)
         }
     }
 
     fun exit() {
-        val target = session ?: return
-        transferJob?.cancel()
-        waiters.clear()
-        deleteWaiters.clear()
-        functionStartedAtMs = null
-        session = null
-        committedAssetIds.clear()
-        mutableState.value = PokerPhotoState()
-        closeCamera()
-        scope.launch { sendCancel(target) }
+        if (session == null) return
+        forceExit(null)
     }
 
     fun close() {
-        if (session != null) exit() else closeCamera()
+        if (session != null) forceExit(null) else closeCamera()
         noticeJob?.cancel()
     }
 
     private fun requestCapture() {
+        if (!storageAvailable()) {
+            fail("Photo not added")
+            return
+        }
         onCaptureRequested()
-        if (mutableState.value.phase == PokerPhotoPhase.CAPTURING) captureRequestedCallback?.invoke()
+        if (mutableState.value.phase != PokerPhotoPhase.CAPTURING) return
+        val callback = captureRequestedCallback ?: run {
+            onCaptureFailed()
+            return
+        }
+        captureJob?.cancel()
+        captureJob = scope.launch {
+            val bytes = withTimeoutOrNull(POKER_PHOTO_CAPTURE_TIMEOUT_MS) { callback() }
+            if (bytes == null) onCaptureFailed() else onCaptured(bytes)
+        }
     }
 
-    private var captureRequestedCallback: (() -> Unit)? = null
+    private var captureRequestedCallback: (suspend () -> ByteArray?)? = null
 
-    fun setCaptureRequestedCallback(callback: () -> Unit) {
+    fun setCaptureRequestedCallback(callback: suspend () -> ByteArray?) {
         captureRequestedCallback = callback
     }
 
@@ -345,7 +355,7 @@ internal class PokerPhotoController(
             )
             openCamera()
         } else {
-            fail("Photo not added")
+            fail("Photo not deleted")
         }
     }
 
@@ -353,6 +363,29 @@ internal class PokerPhotoController(
         val zoom = photoZoomStep(mutableState.value.zoom, factor > 1f)
         mutableState.value = mutableState.value.copy(zoom = zoom)
         setCameraZoom(zoom)
+    }
+
+    private fun forceExit(reason: String?) {
+        val target = session
+        captureJob?.cancel()
+        transferJob?.cancel()
+        waiters.clear()
+        deleteWaiters.clear()
+        functionStartedAtMs = null
+        session = null
+        committedAssetIds.clear()
+        mutableState.value = PokerPhotoState(notice = reason)
+        closeCamera()
+        noticeJob?.cancel()
+        if (target != null) {
+            scope.launch { sendCancel(target) }
+        }
+        if (reason != null) {
+            noticeJob = scope.launch {
+                delay(1_000L)
+                mutableState.value = mutableState.value.copy(notice = null)
+            }
+        }
     }
 
     private fun fail(reason: String) {

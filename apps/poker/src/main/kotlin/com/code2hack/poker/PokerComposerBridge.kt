@@ -16,6 +16,7 @@ import com.code2hack.pokerdealer.protocol.POKER_PHOTO_START_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_APPROVAL_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
@@ -32,6 +33,7 @@ import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.domain.RequestResolutionState
+import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
@@ -53,6 +55,8 @@ internal object PokerComposerBridge {
         MutableStateFlow<Map<ServerRequestLocator, UserInputRequestProjection>>(emptyMap())
     private val userInputResultState =
         MutableStateFlow<Map<String, UserInputAnswerMutationResult>>(emptyMap())
+    private val approvalProjectionState =
+        MutableStateFlow<Map<ServerRequestLocator, PokerApprovalRequestProjection>>(emptyMap())
     private val primaryResultState = MutableStateFlow<Map<String, PokerPrimaryActionResult>>(emptyMap())
     private val photoStartResultState = MutableStateFlow<Map<String, PhotoStartResult>>(emptyMap())
     private val photoCaptureResultState = MutableStateFlow<Map<String, PhotoCaptureResult>>(emptyMap())
@@ -66,6 +70,8 @@ internal object PokerComposerBridge {
         userInputProjectionState
     val userInputResults: StateFlow<Map<String, UserInputAnswerMutationResult>> =
         userInputResultState
+    val approvalProjections: StateFlow<Map<ServerRequestLocator, PokerApprovalRequestProjection>> =
+        approvalProjectionState
     val primaryResults: StateFlow<Map<String, PokerPrimaryActionResult>> = primaryResultState
     val photoStartResults: StateFlow<Map<String, PhotoStartResult>> = photoStartResultState
     val photoCaptureResults: StateFlow<Map<String, PhotoCaptureResult>> = photoCaptureResultState
@@ -77,6 +83,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        approvalProjectionState.value = emptyMap()
         primaryResultState.value = emptyMap()
         photoStartResultState.value = emptyMap()
         photoCaptureResultState.value = emptyMap()
@@ -89,6 +96,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        approvalProjectionState.value = emptyMap()
         primaryResultState.value = emptyMap()
         photoStartResultState.value = emptyMap()
         photoCaptureResultState.value = emptyMap()
@@ -128,6 +136,14 @@ internal object PokerComposerBridge {
                 )
                 userInputProjectionState.value = userInputProjectionState.value +
                     (projection.request.locator to projection)
+            }
+            POKER_APPROVAL_PROJECTION_TYPE -> {
+                val projection = PokerProtocolJson.decodeFromJsonElement(
+                    PokerApprovalRequestProjection.serializer(),
+                    envelope.payload,
+                )
+                approvalProjectionState.value = approvalProjectionState.value +
+                    (projection.locator to projection)
             }
             POKER_USER_INPUT_MUTATION_RESULT_TYPE -> {
                 val result = PokerProtocolJson.decodeFromJsonElement(

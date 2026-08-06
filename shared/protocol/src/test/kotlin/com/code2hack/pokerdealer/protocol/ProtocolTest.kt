@@ -7,6 +7,9 @@ import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
+import com.code2hack.pokerdealer.domain.CommandApprovalDecision
+import com.code2hack.pokerdealer.domain.CommandApprovalRequest
+import com.code2hack.pokerdealer.domain.CommandApprovalScope
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
@@ -210,5 +213,78 @@ class ProtocolTest {
             ),
         )
         assertTrue(PhotoAssetCodec.dataUrl("image/jpeg", bytes).startsWith("data:image/jpeg;base64,"))
+    }
+
+    @Test
+    fun `approval projection preserves safe choice order and exact primary decision`() {
+        val thread = CodexThreadLocator("spark", "thread")
+        val request = CommandApprovalRequest(
+            locator = ServerRequestLocator("spark", 4, "approval"),
+            thread = thread,
+            turnId = "turn",
+            itemId = "item",
+            approvalId = "approval-id",
+            scope = CommandApprovalScope("echo hi", "/work", null, null),
+            proposedExecpolicyAmendment = listOf("echo", "hi"),
+            offeredDecisions = setOf(CommandApprovalDecision.ACCEPT, CommandApprovalDecision.DECLINE),
+            offeredDecisionOrder = listOf(CommandApprovalDecision.DECLINE, CommandApprovalDecision.ACCEPT),
+            fingerprint = "fingerprint",
+            createdAtMs = 1,
+        )
+        val projection = request.toPokerApprovalProjection(
+            controlGeneration = 2,
+            connectionEpoch = 3,
+            modeSession = "approval-mode",
+            hasDealerClaim = true,
+        )
+        val target = PokerPrimaryActionTarget(
+            locator = thread,
+            action = PokerPrimaryAction.REQUEST,
+            wheelSession = "wheel",
+            controlGeneration = 2,
+            connectionEpoch = 3,
+            modeSession = "approval-mode",
+            requestLocator = request.locator,
+            approvalDecision = PokerApprovalDecision.DECLINE,
+            requestFingerprint = request.fingerprint,
+            operationId = "primary",
+        )
+
+        assertEquals(
+            listOf(PokerApprovalDecision.DECLINE, PokerApprovalDecision.ACCEPT),
+            projection.choices,
+        )
+        assertTrue(projection.complete)
+        assertTrue(projection.actionable)
+        assertEquals(
+            target,
+            PokerProtocolJson.decodeFromString<PokerPrimaryActionTarget>(
+                PokerProtocolJson.encodeToString(target),
+            ),
+        )
+    }
+
+    @Test
+    fun `approval projection fails closed for incomplete and destructive scope`() {
+        val base = CommandApprovalRequest(
+            locator = ServerRequestLocator("spark", 4, "approval"),
+            thread = CodexThreadLocator("spark", "thread"),
+            turnId = "turn",
+            itemId = "item",
+            approvalId = null,
+            scope = CommandApprovalScope(null, null, "*", "https"),
+            proposedExecpolicyAmendment = null,
+            offeredDecisions = setOf(CommandApprovalDecision.ACCEPT),
+            fingerprint = "fingerprint",
+            createdAtMs = 1,
+        )
+        val incomplete = base.toPokerApprovalProjection(1, 1, "mode", true)
+        assertTrue(incomplete.complete)
+        assertTrue(!incomplete.actionable)
+        assertTrue(
+            !base.copy(scope = CommandApprovalScope("rm -rf /", "/work", null, null))
+                .toPokerApprovalProjection(1, 1, "mode", true)
+                .actionable,
+        )
     }
 }

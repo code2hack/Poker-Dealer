@@ -100,6 +100,7 @@ import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_APPROVAL_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
@@ -133,6 +134,10 @@ import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationTarget
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
+import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
+import com.code2hack.pokerdealer.protocol.toCommandApprovalDecision
+import com.code2hack.pokerdealer.protocol.toFileApprovalDecision
+import com.code2hack.pokerdealer.protocol.toPokerApprovalProjection
 import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
 import com.code2hack.pokerdealer.protocol.PokerConnectionEpoch
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
@@ -221,6 +226,7 @@ class DealerConnectionService : Service() {
     private val photoTransfers = mutableMapOf<String, DealerPhotoTransfer>()
     private val photoResults = mutableMapOf<String, PhotoCaptureResult>()
     private val photoDeleteResults = mutableMapOf<String, PhotoDeleteResult>()
+    private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
@@ -366,6 +372,12 @@ class DealerConnectionService : Service() {
                 mutableState.value.userInputRequests.requests.values
                     .filter { it.thread in restoredAttachments && it.resolution != RequestResolutionState.RESOLVED }
                     .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
+                mutableState.value.commandApprovals.requests.values
+                    .filter { it.thread in restoredAttachments }
+                    .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
+                mutableState.value.fileApprovals.requests.values
+                    .filter { it.thread in restoredAttachments }
+                    .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
             }
             pokerSnapshotReady.complete(Unit)
             startRecoveryPersistence(recovered.pendingRequestsWritable)
@@ -409,6 +421,10 @@ class DealerConnectionService : Service() {
                         .map(UserInputRequest::thread)
                         .distinct()
                         .forEach(::refreshPokerUserInputProjection)
+                    (mutableState.value.commandApprovals.unresolved(hostId).map(CommandApprovalRequest::thread) +
+                        mutableState.value.fileApprovals.unresolved(hostId).map { it.thread })
+                        .distinct()
+                        .forEach(::refreshPokerApprovalProjection)
                 }
                 (connected - connectedHostIds).forEach { hostId ->
                     val generation = hostGenerations.getOrDefault(hostId, 0) + 1
@@ -1001,6 +1017,7 @@ class DealerConnectionService : Service() {
             }
         }
         refreshPokerUserInputProjection(locator)
+        refreshPokerApprovalProjection(locator)
     }
 
     private suspend fun onPokerConnected(epoch: PokerConnectionEpoch) {
@@ -1015,12 +1032,19 @@ class DealerConnectionService : Service() {
         pokerPrimaryResults.clear()
         pokerUserInputBindings.clear()
         pokerUserInputResults.clear()
+        pokerApprovalBindings.clear()
         mutableState.value.threadAttachments.attached
             .toList()
             .forEach { locator -> sendPokerProjection(epoch, locator) }
         mutableState.value.userInputRequests.requests.values
             .filter { it.thread in mutableState.value.threadAttachments.attached }
             .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
+        mutableState.value.commandApprovals.requests.values
+            .filter { it.thread in mutableState.value.threadAttachments.attached }
+            .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
+        mutableState.value.fileApprovals.requests.values
+            .filter { it.thread in mutableState.value.threadAttachments.attached }
+            .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
     }
 
     private suspend fun onPokerEnvelope(epoch: PokerConnectionEpoch, envelope: ProtocolEnvelope) {
@@ -1527,12 +1551,64 @@ class DealerConnectionService : Service() {
         pokerConnectionOwner.send(POKER_USER_INPUT_PROJECTION_TYPE, payload)
     }
 
+    private suspend fun sendPokerApprovalProjection(
+        epoch: PokerConnectionEpoch,
+        locator: ServerRequestLocator,
+    ) {
+        if (pokerComposerEpoch != epoch) return
+        val state = mutableState.value
+        val command = state.commandApprovals.requests[locator]
+        val file = state.fileApprovals.requests[locator]
+        val thread = command?.thread ?: file?.thread ?: return
+        if (thread !in state.threadAttachments.attached) return
+        val controlGeneration = state.threadAttachments.controlGeneration(thread)
+        val current = pokerApprovalBindings[locator]
+        val modeSession = current
+            ?.takeIf { it.epoch == epoch.value && it.controlGeneration == controlGeneration }
+            ?.modeSession
+            ?: UUID.randomUUID().toString()
+        pokerApprovalBindings[locator] = PokerApprovalBinding(
+            epoch = epoch.value,
+            controlGeneration = controlGeneration,
+            modeSession = modeSession,
+        )
+        val projection = command?.toPokerApprovalProjection(
+            controlGeneration = controlGeneration,
+            connectionEpoch = epoch.value,
+            modeSession = modeSession,
+            hasDealerClaim = state.threadAttachments.hasDealerClaim(thread),
+        ) ?: file!!.toPokerApprovalProjection(
+            controlGeneration = controlGeneration,
+            connectionEpoch = epoch.value,
+            modeSession = modeSession,
+            hasDealerClaim = state.threadAttachments.hasDealerClaim(thread),
+        )
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            PokerApprovalRequestProjection.serializer(),
+            projection,
+        ).jsonObject
+        pokerConnectionOwner.send(POKER_APPROVAL_PROJECTION_TYPE, payload)
+    }
+
     private fun refreshPokerUserInputProjection(locator: CodexThreadLocator) {
         pokerComposerEpoch?.let { epoch ->
             scope.launch {
                 mutableState.value.userInputRequests.requests.values
                     .filter { it.thread == locator }
                     .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
+            }
+        }
+    }
+
+    private fun refreshPokerApprovalProjection(locator: CodexThreadLocator) {
+        pokerComposerEpoch?.let { epoch ->
+            scope.launch {
+                mutableState.value.commandApprovals.requests.values
+                    .filter { it.thread == locator }
+                    .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
+                mutableState.value.fileApprovals.requests.values
+                    .filter { it.thread == locator }
+                    .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
             }
         }
     }
@@ -1685,26 +1761,64 @@ class DealerConnectionService : Service() {
                 "Primary connection epoch is stale"
             target.action == PokerPrimaryAction.REQUEST -> {
                 val requestLocator = target.requestLocator
-                val request = requestLocator?.let { state.userInputRequests.requests[it] }
-                val binding = requestLocator?.let(pokerUserInputBindings::get)
-                val buffer = requestLocator?.let(state.userInputAnswers::buffer)
-                when {
-                    requestLocator == null || request == null -> "User-input request is no longer known"
-                    target.locator != request.thread -> "Primary request thread target is stale"
-                    request.resolution != RequestResolutionState.PENDING ->
-                        "User-input request is no longer editable"
-                    !state.threadAttachments.hasDealerClaim(request.thread) ->
-                        "Dealer control is unavailable"
-                    binding == null || binding.epoch != epoch.value ||
-                        binding.controlGeneration != target.controlGeneration ||
-                        binding.modeSession != target.modeSession ->
-                        "Primary request control target is stale"
-                    target.answerRevision != buffer?.revision -> "User-input answer revision is stale"
-                    target.requestFingerprint != request.fingerprint ->
-                        "User-input request fingerprint is stale"
-                    buffer == null || !buffer.isComplete(request) ->
-                        "User-input response is incomplete"
-                    else -> null
+                if (target.approvalDecision != null) {
+                    val command = requestLocator?.let { state.commandApprovals.requests[it] }
+                    val file = requestLocator?.let { state.fileApprovals.requests[it] }
+                    val thread = command?.thread ?: file?.thread
+                    val binding = requestLocator?.let(pokerApprovalBindings::get)
+                    val projection = command?.toPokerApprovalProjection(
+                        controlGeneration = target.controlGeneration,
+                        connectionEpoch = target.connectionEpoch,
+                        modeSession = target.modeSession,
+                        hasDealerClaim = thread?.let(state.threadAttachments::hasDealerClaim) == true,
+                    ) ?: file?.toPokerApprovalProjection(
+                        controlGeneration = target.controlGeneration,
+                        connectionEpoch = target.connectionEpoch,
+                        modeSession = target.modeSession,
+                        hasDealerClaim = thread?.let(state.threadAttachments::hasDealerClaim) == true,
+                    )
+                    when {
+                        requestLocator == null || thread == null || projection == null ->
+                            "Approval request is no longer known"
+                        target.locator != thread -> "Primary approval thread target is stale"
+                        projection.resolution != RequestResolutionState.PENDING ->
+                            "Approval request is no longer pending"
+                        !state.threadAttachments.hasDealerClaim(thread) ->
+                            "Dealer control is unavailable"
+                        binding == null || binding.epoch != epoch.value ||
+                            binding.controlGeneration != target.controlGeneration ||
+                            binding.modeSession != target.modeSession ->
+                            "Primary approval control target is stale"
+                        target.answerRevision != null -> "Approval target has an answer revision"
+                        target.requestFingerprint != projection.fingerprint ->
+                            "Approval request fingerprint is stale"
+                        !projection.actionable -> "Approval scope is incomplete or unsafe"
+                        target.approvalDecision !in projection.choices ->
+                            "Approval choice is unavailable"
+                        else -> null
+                    }
+                } else {
+                    val request = requestLocator?.let { state.userInputRequests.requests[it] }
+                    val binding = requestLocator?.let(pokerUserInputBindings::get)
+                    val buffer = requestLocator?.let(state.userInputAnswers::buffer)
+                    when {
+                        requestLocator == null || request == null -> "User-input request is no longer known"
+                        target.locator != request.thread -> "Primary request thread target is stale"
+                        request.resolution != RequestResolutionState.PENDING ->
+                            "User-input request is no longer editable"
+                        !state.threadAttachments.hasDealerClaim(request.thread) ->
+                            "Dealer control is unavailable"
+                        binding == null || binding.epoch != epoch.value ||
+                            binding.controlGeneration != target.controlGeneration ||
+                            binding.modeSession != target.modeSession ->
+                            "Primary request control target is stale"
+                        target.answerRevision != buffer?.revision -> "User-input answer revision is stale"
+                        target.requestFingerprint != request.fingerprint ->
+                            "User-input request fingerprint is stale"
+                        buffer == null || !buffer.isComplete(request) ->
+                            "User-input response is incomplete"
+                        else -> null
+                    }
                 }
             }
             else -> {
@@ -1777,15 +1891,36 @@ class DealerConnectionService : Service() {
         when (target.action) {
             PokerPrimaryAction.REQUEST -> {
                 val requestLocator = checkNotNull(target.requestLocator)
-                val answers = state.userInputAnswers.buffer(requestLocator)
-                    .response(state.userInputRequests.requests.getValue(requestLocator))
-                respondUserInput(
-                    locator = requestLocator,
-                    answers = answers,
-                    outcome = UserInputOutcome.ANSWERED,
-                    requireControl = true,
-                    onOutcome = complete,
-                )
+                val approvalDecision = target.approvalDecision
+                if (approvalDecision != null) {
+                    val command = state.commandApprovals.requests[requestLocator]
+                    val file = state.fileApprovals.requests[requestLocator]
+                    if (command != null) {
+                        resolveCommandApproval(
+                            locator = requestLocator,
+                            decision = approvalDecision.toCommandApprovalDecision(),
+                            onOutcome = complete,
+                        )
+                    } else if (file != null) {
+                        resolveFileApproval(
+                            locator = requestLocator,
+                            decision = approvalDecision.toFileApprovalDecision(),
+                            onOutcome = complete,
+                        )
+                    } else {
+                        complete(PokerPrimaryActionOutcome.REJECTED)
+                    }
+                } else {
+                    val answers = state.userInputAnswers.buffer(requestLocator)
+                        .response(state.userInputRequests.requests.getValue(requestLocator))
+                    respondUserInput(
+                        locator = requestLocator,
+                        answers = answers,
+                        outcome = UserInputOutcome.ANSWERED,
+                        requireControl = true,
+                        onOutcome = complete,
+                    )
+                }
             }
             PokerPrimaryAction.SEND -> submitDraft(
                 locator = target.locator,
@@ -3067,6 +3202,7 @@ class DealerConnectionService : Service() {
                                     }
                                     wireCommandApprovals[parsed.request.locator] = wire
                                     recordThreadTransition(parsed.request.thread)
+                                    refreshPokerApprovalProjection(parsed.request.thread)
                                 } catch (failure: IllegalArgumentException) {
                                     appServer.reject(
                                         wire,
@@ -3175,6 +3311,7 @@ class DealerConnectionService : Service() {
                     }
                     wireFileApprovals[initial.request.locator] = wire
                     recordThreadTransition(initial.request.thread)
+                    refreshPokerApprovalProjection(initial.request.thread)
                 } catch (failure: IllegalArgumentException) {
                     scope.launch {
                         appServer.reject(wire, failure.message ?: "File approval identity conflict")
@@ -3193,6 +3330,7 @@ class DealerConnectionService : Service() {
                 wireFileApprovals[initial.request.locator] = wire
                 recordThreadTransition(initial.request.thread)
                 browseThread(initial.request.thread)
+                refreshPokerApprovalProjection(initial.request.thread)
                 scope.launch {
                     delay(INCOMPLETE_CARD_REREAD_DELAY_MILLIS)
                     if (hostGenerations[hostId] != generation ||
@@ -3217,6 +3355,7 @@ class DealerConnectionService : Service() {
                                 ),
                             )
                         }
+                        refreshPokerApprovalProjection(initial.request.thread)
                     } else {
                         val reason = "File approval diff remains incomplete after authoritative reread"
                         runCatching { appServer.reject(wire, reason) }
@@ -3231,6 +3370,7 @@ class DealerConnectionService : Service() {
                                     )
                                 }
                                 recordThreadTransition(initial.request.thread)
+                                refreshPokerApprovalProjection(initial.request.thread)
                             }
                             .onFailure {
                                 mutableState.update {
@@ -3238,6 +3378,7 @@ class DealerConnectionService : Service() {
                                         fileApprovals = it.fileApprovals.unknown(initial.request.locator),
                                     )
                                 }
+                                refreshPokerApprovalProjection(initial.request.thread)
                             }
                     }
                 }
@@ -3251,11 +3392,16 @@ class DealerConnectionService : Service() {
     fun resolveCommandApproval(
         locator: ServerRequestLocator,
         decision: CommandApprovalDecision,
+        onOutcome: (PokerPrimaryActionOutcome) -> Unit = {},
     ) {
         val state = mutableState.value
-        val request = state.commandApprovals.requests[locator] ?: return
+        val request = state.commandApprovals.requests[locator] ?: run {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         if (!state.threadAttachments.hasDealerClaim(request.thread)) {
             mutableState.update { it.copy(error = "Take control before resolving this request") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
@@ -3265,16 +3411,23 @@ class DealerConnectionService : Service() {
                 it.withCommandApprovals(it.commandApprovals.unknown(locator))
                     .copy(error = "Command approval is no longer connected; no response was replayed")
             }
+            refreshPokerApprovalProjection(request.thread)
+            onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             return
         }
         val responding = try {
             state.commandApprovals.begin(locator, decision)
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
-        if (responding == state.commandApprovals) return
+        if (responding == state.commandApprovals) {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         mutableState.update { it.withCommandApprovals(responding).copy(error = null) }
+        refreshPokerApprovalProjection(request.thread)
         scope.launch {
             try {
                 persistPendingRequestState()
@@ -3283,10 +3436,13 @@ class DealerConnectionService : Service() {
                     it.withCommandApprovals(it.commandApprovals.unknown(locator))
                         .copy(error = "Approval was not sent because recovery storage failed: ${failure.message}")
                 }
+                refreshPokerApprovalProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
                 return@launch
             }
             try {
                 appServer.respond(wire, CommandApprovalProtocol.response(request, decision))
+                onOutcome(PokerPrimaryActionOutcome.ACCEPTED)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -3297,6 +3453,8 @@ class DealerConnectionService : Service() {
                                 "approval response was not replayed",
                         )
                 }
+                refreshPokerApprovalProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
     }
@@ -3456,11 +3614,16 @@ class DealerConnectionService : Service() {
     fun resolveFileApproval(
         locator: ServerRequestLocator,
         decision: FileApprovalDecision,
+        onOutcome: (PokerPrimaryActionOutcome) -> Unit = {},
     ) {
         val state = mutableState.value
-        val request = state.fileApprovals.requests[locator] ?: return
+        val request = state.fileApprovals.requests[locator] ?: run {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         if (!state.threadAttachments.hasDealerClaim(request.thread)) {
             mutableState.update { it.copy(error = "Take control before resolving this request") }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer
@@ -3470,16 +3633,23 @@ class DealerConnectionService : Service() {
                 it.withApprovals(fileApprovals = it.fileApprovals.unknown(locator))
                     .copy(error = "File approval is no longer connected; no response was replayed")
             }
+            refreshPokerApprovalProjection(request.thread)
+            onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             return
         }
         val responding = try {
             state.fileApprovals.begin(locator, decision)
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
             return
         }
-        if (responding == state.fileApprovals) return
+        if (responding == state.fileApprovals) {
+            onOutcome(PokerPrimaryActionOutcome.REJECTED)
+            return
+        }
         mutableState.update { it.withApprovals(fileApprovals = responding).copy(error = null) }
+        refreshPokerApprovalProjection(request.thread)
         scope.launch {
             try {
                 persistPendingRequestState()
@@ -3488,10 +3658,13 @@ class DealerConnectionService : Service() {
                     it.withApprovals(fileApprovals = it.fileApprovals.unknown(locator))
                         .copy(error = "Approval was not sent because recovery storage failed: ${failure.message}")
                 }
+                refreshPokerApprovalProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
                 return@launch
             }
             try {
                 appServer.respond(wire, FileApprovalProtocol.response(decision))
+                onOutcome(PokerPrimaryActionOutcome.ACCEPTED)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -3502,6 +3675,8 @@ class DealerConnectionService : Service() {
                                 "file approval response was not replayed",
                         )
                 }
+                refreshPokerApprovalProjection(request.thread)
+                onOutcome(PokerPrimaryActionOutcome.UNKNOWN)
             }
         }
     }
@@ -3568,11 +3743,17 @@ class DealerConnectionService : Service() {
                             it.appServerGeneration == generation &&
                             it.requestId == resolved.requestId
                     }
+                    pokerApprovalBindings.keys.removeAll {
+                        it.hostId == hostId &&
+                            it.appServerGeneration == generation &&
+                            it.requestId == resolved.requestId
+                    }
                     resolvedQuestionLocator?.let { questionLocator ->
                         pokerComposerEpoch?.let { pokerEpoch ->
                             sendPokerUserInputProjection(pokerEpoch, questionLocator)
                         }
                     }
+                    refreshPokerApprovalProjection(CodexThreadLocator(hostId, resolved.threadId))
                     recordThreadTransition(CodexThreadLocator(hostId, resolved.threadId))
                     continue
                 }
@@ -3667,6 +3848,7 @@ class DealerConnectionService : Service() {
                         }
                         pokerUserInputBindings.keys.removeAll { it in settledQuestionLocators }
                         refreshPokerUserInputProjection(locator)
+                        refreshPokerApprovalProjection(locator)
                         recordThreadTransition(locator)
                         scope.launch {
                             draftMutex.withLock {
@@ -4234,6 +4416,7 @@ class DealerConnectionService : Service() {
         photoSessions.clear()
         photoResults.clear()
         photoDeleteResults.clear()
+        pokerApprovalBindings.clear()
         pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }
         synchronized(hostSessionConfigs) {
@@ -4593,6 +4776,12 @@ private data class PokerComposerBinding(
 )
 
 private data class PokerUserInputBinding(
+    val epoch: Long,
+    val controlGeneration: Long,
+    val modeSession: String,
+)
+
+private data class PokerApprovalBinding(
     val epoch: Long,
     val controlGeneration: Long,
     val modeSession: String,

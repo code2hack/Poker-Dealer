@@ -16,6 +16,7 @@ internal class PokerPrimaryActionController(
     private val navigation: PokerNavigationReducer,
     private val composer: PokerComposerController,
     private val userInput: PokerUserInputController,
+    private val approvals: PokerApprovalController,
     private val sendAction: suspend (PokerPrimaryActionTarget) -> Boolean,
 ) {
     private var consumedWheelSession: String? = null
@@ -23,6 +24,7 @@ internal class PokerPrimaryActionController(
         val locator: CodexThreadLocator,
         val context: PokerWheelContext,
         val requestLocator: com.code2hack.pokerdealer.domain.ServerRequestLocator? = null,
+        val approval: PokerApprovalSubmission? = null,
     )
 
     fun wheelContext(): PokerWheelContext = candidate()?.context ?: PokerWheelContext()
@@ -38,7 +40,7 @@ internal class PokerPrimaryActionController(
         consumedWheelSession = selection.sessionId
         val target = target(candidate, action, selection.sessionId)
         val locked = if (action == PokerPrimaryAction.REQUEST) {
-            userInput.beginPrimary(target)
+            if (candidate.approval != null) approvals.beginPrimary(target) else userInput.beginPrimary(target)
         } else {
             composer.beginPrimary(target)
         }
@@ -56,7 +58,11 @@ internal class PokerPrimaryActionController(
 
     fun applyResult(result: PokerPrimaryActionResult) {
         if (result.target.action == PokerPrimaryAction.REQUEST) {
-            userInput.applyPrimaryResult(result)
+            if (result.target.approvalDecision != null) {
+                approvals.applyPrimaryResult(result)
+            } else {
+                userInput.applyPrimaryResult(result)
+            }
         } else {
             composer.applyPrimaryResult(result)
         }
@@ -70,6 +76,35 @@ internal class PokerPrimaryActionController(
         val anchor = navigation.anchor(locator) ?: return null
 
         if (anchor.mode == PokerNavigationMode.REQUEST_PANEL) {
+            val approval = approvals.focusedSubmission()
+            if (approval != null) {
+                val projection = approval.projection
+                val requestLocator = projection.locator
+                if (approvals.isPrimaryLocked(requestLocator)) return null
+                val targetId = listOf(
+                    locator,
+                    "approval",
+                    requestLocator,
+                    projection.fingerprint,
+                    approval.decision,
+                    projection.controlGeneration,
+                    projection.connectionEpoch,
+                    projection.modeSession,
+                    projection.hasDealerClaim,
+                ).joinToString("|")
+                return Candidate(
+                    locator = locator,
+                    requestLocator = requestLocator,
+                    approval = approval,
+                    context = PokerWheelContext(
+                        targetId = targetId,
+                        controlGeneration = projection.controlGeneration,
+                        connectionEpoch = projection.connectionEpoch,
+                        modeSession = projection.modeSession,
+                        primaryAction = PokerPrimaryAction.REQUEST,
+                    ),
+                )
+            }
             val projection = userInput.focusedSubmission() ?: return null
             if (projection.modeSession.isBlank()) return null
             if (!projection.hasDealerClaim) return null
@@ -163,8 +198,11 @@ internal class PokerPrimaryActionController(
             cursorPosition = anchor?.cursorPosition.takeIf { composerDraftTarget },
             expectedTurnId = composerLayout?.activeTurnId.takeIf { turnTarget },
             requestLocator = request,
-            answerRevision = request?.let { userInput.projection(it)?.buffer?.revision },
-            requestFingerprint = request?.let { userInput.projection(it)?.request?.fingerprint },
+            approvalDecision = candidate.approval?.decision,
+            answerRevision = candidate.approval?.let { null }
+                ?: request?.let { userInput.projection(it)?.buffer?.revision },
+            requestFingerprint = candidate.approval?.projection?.fingerprint
+                ?: request?.let { userInput.projection(it)?.request?.fingerprint },
             operationId = UUID.randomUUID().toString(),
         )
     }
