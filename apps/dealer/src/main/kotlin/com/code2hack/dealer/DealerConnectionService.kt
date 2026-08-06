@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Binder
 import android.os.IBinder
 import android.os.PowerManager
@@ -77,6 +78,11 @@ import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UserInputParseResult
 import com.code2hack.pokerdealer.protocol.appserver.UserInputProtocol
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
+import com.code2hack.pokerdealer.protocol.PokerClock
+import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
+import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
+import com.code2hack.pokerdealer.protocol.PokerReconnectController
+import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
@@ -117,6 +123,8 @@ class DealerConnectionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var runJob: Job? = null
     private var tailnetJob: Job? = null
+    private lateinit var pokerConnectionOwner: PokerConnectionOwner<Unit>
+    private var pokerNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
@@ -156,6 +164,18 @@ class DealerConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        val pairingIdentity = AndroidKeystorePairingIdentity()
+        val pokerPairing = pairingIdentity.pairingController(this)
+        pokerConnectionOwner = PokerConnectionOwner(
+            factory = null,
+            connector = AndroidPokerClientConnector(pairingIdentity, pokerPairing),
+            scope = scope,
+            scheduler = CoroutinePokerScheduler(scope),
+            clock = PokerClock { System.currentTimeMillis() },
+            reconnect = PokerReconnectController(),
+        )
+        registerPokerNetworkCallback()
+        pokerConnectionOwner.start()
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
         retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
@@ -257,6 +277,10 @@ class DealerConnectionService : Service() {
             }
             ACTION_START_TAILNET -> startEmbeddedTailnet()
             ACTION_RESET_TAILNET -> resetEmbeddedTailnet()
+            ACTION_RETRY_POKER -> {
+                ensureForeground()
+                pokerConnectionOwner.retry(PokerReconnectTrigger.MANUAL_RETRY)
+            }
             else -> ensureForeground()
         }
         return START_NOT_STICKY
@@ -409,6 +433,10 @@ class DealerConnectionService : Service() {
         activeRun.cancel(CancellationException("Cancelled by user"))
         return true
     }
+
+    /** Requests one immediate, fenced Dealer-to-Poker reconnect attempt. */
+    fun retryPokerConnection(): Long? =
+        pokerConnectionOwner.retry(PokerReconnectTrigger.MANUAL_RETRY)
 
     fun enableHost(
         config: DealerHostConnectionConfig,
@@ -2543,6 +2571,28 @@ class DealerConnectionService : Service() {
         tailnetEngine.setNetwork(interfaceName, addresses.toString(), gateway)
     }
 
+    private fun registerPokerNetworkCallback() {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = requestPokerNetworkRetry()
+
+            override fun onLost(network: Network) = requestPokerNetworkRetry()
+
+            override fun onLinkPropertiesChanged(
+                network: Network,
+                linkProperties: android.net.LinkProperties,
+            ) = requestPokerNetworkRetry()
+        }
+        runCatching { connectivity.registerDefaultNetworkCallback(callback) }
+            .onSuccess { pokerNetworkCallback = callback }
+    }
+
+    private fun requestPokerNetworkRetry() {
+        if (pokerConnectionOwner.isRunning) {
+            pokerConnectionOwner.retry(PokerReconnectTrigger.NETWORK_CHANGE)
+        }
+    }
+
     @Synchronized
     fun stopEmbeddedTailnet(): Boolean {
         if (mutableState.value.tailnet.state in setOf(
@@ -2614,6 +2664,11 @@ class DealerConnectionService : Service() {
     }
 
     override fun onDestroy() {
+        pokerNetworkCallback?.let { callback ->
+            getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
+        }
+        pokerNetworkCallback = null
+        pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }
         synchronized(hostSessionConfigs) {
             hostSessionSecrets.values.forEach {
@@ -2771,6 +2826,7 @@ class DealerConnectionService : Service() {
         const val NOTIFICATION_ID = 4090
         const val THREAD_NOTIFICATION_ID = 29
         const val ACTION_CANCEL = "com.code2hack.dealer.action.CANCEL_M1"
+        const val ACTION_RETRY_POKER = "com.code2hack.dealer.action.RETRY_POKER"
         const val TAILNET_STATUS_INTERVAL_MILLIS = 1_000L
         const val INCOMPLETE_CARD_REREAD_DELAY_MILLIS = 500L
         const val DISCONNECT_RESOLUTION_WAIT_MILLIS = 1_000L

@@ -249,6 +249,13 @@ class PokerPairingController(
 
     val endpoint: PokerHotspotEndpoint? get() = record?.endpoint
 
+    /** The non-secret public key pinned for the next mutually-authenticated connection. */
+    val pinnedPeerPublicKey: ByteArray?
+        get() = record?.let { paired ->
+            (if (role == PokerPairingRole.DEALER) paired.pokerPublicKey else paired.dealerPublicKey)
+                .copyOf()
+        }
+
     fun reload() {
         window = null
         pendingDealerRecord = null

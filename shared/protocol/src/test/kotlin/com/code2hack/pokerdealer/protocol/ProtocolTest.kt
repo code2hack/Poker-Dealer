@@ -21,6 +21,8 @@ class ProtocolTest {
             messageId = "message-1",
             sessionId = "session-1",
             sentAtMs = 1_784_600_000_000,
+            epoch = 7,
+            stream = "cards",
             sequence = 184,
             conversationId = "conv-17",
             payload = buildJsonObject {
@@ -34,6 +36,15 @@ class ProtocolTest {
 
         assertEquals(envelope, decoded)
         assertTrue(encoded.contains("\"protocol\":\"poker-dealer\""))
+    }
+
+    @Test
+    fun `protocol offer ignores unknown optional fields`() {
+        val decoded = PokerProtocolJson.decodeFromString<PokerProtocolOffer>(
+            """{"major":1,"capabilities":["snapshot"],"required_capabilities":[],"future":true}""",
+        )
+
+        assertEquals(PokerProtocolOffer(capabilities = setOf("snapshot")), decoded)
     }
 
     @Test
