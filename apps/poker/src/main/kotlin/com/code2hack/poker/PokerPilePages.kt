@@ -1,10 +1,12 @@
 package com.code2hack.poker
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -13,14 +15,19 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.code2hack.pokerdealer.domain.Card
+import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerPileAnchor
 import com.code2hack.pokerdealer.domain.PokerPileMetadata
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 
 internal data class PokerPilePage(
@@ -30,6 +37,11 @@ internal data class PokerPilePage(
     val anchor: PokerPileAnchor? = null,
     val composerText: String? = null,
     val requestProjections: List<UserInputRequestProjection> = emptyList(),
+    val cards: List<Card> = emptyList(),
+    val available: Boolean = true,
+    val hostLabel: String = "",
+    val threadLabel: String = "",
+    val unreadCount: Int = 0,
 )
 
 internal data class PokerPileRenderProjection(
@@ -45,6 +57,9 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
     composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
     requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
+    cardsByLocator: Map<CodexThreadLocator, List<Card>> = emptyMap(),
+    metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
+    unreadCount: Int = 0,
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -55,6 +70,11 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 anchor = anchorByLocator[pile.locator],
                 composerText = composerTextByLocator[pile.locator],
                 requestProjections = requestProjectionsByLocator[pile.locator].orEmpty(),
+                cards = cardsByLocator[pile.locator].orEmpty(),
+                available = metadataByLocator[pile.locator]?.available ?: true,
+                hostLabel = metadataByLocator[pile.locator]?.hostLabel.orEmpty(),
+                threadLabel = metadataByLocator[pile.locator]?.threadLabel().orEmpty(),
+                unreadCount = unreadCount,
             )
         }
     },
@@ -69,20 +89,38 @@ internal fun PokerPilePages(
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
     composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
     requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
+    cardsByLocator: Map<CodexThreadLocator, List<Card>> = emptyMap(),
+    metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
+    unreadCount: Int = 0,
+    onCardFinalLineVisible: (CodexThreadLocator, String) -> Unit = { _, _ -> },
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
         anchorByLocator,
         composerTextByLocator,
         requestProjectionsByLocator,
+        cardsByLocator,
+        metadataByLocator,
+        unreadCount,
     )
     val page = projection.visiblePage ?: return
-    val lines = remember(page.locator, page.cardText) { page.cardText.split('\n') }
+    val lines = remember(page.locator, page.cardText, page.cards) { page.renderLines() }
     val listState: LazyListState = rememberLazyListState()
     val scrollOffset = page.anchor?.scrollOffset?.coerceIn(0, lines.lastIndex.coerceAtLeast(0)) ?: 0
 
-    LaunchedEffect(page.locator, page.cardText, scrollOffset) {
+    LaunchedEffect(page.locator, lines, scrollOffset) {
         listState.scrollToItem(scrollOffset)
+    }
+
+    LaunchedEffect(page.locator, lines) {
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.mapTo(mutableSetOf()) { it.index } }
+            .collect { visibleIndexes ->
+                lines.forEachIndexed { index, line ->
+                    if (index in visibleIndexes && line.finalLineForCard != null) {
+                        onCardFinalLineVisible(page.locator, line.finalLineForCard)
+                    }
+                }
+            }
     }
 
     Column(modifier = modifier.fillMaxSize()) {
@@ -95,10 +133,12 @@ internal fun PokerPilePages(
         ) {
             itemsIndexed(
                 items = lines,
-                key = { index, _ -> "${page.locator.hostId}:${page.locator.threadId}:$index" },
+                key = { index, line ->
+                    "${page.locator.hostId}:${page.locator.threadId}:$index:${line.finalLineForCard.orEmpty()}"
+                },
             ) { _, line ->
                 Text(
-                    text = if (line.isEmpty()) " " else line,
+                    text = if (line.text.isEmpty()) " " else line.text,
                     color = Color(0xFFE8EEF4),
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier.fillMaxWidth(),
@@ -173,13 +213,101 @@ internal fun PokerPilePages(
             }
         }
 
+        if (metadata.orderedPiles.size > 1) {
+            PokerPileFooter(page)
+        }
+    }
+}
+
+private data class PokerRenderLine(
+    val text: String,
+    val finalLineForCard: String? = null,
+)
+
+private fun PokerPilePage.renderLines(): List<PokerRenderLine> {
+    if (cards.isEmpty()) {
+        return cardText.split('\n').map(::PokerRenderLine)
+    }
+    return buildList {
+        cards.forEachIndexed { index, card ->
+            if (index > 0) add(PokerRenderLine(""))
+            val cardLines = card.fullText.split('\n')
+            cardLines.forEachIndexed { lineIndex, text ->
+                add(
+                    PokerRenderLine(
+                        text = text,
+                        finalLineForCard = card.id.takeIf {
+                            lineIndex == cardLines.lastIndex && card.isFinalized()
+                        },
+                    ),
+                )
+            }
+        }
+    }
+}
+
+private fun Card.isFinalized(): Boolean = contentComplete && state in setOf(
+    CardState.COMMITTED,
+    CardState.CORRECTED,
+    CardState.FAILED,
+)
+
+@Composable
+private fun PokerPileFooter(page: PokerPilePage) {
+    val hostLabel = collapseWhitespace(page.hostLabel).ifBlank { page.locator.hostId }
+    val threadLabel = collapseWhitespace(page.threadLabel).ifBlank { page.locator.threadId }
+    val leading = buildString {
+        if (!page.available) append("🔌·")
+        if (page.unreadCount > 0) {
+            val noun = if (page.unreadCount == 1) "card" else "cards"
+            append("${page.unreadCount} $noun unread·")
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF101820))
+            .padding(12.dp),
+    ) {
+        if (leading.isNotEmpty()) Text(leading, color = Color(0xFFAFC4D8))
+        Text(hostLabel, color = Color(0xFFAFC4D8), maxLines = 1, overflow = TextOverflow.Clip)
+        Text(":", color = Color(0xFFAFC4D8))
         Text(
-            "Swipe/drag to scroll · full Codex text retained",
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF101820))
-                .padding(12.dp),
+            threadLabel,
+            modifier = Modifier.weight(1f).basicMarquee(),
             color = Color(0xFFAFC4D8),
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
         )
     }
 }
+
+internal fun pokerFooterText(
+    available: Boolean,
+    unreadCount: Int,
+    hostLabel: String,
+    threadLabel: String,
+): String {
+    val host = collapseWhitespace(hostLabel).ifBlank { "unknown" }
+    val thread = collapseWhitespace(threadLabel).ifBlank { "unknown" }
+    val unread = if (unreadCount > 0) {
+        val noun = if (unreadCount == 1) "card" else "cards"
+        "$unreadCount $noun unread·"
+    } else {
+        ""
+    }
+    return buildString {
+        if (!available) append("🔌·")
+        append(unread)
+        append(host)
+        append(':')
+        append(thread)
+    }
+}
+
+private fun PokerSnapshotPileMetadata.threadLabel(): String =
+    collapseWhitespace(threadName.orEmpty())
+        .ifBlank { collapseWhitespace(threadPreview.orEmpty()) }
+        .ifBlank { locator.threadId }
+
+private fun collapseWhitespace(value: String): String = value.trim().replace(Regex("\\s+"), " ")

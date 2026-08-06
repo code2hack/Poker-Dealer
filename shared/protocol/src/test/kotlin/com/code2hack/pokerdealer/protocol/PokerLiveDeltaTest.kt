@@ -108,6 +108,21 @@ class PokerLiveDeltaTest {
     }
 
     @Test
+    fun `request-card changes require a complete snapshot`() {
+        val base = snapshot(1, card(text = "a", revision = 1, complete = true, state = CardState.COMMITTED))
+        val withRequest = base.copy(
+            revision = 2,
+            piles = base.piles.map { pile ->
+                pile.copy(
+                    requestCards = listOf(PokerSnapshotRequestCard("command:req-1", "card")),
+                )
+            },
+        )
+
+        assertNull(PokerLiveDeltaWire.build(base, withRequest))
+    }
+
+    @Test
     fun `receiver validates every split UTF-8 chunk offset`() {
         val base = snapshot(1, card(text = "a", revision = 1, complete = false))
         val growing = snapshot(2, card(text = "a🙂b", revision = 2, complete = false))

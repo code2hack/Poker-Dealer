@@ -72,7 +72,8 @@ object PokerLiveDeltaWire {
         require(maxChunkBytes > 0) { "Delta chunk size must be positive" }
         if (next.revision != previous.revision + 1 ||
             previous.projection != next.projection ||
-            previous.piles.map { it.metadata } != next.piles.map { it.metadata }
+            previous.piles.map { it.metadata } != next.piles.map { it.metadata } ||
+            previous.piles.map { it.requestCards } != next.piles.map { it.requestCards }
         ) {
             return null
         }

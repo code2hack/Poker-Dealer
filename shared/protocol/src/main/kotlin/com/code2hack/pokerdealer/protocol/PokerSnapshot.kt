@@ -32,6 +32,9 @@ data class PokerSnapshotPileMetadata(
     val stateChangedAtMs: Long,
     val available: Boolean,
     val outcome: TurnOutcome? = null,
+    val hostLabel: String = "",
+    val threadName: String? = null,
+    val threadPreview: String? = null,
 )
 
 @Serializable
@@ -46,6 +49,14 @@ data class PokerSnapshotProjection(
 data class PokerSnapshotPile(
     val metadata: PokerSnapshotPileMetadata,
     val cards: List<Card> = emptyList(),
+    val requestCards: List<PokerSnapshotRequestCard> = emptyList(),
+)
+
+@Serializable
+data class PokerSnapshotRequestCard(
+    val key: String,
+    val cardId: String? = null,
+    val finalized: Boolean = false,
 )
 
 @Serializable
@@ -226,6 +237,13 @@ object PokerSnapshotWire {
                 require(cardIds.add("$conversationId\u0000${card.id}")) {
                     "Snapshot contains duplicate cards"
                 }
+            }
+            val requestKeys = pile.requestCards.map(PokerSnapshotRequestCard::key)
+            require(requestKeys.all(String::isNotBlank)) {
+                "Snapshot request card key is blank"
+            }
+            require(requestKeys.size == requestKeys.toSet().size) {
+                "Snapshot contains duplicate request cards"
             }
         }
     }

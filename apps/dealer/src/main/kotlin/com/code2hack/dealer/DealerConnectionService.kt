@@ -3493,6 +3493,9 @@ class DealerConnectionService : Service() {
     }
 
     private fun recordThreadTransition(locator: CodexThreadLocator) {
+        scope.launch {
+            pokerSnapshotHandler.publish(pokerSnapshotSource.current())
+        }
         val state = mutableState.value
         val thread = state.threads[locator] ?: return
         val hostLabel = InitialCodexHosts.all.firstOrNull { it.id == locator.hostId }?.displayName ?: return

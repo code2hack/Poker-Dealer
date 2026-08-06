@@ -16,6 +16,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.lifecycleScope
+import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerCardLayout
 import com.code2hack.pokerdealer.domain.PokerInputController
@@ -26,6 +27,10 @@ import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
+import com.code2hack.pokerdealer.protocol.PokerSnapshotRequestCard
+import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
+import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
+import com.code2hack.pokerdealer.domain.RequestResolutionState
 import kotlinx.coroutines.launch
 
 class PokerActivity : ComponentActivity() {
@@ -34,6 +39,9 @@ class PokerActivity : ComponentActivity() {
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
     private var cardTextByLocator: Map<CodexThreadLocator, String> = emptyMap()
+    private var cardsByLocator: Map<CodexThreadLocator, List<Card>> = emptyMap()
+    private var metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap()
+    private var requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>> = emptyMap()
     private var foreground = false
     private val inputDeviceDescriptors = mutableMapOf<Int, String>()
     private val inputDeviceListener = object : InputManager.InputDeviceListener {
@@ -54,46 +62,56 @@ class PokerActivity : ComponentActivity() {
         navigation = PokerNavigationReducer(viewportLineCount = 12)
         composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
-        screenState = mutableStateOf(navigation.snapshot(cardTextByLocator, currentRequestProjections()))
+        screenState = mutableStateOf(currentScreenState())
         lifecycleScope.launch {
             PokerSnapshotRuntime.snapshot.collect { snapshot ->
+                cardsByLocator = snapshot?.piles.orEmpty().associate { it.metadata.locator to it.cards }
+                metadataByLocator = snapshot?.piles.orEmpty()
+                    .associate { it.metadata.locator to it.metadata }
+                requestCardsByLocator = snapshot?.piles.orEmpty()
+                    .associate { it.metadata.locator to it.requestCards }
                 cardTextByLocator = navigation.installPokerSnapshot(snapshot)
                 PokerComposerBridge.projections.value.values.forEach(composerController::applyProjection)
                 PokerComposerBridge.userInputProjections.value.values.forEach(userInputController::applyProjection)
-                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                screenState.value = currentScreenState()
+            }
+        }
+        lifecycleScope.launch {
+            PokerSnapshotRuntime.unreadCount.collect {
+                screenState.value = currentScreenState()
             }
         }
         lifecycleScope.launch {
             PokerComposerBridge.projections.collect { projections ->
                 projections.values.forEach(composerController::applyProjection)
-                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                screenState.value = currentScreenState()
             }
         }
         lifecycleScope.launch {
             PokerComposerBridge.results.collect { results ->
                 results.values.forEach(composerController::applyResult)
-                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                screenState.value = currentScreenState()
             }
         }
         lifecycleScope.launch {
             PokerComposerBridge.userInputProjections.collect { projections ->
                 projections.values.forEach(userInputController::applyProjection)
-                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                screenState.value = currentScreenState()
             }
         }
         lifecycleScope.launch {
             PokerComposerBridge.userInputResults.collect { results ->
                 results.values.forEach(userInputController::applyResult)
-                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                screenState.value = currentScreenState()
             }
         }
         val bindings = PokerBindingRuntime.controller
         val controller = PokerInputController(navigation)
         val onNavigationChanged = {
-            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+            screenState.value = currentScreenState()
         }
         val onBindingChanged = {
-            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+            screenState.value = currentScreenState()
             PokerBindingRuntime.notifyLocalChange()
         }
         input = PokerAndroidInputAdapter(
@@ -108,13 +126,13 @@ class PokerActivity : ComponentActivity() {
                     ) {
                         lifecycleScope.launch {
                             userInputController.selectFocused()
-                            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                            screenState.value = currentScreenState()
                         }
                     }
                     result.composerDeletion?.let { deletion ->
                         lifecycleScope.launch {
                             composerController.requestDeletion(deletion)
-                            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+                            screenState.value = currentScreenState()
                         }
                     }
                 },
@@ -176,6 +194,15 @@ class PokerActivity : ComponentActivity() {
             inputDeviceDescriptors[deviceId] = descriptor
         }
     }
+
+    private fun currentScreenState(): PokerScreenState = navigation.snapshot(
+        cardTextByLocator = cardTextByLocator,
+        requestProjectionsByLocator = currentRequestProjections(),
+        cardsByLocator = cardsByLocator,
+        metadataByLocator = metadataByLocator,
+        requestCardsByLocator = requestCardsByLocator,
+        unreadCount = PokerSnapshotRuntime.unreadCount.value,
+    )
 
 }
 
@@ -245,6 +272,43 @@ private fun PokerCardReader(state: PokerScreenState) {
         anchorByLocator = state.anchors,
         composerTextByLocator = state.composerTextByLocator,
         requestProjectionsByLocator = state.requestProjectionsByLocator,
+        cardsByLocator = state.cardsByLocator,
+        metadataByLocator = state.metadataByLocator,
+        unreadCount = state.unreadCount,
+        onCardFinalLineVisible = { locator, cardId ->
+            PokerSnapshotRuntime.markCardRead(
+                locator,
+                cardId,
+                finalized = true,
+                finalLineVisible = true,
+            )
+            state.requestCardsByLocator[locator].orEmpty()
+                .filter { it.cardId == cardId && it.finalized }
+                .forEach { request ->
+                    PokerSnapshotRuntime.markRequestRead(
+                        locator,
+                        request.key,
+                        finalized = true,
+                        finalLineVisible = true,
+                    )
+                }
+            state.requestProjectionsByLocator[locator].orEmpty()
+                .filter {
+                    it.cardId == cardId && it.request.resolution.isFinalized()
+                }
+                .forEach { projection ->
+                    PokerSnapshotRuntime.markRequestRead(
+                        locator,
+                        pokerUnreadRequestKey(
+                            "user-input",
+                            projection.request.locator.requestId,
+                            projection.request.fingerprint,
+                        ),
+                        finalized = true,
+                        finalLineVisible = true,
+                    )
+                }
+        },
         modifier = Modifier.fillMaxSize(),
     )
 }
@@ -254,12 +318,20 @@ private data class PokerScreenState(
     val anchors: Map<CodexThreadLocator, com.code2hack.pokerdealer.domain.PokerPileAnchor>,
     val cardTextByLocator: Map<CodexThreadLocator, String>,
     val composerTextByLocator: Map<CodexThreadLocator, String>,
-    val requestProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.UserInputRequestProjection>>,
+    val requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>>,
+    val cardsByLocator: Map<CodexThreadLocator, List<Card>>,
+    val metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata>,
+    val requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>>,
+    val unreadCount: Int,
 )
 
 private fun PokerNavigationReducer.snapshot(
     cardTextByLocator: Map<CodexThreadLocator, String>,
-    requestProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.UserInputRequestProjection>> = emptyMap(),
+    requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
+    cardsByLocator: Map<CodexThreadLocator, List<Card>> = emptyMap(),
+    metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
+    requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>> = emptyMap(),
+    unreadCount: Int = PokerSnapshotRuntime.unreadCount.value,
 ): PokerScreenState {
     val metadata = metadata()
     return PokerScreenState(
@@ -270,6 +342,10 @@ private fun PokerNavigationReducer.snapshot(
             layout(pile.locator)?.composer?.draft?.displayText?.let { pile.locator to it }
         }.toMap(),
         requestProjectionsByLocator = requestProjectionsByLocator,
+        cardsByLocator = cardsByLocator,
+        metadataByLocator = metadataByLocator,
+        requestCardsByLocator = requestCardsByLocator,
+        unreadCount = unreadCount,
     )
 }
 
@@ -281,8 +357,11 @@ private fun PokerSnapshotPileMetadata.evidence(): ThreadWorkEvidence = when (wor
     else -> error("Unknown snapshot work state: $workState")
 }
 
-private fun currentRequestProjections(): Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.UserInputRequestProjection>> =
+private fun currentRequestProjections(): Map<CodexThreadLocator, List<UserInputRequestProjection>> =
     PokerComposerBridge.userInputProjections.value.values.groupBy { it.request.thread }
+
+private fun RequestResolutionState.isFinalized(): Boolean = this != RequestResolutionState.PENDING &&
+    this != RequestResolutionState.RESPONDING
 
 private fun PokerSnapshotPile.layout(previous: PokerPileLayout? = null): PokerPileLayout {
     val previousCards = previous?.cards.orEmpty().associateBy(PokerCardLayout::id)
