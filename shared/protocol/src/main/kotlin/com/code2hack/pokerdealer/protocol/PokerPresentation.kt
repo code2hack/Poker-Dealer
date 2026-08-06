@@ -178,9 +178,10 @@ class PokerTransientNoticeSlot {
     fun show(notice: PokerTransientNotice): Entry = Entry(++nextToken, notice).also { current = it }
 
     @Synchronized
-    fun expire(token: Long) {
-        if (current?.token == token) current = null
-    }
+    fun expire(token: Long): Boolean = if (current?.token == token) {
+        current = null
+        true
+    } else false
 }
 
 @Serializable

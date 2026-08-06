@@ -13,8 +13,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /** One HUD overlay slot; a new notice replaces the old one and never queues. */
-internal object PokerNoticeRuntime {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+internal class PokerNoticeRuntime private constructor(
+    private val scope: CoroutineScope,
+) {
     private val slot = PokerTransientNoticeSlot()
     private val mutableNotice = MutableStateFlow<PokerTransientNotice?>(null)
     private var expiryJob: Job? = null
@@ -27,8 +28,22 @@ internal object PokerNoticeRuntime {
         expiryJob?.cancel()
         expiryJob = scope.launch {
             delay(notice.durationMs)
-            slot.expire(entry.token)
-            if (slot.value?.token == entry.token) mutableNotice.value = null
+            if (slot.expire(entry.token)) mutableNotice.value = null
         }
+    }
+
+    companion object {
+        private val production by lazy {
+            PokerNoticeRuntime(
+                CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            )
+        }
+
+        val notice: StateFlow<PokerTransientNotice?>
+            get() = production.notice
+
+        fun show(notice: PokerTransientNotice) = production.show(notice)
+
+        internal fun forTest(scope: CoroutineScope): PokerNoticeRuntime = PokerNoticeRuntime(scope)
     }
 }
