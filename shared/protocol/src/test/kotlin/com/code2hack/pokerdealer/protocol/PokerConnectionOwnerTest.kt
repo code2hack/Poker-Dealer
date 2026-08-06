@@ -187,9 +187,39 @@ class PokerConnectionOwnerTest {
             factory.listeners.single().offer(socket)
             runCurrent()
 
+            socket.offerPeerFrame(
+                type = POKER_PROTOCOL_NEGOTIATED_TYPE,
+                sequence = 2,
+                payload = PokerProtocolJson.encodeToJsonElement(
+                    PokerProtocolNegotiationMessage.serializer(),
+                    PokerProtocolNegotiationMessage(
+                        major = POKER_PROTOCOL_MAJOR + 1,
+                        readOnly = true,
+                    ),
+                ).jsonObject,
+                version = POKER_PROTOCOL_VERSION + 1,
+            )
+            socket.offerPeerFrame(
+                type = POKER_HEARTBEAT_PING_TYPE,
+                sequence = 3,
+                messageId = "newer-peer-ping",
+                version = POKER_PROTOCOL_VERSION + 1,
+            )
+            socket.offerPeerFrame(
+                type = POKER_HEARTBEAT_PONG_TYPE,
+                sequence = 4,
+                version = POKER_PROTOCOL_VERSION + 1,
+            )
+            runCurrent()
+
             assertEquals(PokerConnectionState.READ_ONLY, session.state)
             assertEquals("complete snapshot", session.completeSnapshot())
             assertFalse(session.canMutate())
+            assertFalse(socket.closed)
+            assertEquals(
+                listOf(0L, DEFAULT_POKER_HEARTBEAT_INTERVAL_MS),
+                scheduler.delays,
+            )
             assertEquals(
                 PokerMutationResult.Rejected(PokerMutationRejection.READ_ONLY),
                 session.applyMutation(
@@ -199,7 +229,11 @@ class PokerConnectionOwnerTest {
                 ) { "must not apply" },
             )
             assertEquals(
-                listOf(POKER_PROTOCOL_OFFER_TYPE, POKER_PROTOCOL_NEGOTIATED_TYPE),
+                listOf(
+                    POKER_PROTOCOL_OFFER_TYPE,
+                    POKER_PROTOCOL_NEGOTIATED_TYPE,
+                    POKER_HEARTBEAT_PONG_TYPE,
+                ),
                 socket.sentTypes(),
             )
             owner.stop()

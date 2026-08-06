@@ -744,6 +744,14 @@ class PokerConnectionOwner<Snapshot>(
             )
             val negotiation = session.negotiate(epoch, peerOffer)
                 ?: throw IllegalStateException("Stale Poker negotiation")
+            runtime.peerEnvelopeVersion = if (
+                negotiation.access == PokerProtocolAccess.READ_ONLY &&
+                !negotiation.majorCompatible
+            ) {
+                offer.version
+            } else {
+                null
+            }
             send(
                 epoch,
                 POKER_PROTOCOL_NEGOTIATED_TYPE,
@@ -799,7 +807,10 @@ class PokerConnectionOwner<Snapshot>(
         val envelope = runtime.socket.receiveFrame()?.let(PokerFrameCodec::decode) ?: return null
         require(envelope.protocol == POKER_PROTOCOL_NAME) { "Unexpected Poker protocol" }
         if (envelope.type != POKER_PROTOCOL_OFFER_TYPE) {
-            require(envelope.version == POKER_PROTOCOL_VERSION) {
+            require(
+                envelope.version == POKER_PROTOCOL_VERSION ||
+                    envelope.version == runtime.peerEnvelopeVersion,
+            ) {
                 "Unexpected Poker protocol version"
             }
         }
@@ -874,6 +885,7 @@ class PokerConnectionOwner<Snapshot>(
         val job: Job,
         val heartbeat: PokerHeartbeatMonitor,
         var heartbeatTask: PokerScheduledTask? = null,
+        var peerEnvelopeVersion: Int? = null,
     ) : PokerEpochConnection {
         override fun close() = cancel()
 
