@@ -63,6 +63,8 @@ import com.code2hack.pokerdealer.domain.FileApprovalDecision
 import com.code2hack.pokerdealer.domain.FileApprovalRequest
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.PermissionPreset
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
+import com.code2hack.pokerdealer.domain.PokerOperation
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadLifecycleAction
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
@@ -193,6 +195,11 @@ class DealerActivity : ComponentActivity() {
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
                         onLoginTailnet = ::openEmbeddedTailnetLogin,
+                        onSelectPokerBindingDevice = { service?.selectPokerBindingDevice(it) },
+                        onBeginPokerBinding = { service?.beginPokerBinding(it) },
+                        onRemovePokerBinding = { service?.removePokerBinding(it) },
+                        onResetPokerGlassesDefaults = { service?.resetPokerGlassesDefaults() },
+                        onClearPokerRemote = { service?.clearPokerRemote() },
                         onRefreshAsrCatalog = ::refreshAsrCatalog,
                     )
                 }
@@ -413,6 +420,11 @@ private fun DealerApp(
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
     onLoginTailnet: (String) -> Unit,
+    onSelectPokerBindingDevice: (PokerBindingDevice) -> Unit,
+    onBeginPokerBinding: (PokerOperation) -> Unit,
+    onRemovePokerBinding: (PokerOperation) -> Unit,
+    onResetPokerGlassesDefaults: () -> Unit,
+    onClearPokerRemote: () -> Unit,
     onRefreshAsrCatalog: () -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
@@ -636,6 +648,15 @@ private fun DealerApp(
                     Text("Fold6 Termux")
                 }
             }
+            PokerBindingsPanel(
+                state = state.pokerBindings,
+                connected = state.pokerConnected,
+                onSelectDevice = onSelectPokerBindingDevice,
+                onBeginBinding = onBeginPokerBinding,
+                onRemoveBinding = onRemovePokerBinding,
+                onResetGlassesDefaults = onResetPokerGlassesDefaults,
+                onClearRemote = onClearPokerRemote,
+            )
             if (hostSession?.enabled == true) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(

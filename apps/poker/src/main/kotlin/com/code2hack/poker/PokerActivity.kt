@@ -1,6 +1,7 @@
 package com.code2hack.poker
 
 import android.annotation.SuppressLint
+import android.hardware.input.InputManager
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -33,6 +34,19 @@ class PokerActivity : ComponentActivity() {
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
     private var cardTextByLocator: Map<CodexThreadLocator, String> = emptyMap()
+    private var foreground = false
+    private val inputDeviceDescriptors = mutableMapOf<Int, String>()
+    private val inputDeviceListener = object : InputManager.InputDeviceListener {
+        override fun onInputDeviceAdded(deviceId: Int) = rememberInputDevice(deviceId)
+
+        override fun onInputDeviceChanged(deviceId: Int) = rememberInputDevice(deviceId)
+
+        override fun onInputDeviceRemoved(deviceId: Int) {
+            inputDeviceDescriptors.remove(deviceId)?.let { descriptor ->
+                if (::input.isInitialized) input.onRemoteDisconnected(descriptor)
+            }
+        }
+    }
     private lateinit var userInputController: PokerUserInputController
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,10 +87,20 @@ class PokerActivity : ComponentActivity() {
                 screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
             }
         }
+        val bindings = PokerBindingRuntime.controller
+        val controller = PokerInputController(navigation)
+        val onNavigationChanged = {
+            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+        }
+        val onBindingChanged = {
+            screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
+            PokerBindingRuntime.notifyLocalChange()
+        }
         input = PokerAndroidInputAdapter(
             PokerBuiltInInputAdapter(
-                controller = PokerInputController(navigation),
-                onNavigationChanged = { screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections()) },
+                controller = controller,
+                bindings = bindings,
+                onNavigationChanged = onNavigationChanged,
                 onResult = { result ->
                     if (
                         result.interaction.phase == com.code2hack.pokerdealer.domain.PokerInteractionPhase.RELEASE &&
@@ -95,7 +119,18 @@ class PokerActivity : ComponentActivity() {
                     }
                 },
             ),
+            remote = PokerRemoteInputAdapter(
+                controller = controller,
+                bindings = bindings,
+                isForeground = { foreground },
+                onNavigationChanged = onNavigationChanged,
+                onBindingChanged = onBindingChanged,
+            ),
         )
+        PokerBindingRuntime.attachActivity { input.onConnectionLost() }
+        getSystemService(InputManager::class.java)
+            ?.registerInputDeviceListener(inputDeviceListener, null)
+        android.view.InputDevice.getDeviceIds().forEach(::rememberInputDevice)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
@@ -114,13 +149,34 @@ class PokerActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        foreground = hasFocus
+        PokerBindingRuntime.setForeground(hasFocus)
         if (!hasFocus && ::input.isInitialized) input.onFocusLost()
     }
 
     override fun onDestroy() {
+        getSystemService(InputManager::class.java)
+            ?.unregisterInputDeviceListener(inputDeviceListener)
+        inputDeviceDescriptors.clear()
+        PokerBindingRuntime.detachActivity()
+        PokerBindingRuntime.setForeground(false)
         if (::input.isInitialized) input.onDisconnected()
         super.onDestroy()
     }
+
+    private fun rememberInputDevice(deviceId: Int) {
+        val device = android.view.InputDevice.getDevice(deviceId)
+        val descriptor = device
+            ?.takeIf { pokerAndroidInputDeviceKind(it) == PokerAndroidInputDeviceKind.EXTERNAL_HID }
+            ?.descriptor
+            ?.takeIf(String::isNotBlank)
+        if (descriptor == null) {
+            inputDeviceDescriptors.remove(deviceId)
+        } else {
+            inputDeviceDescriptors[deviceId] = descriptor
+        }
+    }
+
 }
 
 /** Installs Dealer metadata without replacing Poker-local presentation state. */

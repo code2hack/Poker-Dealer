@@ -1,5 +1,10 @@
 package com.code2hack.pokerdealer.protocol
 
+import com.code2hack.pokerdealer.domain.PokerBindingControl
+import com.code2hack.pokerdealer.domain.PokerBindingController
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
+import com.code2hack.pokerdealer.domain.PokerBindingInstallResult
+import com.code2hack.pokerdealer.domain.PokerOperation
 import java.util.ArrayDeque
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
@@ -294,6 +299,123 @@ class PokerConnectionOwnerTest {
     }
 
     @Test
+    fun `connection callbacks carry dealer learning through poker capture and authoritative ack`() =
+        runTest {
+            val dealerScheduler = FakeScheduler()
+            val pokerScheduler = FakeScheduler()
+            val dealerConnector = FakeConnector()
+            val pokerConnector = FakeConnector()
+            val dealerBindings = PokerBindingController().also {
+                it.observeRemote("remote-a")
+                it.selectDevice(PokerBindingDevice.remote("remote-a"))
+                check(it.beginLearning(PokerOperation.TAP))
+            }
+            val pokerBindings = PokerBindingController()
+            lateinit var dealerOwner: PokerConnectionOwner<Unit>
+            lateinit var pokerOwner: PokerConnectionOwner<Unit>
+
+            dealerOwner = PokerConnectionOwner(
+                factory = null,
+                connector = dealerConnector,
+                scope = this,
+                scheduler = dealerScheduler,
+                clock = FakeClock(),
+                reconnect = PokerReconnectController(PokerReconnectPolicy(jitterFraction = 0.0)),
+                onConnected = { _, _ ->
+                    dealerOwner.sendBindingSnapshot(dealerBindings.map)
+                    val target = checkNotNull(dealerBindings.learningTarget)
+                    dealerOwner.send(
+                        POKER_BINDINGS_LEARN_TYPE,
+                        PokerBindingProtocol.learnPayload(
+                            target.device.descriptor,
+                            target.operation,
+                        ),
+                    )
+                },
+                onEnvelope = { _, envelope ->
+                    when (envelope.type) {
+                        POKER_BINDINGS_SNAPSHOT_TYPE -> {
+                            val candidate = PokerBindingProtocol.decodeSnapshot(envelope)
+                            if (dealerBindings.install(candidate) == PokerBindingInstallResult.INSTALLED) {
+                                dealerOwner.sendBindingSnapshot(dealerBindings.map)
+                            }
+                        }
+
+                        POKER_BINDINGS_ACK_TYPE -> {
+                            val ack = PokerBindingProtocol.decodeAck(envelope)
+                            if (ack.result in setOf(
+                                    PokerBindingInstallResult.INSTALLED,
+                                    PokerBindingInstallResult.DUPLICATE,
+                                )
+                            ) {
+                                dealerBindings.acknowledge(ack.revision)
+                            }
+                        }
+                    }
+                },
+            )
+            pokerOwner = PokerConnectionOwner(
+                factory = null,
+                connector = pokerConnector,
+                scope = this,
+                scheduler = pokerScheduler,
+                clock = FakeClock(),
+                reconnect = PokerReconnectController(PokerReconnectPolicy(jitterFraction = 0.0)),
+                onEnvelope = { _, envelope ->
+                    when (envelope.type) {
+                        POKER_BINDINGS_SNAPSHOT_TYPE -> {
+                            val candidate = PokerBindingProtocol.decodeSnapshot(envelope)
+                            val result = pokerBindings.install(candidate)
+                            pokerOwner.send(
+                                POKER_BINDINGS_ACK_TYPE,
+                                PokerBindingProtocol.ackPayload(candidate.revision, result),
+                            )
+                        }
+
+                        POKER_BINDINGS_LEARN_TYPE -> {
+                            val request = PokerBindingProtocol.decodeLearn(envelope)
+                            check(pokerBindings.beginLearning(
+                                PokerBindingDevice.remote(request.descriptor),
+                                request.operation,
+                            ))
+                            check(
+                                pokerBindings.capture(
+                                    PokerBindingControl.remote(request.descriptor, 42),
+                                ) == com.code2hack.pokerdealer.domain.PokerBindingCaptureResult.APPLIED,
+                            )
+                            pokerOwner.sendBindingSnapshot(pokerBindings.map)
+                        }
+                    }
+                },
+            )
+
+            val dealerSocket = FakeFrameSocket()
+            val pokerSocket = FakeFrameSocket()
+            dealerSocket.connect(pokerSocket)
+            pokerSocket.connect(dealerSocket)
+            dealerOwner.start()
+            pokerOwner.start()
+            dealerScheduler.runNext()
+            pokerScheduler.runNext()
+            runCurrent()
+            dealerConnector.offer(dealerSocket)
+            pokerConnector.offer(pokerSocket)
+            runCurrent()
+
+            assertEquals(dealerBindings.map, pokerBindings.map)
+            assertEquals(
+                PokerOperation.TAP,
+                pokerBindings.map.operationFor(PokerBindingControl.remote("remote-a", 42)),
+            )
+            assertEquals(
+                com.code2hack.pokerdealer.domain.PokerBindingSyncStatus.SYNCHRONIZED,
+                dealerBindings.state.syncStatus,
+            )
+            dealerOwner.stop()
+            pokerOwner.stop()
+        }
+
+    @Test
     fun `application envelopes reach the owner callback and can send a reply`() = runTest {
         val scheduler = FakeScheduler()
         val factory = FakeFactory()
@@ -466,9 +588,14 @@ class PokerConnectionOwnerTest {
 
     private class FakeFrameSocket : PokerFrameSocket {
         private val incoming = Channel<ByteArray>(Channel.UNLIMITED)
+        private var peer: FakeFrameSocket? = null
         val sent = mutableListOf<ByteArray>()
         var closed = false
             private set
+
+        fun connect(peer: FakeFrameSocket) {
+            this.peer = peer
+        }
 
         fun offerPeerOffer(
             major: Int = POKER_PROTOCOL_MAJOR,
@@ -510,6 +637,7 @@ class PokerConnectionOwnerTest {
 
         override suspend fun sendFrame(frame: ByteArray) {
             sent += frame
+            peer?.incoming?.trySend(frame)
         }
 
         override suspend fun receiveFrame(): ByteArray? = incoming.receive()

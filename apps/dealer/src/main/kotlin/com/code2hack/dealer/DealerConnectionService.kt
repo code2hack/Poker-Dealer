@@ -35,6 +35,11 @@ import com.code2hack.pokerdealer.domain.FileApprovalDecision
 import com.code2hack.pokerdealer.domain.FileApprovalState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.PokerBindingController
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
+import com.code2hack.pokerdealer.domain.PokerBindingInstallResult
+import com.code2hack.pokerdealer.domain.PokerBindingState
+import com.code2hack.pokerdealer.domain.PokerOperation
 import com.code2hack.pokerdealer.domain.ThreadStartCatalog
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.RevisionApplication
@@ -110,6 +115,17 @@ import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
 import com.code2hack.pokerdealer.protocol.PokerProtocolOffer
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
 import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
+import com.code2hack.pokerdealer.protocol.PokerBindingProtocol
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_ACK_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_LEARN_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_LEARNING_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_REMOTE_OBSERVED_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_REMOTE_FORGOTTEN_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_SNAPSHOT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PROTOCOL_MAJOR
+import com.code2hack.pokerdealer.protocol.PokerConnectionState
+import com.code2hack.pokerdealer.protocol.sendBindingSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotConnectionHandler
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
 import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
@@ -161,6 +177,9 @@ class DealerConnectionService : Service() {
     private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
     private val pokerSnapshotReady = CompletableDeferred<Unit>()
     private var pokerNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private val pokerBindingSendMutex = Mutex()
+    @Volatile
+    private var pendingPokerRemoteForget: String? = null
     private var pokerComposerEpoch: PokerConnectionEpoch? = null
     private val pokerComposerBindings = mutableMapOf<CodexThreadLocator, PokerComposerBinding>()
     private val pokerComposerResults = mutableMapOf<CodexThreadLocator, ComposerMutationResult>()
@@ -177,6 +196,7 @@ class DealerConnectionService : Service() {
     private val attachmentMutex = Mutex()
     private val draftMutex = Mutex()
     private val pendingRequestPersistenceMutex = Mutex()
+    private val pokerBindingPersistenceMutex = Mutex()
     private val notificationJobs = mutableMapOf<String, Job>()
     private val requestJobs = mutableMapOf<String, Job>()
     private val hostGenerations = mutableMapOf<String, Long>()
@@ -187,8 +207,10 @@ class DealerConnectionService : Service() {
     private val dealerOriginatedTurns = mutableSetOf<Pair<CodexThreadLocator, String>>()
     private val threadNotificationTracker = ThreadTransitionNotificationTracker()
     private val threadNotificationTargets = mutableMapOf<String, CodexThreadLocator>()
+    private val pokerBindings = PokerBindingController()
     private var connectedHostIds = emptySet<String>()
     private var activityVisible = false
+    private var pokerBindingPersistenceAvailable = true
     private var pendingRequestPersistenceAvailable = true
 
     private val mutableState: MutableStateFlow<DealerUiState>
@@ -220,13 +242,21 @@ class DealerConnectionService : Service() {
             connector = AndroidPokerClientConnector(pairingIdentity, pokerPairing),
             scope = scope,
             localOffer = PokerProtocolOffer(
-                capabilities = setOf(POKER_SNAPSHOT_CAPABILITY),
+                major = POKER_PROTOCOL_MAJOR,
+                capabilities = setOf(POKER_BINDINGS_CAPABILITY, POKER_SNAPSHOT_CAPABILITY),
             ),
             scheduler = CoroutinePokerScheduler(scope),
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
-            onConnected = { epoch, _ -> onPokerConnected(epoch) },
-            onEnvelope = { epoch, envelope -> onPokerEnvelope(epoch, envelope) },
+            onConnected = { epoch, _ ->
+                onPokerConnected(epoch)
+                sendCurrentPokerBindingsNow()
+            },
+            onEnvelope = { epoch, envelope ->
+                onPokerEnvelope(epoch, envelope)
+                handlePokerBindingEnvelope(envelope)
+            },
+            onStateChanged = ::handlePokerConnectionState,
             callbacks = pokerSnapshotHandler,
         )
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
@@ -255,6 +285,19 @@ class DealerConnectionService : Service() {
             }
             val recovered = stateRecoveryStore.read()
             restoreErrors += recovered.errors
+            pokerBindingPersistenceAvailable = recovered.pokerBindingsWritable
+            runCatching {
+                pokerBindings.restore(
+                    map = recovered.pokerBindings.map,
+                    knownRemoteDescriptors = recovered.pokerBindings.knownRemoteDescriptors,
+                )
+            }.onFailure { failure ->
+                restoreErrors += "Unable to restore Poker bindings: ${failure.message}"
+                pokerBindings.restore(
+                    map = recovered.pokerBindings.map,
+                    knownRemoteDescriptors = emptyList(),
+                )
+            }
             val restoredCards = restoredAttachments.flatMap { locator ->
                 runCatching { retainedCardStore.read(locator) }
                     .onFailure { failure ->
@@ -269,7 +312,9 @@ class DealerConnectionService : Service() {
                 projection = recovered.projection,
                 pendingRequests = recovered.pendingRequests,
                 error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
-            )
+            ).copy(pokerBindings = pokerBindings.state)
+            handlePokerConnectionState(pokerConnectionOwner.connectionState)
+            sendCurrentPokerBindings()
             pokerComposerEpoch?.let { epoch ->
                 restoredAttachments.forEach { locator -> sendPokerProjection(epoch, locator) }
                 mutableState.value.userInputRequests.requests.values
@@ -350,6 +395,205 @@ class DealerConnectionService : Service() {
             else -> ensureForeground()
         }
         return START_NOT_STICKY
+    }
+
+    fun selectPokerBindingDevice(device: PokerBindingDevice) {
+        if (!canEditPokerBindings()) return
+        pokerBindings.selectDevice(device)
+        publishPokerBindings(sendSnapshot = false)
+    }
+
+    fun beginPokerBinding(operation: PokerOperation): Boolean {
+        if (!canEditPokerBindings()) {
+            mutableState.update {
+                it.copy(error = "Poker must be connected and idle before binding")
+            }
+            return false
+        }
+        if (!pokerBindings.beginLearning(operation)) {
+            publishPokerBindings(sendSnapshot = false)
+            return false
+        }
+        val target = checkNotNull(pokerBindings.learningTarget)
+        publishPokerBindings(sendSnapshot = false)
+        scope.launch {
+            runCatching {
+                check(sendPokerBindingMessage(
+                    POKER_BINDINGS_LEARN_TYPE,
+                    PokerBindingProtocol.learnPayload(target.device.descriptor, target.operation),
+                )) { "Poker learning request was not sent" }
+            }.onFailure {
+                pokerBindings.connectionLost()
+                publishPokerBindings(sendSnapshot = false)
+            }
+        }
+        return true
+    }
+
+    fun removePokerBinding(operation: PokerOperation) {
+        if (!canEditPokerBindings()) return
+        pokerBindings.remove(operation)
+        publishPokerBindings()
+    }
+
+    fun resetPokerGlassesDefaults() {
+        if (!canEditPokerBindings()) return
+        pokerBindings.resetGlassesDefaults()
+        publishPokerBindings()
+    }
+
+    fun clearPokerRemote() {
+        if (!canEditPokerBindings()) return
+        pokerBindings.clearSelectedRemote()
+        publishPokerBindings()
+    }
+
+    fun forgetPokerRemote(descriptor: String) {
+        if (!canEditPokerBindings()) return
+        pokerBindings.forgetRemote(descriptor)
+        pendingPokerRemoteForget = descriptor
+        publishPokerBindings()
+    }
+
+    /** Called by the Poker connection when an exact Android descriptor is first observed. */
+    fun observePokerRemote(descriptor: String) {
+        if (pokerBindings.observeRemote(descriptor)) publishPokerBindings()
+    }
+
+    /** Called after the complete map has been acknowledged by Poker. */
+    fun acknowledgePokerBindings(revision: Long) {
+        if (pokerBindings.acknowledge(revision)) publishPokerBindings(sendSnapshot = false)
+    }
+
+    private fun canEditPokerBindings(): Boolean =
+        pokerConnectionOwner.isConnected && pokerBindings.learningTarget == null
+
+    private fun publishPokerBindings(sendSnapshot: Boolean = true) {
+        val state = pokerBindings.state
+        mutableState.update { it.copy(pokerBindings = state) }
+        if (pokerBindingPersistenceAvailable) {
+            scope.launch {
+                runCatching {
+                    pokerBindingPersistenceMutex.withLock {
+                        stateRecoveryStore.writePokerBindings(
+                            DealerPokerBindingSnapshot(
+                                map = state.map,
+                                knownRemoteDescriptors = state.knownRemoteDescriptors,
+                            ),
+                        )
+                    }
+                }.onFailure { failure ->
+                    pokerBindingPersistenceAvailable = false
+                    mutableState.update {
+                        it.copy(error = "Unable to retain Poker bindings: ${failure.message}")
+                    }
+                }
+            }
+        }
+        if (sendSnapshot) sendCurrentPokerBindings()
+    }
+
+    private fun sendCurrentPokerBindings() {
+        if (!pokerConnectionOwner.isConnected) return
+        scope.launch { sendCurrentPokerBindingsNow() }
+    }
+
+    private suspend fun sendCurrentPokerBindingsNow() = pokerBindingSendMutex.withLock {
+        if (!pokerConnectionOwner.isConnected) return@withLock
+        runCatching {
+            check(pokerConnectionOwner.sendBindingSnapshot(pokerBindings.map)) {
+                "Poker binding snapshot was not sent"
+            }
+            pendingPokerRemoteForget?.let { descriptor ->
+                check(pokerConnectionOwner.send(
+                    POKER_BINDINGS_REMOTE_FORGOTTEN_TYPE,
+                    PokerBindingProtocol.remoteForgottenPayload(descriptor),
+                    requireWritable = false,
+                )) { "Poker remote forget was not sent" }
+                pendingPokerRemoteForget = null
+            }
+        }.onFailure {
+            pokerBindings.connectionLost()
+            publishPokerBindings(sendSnapshot = false)
+        }
+    }
+
+    private suspend fun sendPokerBindingMessage(
+        type: String,
+        payload: JsonObject,
+        replyTo: String? = null,
+    ) = pokerBindingSendMutex.withLock {
+        pokerConnectionOwner.send(type, payload, replyTo, requireWritable = false)
+    }
+
+    private fun handlePokerConnectionState(state: PokerConnectionState) {
+        mutableState.update { it.copy(pokerConnected = state == PokerConnectionState.CONNECTED) }
+        if (state != PokerConnectionState.CONNECTED) {
+            pokerBindings.connectionLost()
+            publishPokerBindings(sendSnapshot = false)
+        }
+    }
+
+    private suspend fun handlePokerBindingEnvelope(envelope: com.code2hack.pokerdealer.protocol.ProtocolEnvelope) {
+        when (envelope.type) {
+            POKER_BINDINGS_REMOTE_OBSERVED_TYPE -> {
+                val observed = runCatching { PokerBindingProtocol.decodeRemoteObserved(envelope) }
+                    .getOrNull() ?: return
+                if (pokerBindings.observeRemote(observed.descriptor)) publishPokerBindings()
+            }
+
+            POKER_BINDINGS_REMOTE_FORGOTTEN_TYPE -> Unit
+
+            POKER_BINDINGS_SNAPSHOT_TYPE -> {
+                val candidate = runCatching { PokerBindingProtocol.decodeSnapshot(envelope) }
+                    .getOrNull() ?: return
+                when (val result = PokerBindingProtocol.installSnapshot(pokerBindings, envelope)) {
+                    PokerBindingInstallResult.INSTALLED -> publishPokerBindings()
+                    else -> {
+                        sendPokerBindingAck(candidate.revision, result, envelope.messageId)
+                        if (result != PokerBindingInstallResult.DUPLICATE) {
+                            sendCurrentPokerBindingsNow()
+                        }
+                    }
+                }
+            }
+
+            POKER_BINDINGS_ACK_TYPE -> {
+                val ack = runCatching { PokerBindingProtocol.decodeAck(envelope) }.getOrNull() ?: return
+                if (ack.result in setOf(
+                        PokerBindingInstallResult.INSTALLED,
+                        PokerBindingInstallResult.DUPLICATE,
+                    )
+                ) {
+                    acknowledgePokerBindings(ack.revision)
+                }
+            }
+
+            POKER_BINDINGS_LEARNING_TYPE -> {
+                val learning = runCatching { PokerBindingProtocol.decodeLearning(envelope) }
+                    .getOrNull() ?: return
+                if (!learning.active && pokerBindings.learningTarget != null) {
+                    pokerBindings.cancelLearning()
+                    publishPokerBindings(sendSnapshot = false)
+                }
+            }
+
+            else -> Unit
+        }
+    }
+
+    private suspend fun sendPokerBindingAck(
+        revision: Long,
+        result: PokerBindingInstallResult,
+        replyTo: String,
+    ) {
+        runCatching {
+            sendPokerBindingMessage(
+                POKER_BINDINGS_ACK_TYPE,
+                PokerBindingProtocol.ackPayload(revision, result),
+                replyTo = replyTo,
+            )
+        }
     }
 
     @Synchronized
@@ -3600,6 +3844,8 @@ data class DealerUiState(
     val fileApprovals: FileApprovalState = FileApprovalState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
+    val pokerBindings: PokerBindingState = PokerBindingState(),
+    val pokerConnected: Boolean = false,
     val hostSessions: Map<String, HostSessionState> = emptyMap(),
     val threads: Map<CodexThreadLocator, DiscoveredThread> = emptyMap(),
     val refreshingThreadHosts: Set<String> = emptySet(),

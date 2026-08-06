@@ -4,6 +4,9 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerCardLayout
+import com.code2hack.pokerdealer.domain.PokerBindingControl
+import com.code2hack.pokerdealer.domain.PokerBindingController
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
 import com.code2hack.pokerdealer.domain.PokerCancellationReason
 import com.code2hack.pokerdealer.domain.PokerInputController
 import com.code2hack.pokerdealer.domain.PokerInteractionPhase
@@ -14,6 +17,7 @@ import com.code2hack.pokerdealer.domain.PokerPileLayout
 import com.code2hack.pokerdealer.domain.PokerOperation
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,6 +38,153 @@ class PokerInputAdapterTest {
         assertEquals(PokerFunctionAction.UP, pokerFunctionAction(KeyEvent.ACTION_UP))
         assertEquals(PokerFunctionAction.CANCEL, pokerFunctionAction(KeyEvent.ACTION_MULTIPLE))
         assertNull(pokerFunctionAction(-1))
+
+        assertEquals(
+            PokerAndroidInputDeviceKind.BUILT_IN,
+            pokerAndroidInputDeviceKind(isExternal = false, isVirtual = false),
+        )
+        assertEquals(
+            PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            pokerAndroidInputDeviceKind(isExternal = true, isVirtual = false),
+        )
+        assertEquals(
+            PokerAndroidInputDeviceKind.OTHER,
+            pokerAndroidInputDeviceKind(isExternal = false, isVirtual = true),
+        )
+    }
+
+    @Test
+    fun `physical built-in function input stays glasses input and is never observed`() {
+        val bindings = PokerBindingController()
+        val builtInResults = mutableListOf<PokerInputController.Result>()
+        val adapter = androidAdapter(bindings, builtInResults = builtInResults)
+
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.BUILT_IN,
+            descriptor = "glasses-runtime-descriptor",
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_DOWN,
+            time = 10,
+        )))
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.BUILT_IN,
+            descriptor = "glasses-runtime-descriptor",
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_UP,
+            time = 20,
+        )))
+
+        assertEquals(listOf(PokerOperation.FN, PokerOperation.FN), builtInResults.map { it.interaction.operation })
+        assertTrue(bindings.state.knownRemoteDescriptors.isEmpty())
+    }
+
+    @Test
+    fun `external remote function key remains remote input`() {
+        val bindings = PokerBindingController()
+        val remote = PokerBindingDevice.remote("remote-a")
+        bindings.observeRemote(remote.descriptor)
+        bindings.selectDevice(remote)
+        bindings.install(
+            bindings.map
+                .bind(remote, PokerOperation.RIGHT, PokerBindingControl.remote(remote.descriptor, KeyEvent.KEYCODE_FUNCTION))
+                .bind(remote, PokerOperation.LEFT, PokerBindingControl.remote(remote.descriptor, 42)),
+        )
+        val navigation = navigation()
+        val builtInResults = mutableListOf<PokerInputController.Result>()
+        val adapter = androidAdapter(bindings, navigation, builtInResults)
+
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_DOWN,
+            time = 10,
+        )))
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_UP,
+            time = 20,
+        )))
+        assertEquals(second, navigation.metadata().focused)
+        assertTrue(builtInResults.isEmpty())
+
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = 42,
+            action = KeyEvent.ACTION_DOWN,
+            time = 30,
+        )))
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = remote.descriptor,
+            keyCode = 42,
+            action = KeyEvent.ACTION_UP,
+            time = 40,
+        )))
+        assertEquals(first, navigation.metadata().focused)
+        assertTrue(builtInResults.isEmpty())
+    }
+
+    @Test
+    fun `only external physical descriptors are observed`() {
+        val bindings = PokerBindingController()
+        var changed = 0
+        val adapter = androidAdapter(bindings, onBindingChanged = { changed++ })
+
+        assertTrue(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = "remote-a",
+            keyCode = 42,
+            action = KeyEvent.ACTION_DOWN,
+            time = 10,
+        )))
+        assertEquals(listOf("remote-a"), bindings.state.knownRemoteDescriptors)
+        assertEquals(1, changed)
+
+        assertFalse(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.BUILT_IN,
+            descriptor = "glasses-runtime-descriptor",
+            keyCode = 42,
+            action = KeyEvent.ACTION_DOWN,
+            time = 20,
+        )))
+        assertEquals(listOf("remote-a"), bindings.state.knownRemoteDescriptors)
+        assertEquals(1, changed)
+    }
+
+    @Test
+    fun `virtual or missing devices are not remote input`() {
+        val bindings = PokerBindingController()
+        val builtInResults = mutableListOf<PokerInputController.Result>()
+        val adapter = androidAdapter(bindings, builtInResults = builtInResults)
+
+        assertFalse(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.OTHER,
+            descriptor = "virtual-keyboard",
+            keyCode = KeyEvent.KEYCODE_FUNCTION,
+            action = KeyEvent.ACTION_DOWN,
+            time = 10,
+        )))
+        assertFalse(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.OTHER,
+            descriptor = null,
+            keyCode = 42,
+            action = KeyEvent.ACTION_DOWN,
+            time = 20,
+        )))
+        assertFalse(adapter.onKeyEvent(androidKey(
+            kind = PokerAndroidInputDeviceKind.EXTERNAL_HID,
+            descriptor = "",
+            keyCode = 42,
+            action = KeyEvent.ACTION_DOWN,
+            time = 30,
+        )))
+
+        assertTrue(bindings.state.knownRemoteDescriptors.isEmpty())
+        assertTrue(builtInResults.isEmpty())
     }
 
     @Test
@@ -54,6 +205,23 @@ class PokerInputAdapterTest {
         assertEquals(20L, update.interaction.durationMs)
         assertEquals(PokerInteractionPhase.RELEASE, release.interaction.phase)
         assertEquals(40L, release.interaction.durationMs)
+    }
+
+    @Test
+    fun `built-in interaction keeps the glasses map captured at begin`() {
+        val bindings = PokerBindingController()
+        val adapter = PokerBuiltInInputAdapter(
+            controller = PokerInputController(navigation()),
+            bindings = bindings,
+        )
+
+        adapter.onTouchEvent(touch(PokerTouchAction.DOWN, y = 0f, time = 10))
+        val classify = adapter.onTouchEvent(touch(PokerTouchAction.MOVE, y = 30f, time = 20)).single()
+        bindings.install(bindings.map.remove(PokerBindingDevice.GLASSES, PokerOperation.DOWN))
+        val release = adapter.onTouchEvent(touch(PokerTouchAction.UP, y = 30f, time = 30)).single()
+
+        assertEquals(PokerOperation.DOWN, classify.interaction.operation)
+        assertEquals(PokerOperation.DOWN, release.interaction.operation)
     }
 
     @Test
@@ -270,6 +438,33 @@ class PokerInputAdapterTest {
         monotonicNowMs = { nowMs },
         onNavigationChanged = onNavigationChanged,
     )
+
+    private fun androidAdapter(
+        bindings: PokerBindingController,
+        navigation: PokerNavigationReducer = navigation(),
+        builtInResults: MutableList<PokerInputController.Result> = mutableListOf(),
+        onBindingChanged: () -> Unit = {},
+    ) = PokerAndroidInputAdapter(
+        builtIn = PokerBuiltInInputAdapter(
+            controller = PokerInputController(navigation),
+            bindings = bindings,
+            onResult = builtInResults::add,
+        ),
+        remote = PokerRemoteInputAdapter(
+            controller = PokerInputController(navigation),
+            bindings = bindings,
+            onBindingChanged = onBindingChanged,
+        ),
+    )
+
+    private fun androidKey(
+        kind: PokerAndroidInputDeviceKind,
+        descriptor: String?,
+        keyCode: Int,
+        action: Int,
+        time: Long,
+        repeatCount: Int = 0,
+    ) = PokerAndroidKeyEvent(kind, descriptor, keyCode, action, time, repeatCount)
 
     private fun navigation(): PokerNavigationReducer = PokerNavigationReducer(viewportLineCount = 3).also { navigation ->
         navigation.attach(

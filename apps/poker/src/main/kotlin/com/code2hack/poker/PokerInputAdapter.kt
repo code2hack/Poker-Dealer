@@ -1,9 +1,17 @@
 package com.code2hack.poker
 
+import android.os.Build
 import android.os.SystemClock
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import com.code2hack.pokerdealer.domain.PokerCancellationReason
+import com.code2hack.pokerdealer.domain.PokerBindingCaptureResult
+import com.code2hack.pokerdealer.domain.PokerBindingControl
+import com.code2hack.pokerdealer.domain.PokerBindingController
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
+import com.code2hack.pokerdealer.domain.PokerBindingMap
+import com.code2hack.pokerdealer.domain.PokerGlassesGesture
 import com.code2hack.pokerdealer.domain.PokerInputController
 import com.code2hack.pokerdealer.domain.PokerInputSource
 import com.code2hack.pokerdealer.domain.PokerInteraction
@@ -67,9 +75,41 @@ internal data class PokerFunctionEvent(
     }
 }
 
+internal enum class PokerAndroidInputDeviceKind {
+    BUILT_IN,
+    EXTERNAL_HID,
+    OTHER,
+}
+
+internal fun pokerAndroidInputDeviceKind(
+    isExternal: Boolean,
+    isVirtual: Boolean,
+): PokerAndroidInputDeviceKind = when {
+    isVirtual -> PokerAndroidInputDeviceKind.OTHER
+    isExternal -> PokerAndroidInputDeviceKind.EXTERNAL_HID
+    else -> PokerAndroidInputDeviceKind.BUILT_IN
+}
+
+internal fun pokerAndroidInputDeviceKind(device: InputDevice?): PokerAndroidInputDeviceKind {
+    if (device == null || device.isVirtual || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        return PokerAndroidInputDeviceKind.OTHER
+    }
+    return pokerAndroidInputDeviceKind(isExternal = device.isExternal, isVirtual = false)
+}
+
+internal data class PokerAndroidKeyEvent(
+    val deviceKind: PokerAndroidInputDeviceKind,
+    val descriptor: String?,
+    val keyCode: Int,
+    val action: Int,
+    val eventTimeMs: Long,
+    val repeatCount: Int,
+)
+
 /** Converts Android input into domain events; raw Android events stop at this class. */
 internal class PokerBuiltInInputAdapter(
     private val controller: PokerInputController,
+    private val bindings: PokerBindingController = PokerBindingController(),
     private val touchSlopPx: Float = 24f,
     private val monotonicNowMs: () -> Long = { SystemClock.uptimeMillis() },
     private val onNavigationChanged: () -> Unit = {},
@@ -82,13 +122,16 @@ internal class PokerBuiltInInputAdapter(
 
     private data class TouchState(
         val downY: Float,
+        val map: PokerBindingMap,
         var fingerCount: Int,
         var lastEventTimeMs: Long,
+        var gesture: PokerGlassesGesture? = null,
         var operation: PokerOperation? = null,
         var domainStarted: Boolean = false,
     )
 
     private data class FunctionState(
+        val operation: PokerOperation?,
         var lastEventTimeMs: Long,
         var domainStarted: Boolean,
     )
@@ -106,6 +149,7 @@ internal class PokerBuiltInInputAdapter(
             owner = Owner.TOUCH
             val state = TouchState(
                 downY = event.y,
+                map = bindings.map,
                 fingerCount = event.pointerCount.coerceAtLeast(1),
                 lastEventTimeMs = event.eventTimeMs,
             )
@@ -146,15 +190,22 @@ internal class PokerBuiltInInputAdapter(
         if (event.action == PokerFunctionAction.DOWN && event.repeatCount > 0) return emptyList()
         if (owner == null && event.action == PokerFunctionAction.DOWN) {
             owner = Owner.FUNCTION
+            val operation = bindings.map.operationFor(
+                PokerBindingControl.glasses(PokerGlassesGesture.FUNCTION_BUTTON),
+            )
             val result = dispatch(
                 PokerInteraction(
                     source = PokerInputSource.GLASSES,
-                    operation = PokerOperation.FN,
+                    operation = operation,
                     phase = PokerInteractionPhase.BEGIN,
                     eventTimeMs = event.eventTimeMs,
                 ),
             )
-            function = FunctionState(event.eventTimeMs, result != null)
+            function = FunctionState(
+                operation = operation,
+                lastEventTimeMs = event.eventTimeMs,
+                domainStarted = result != null,
+            )
             return listOfNotNull(result)
         }
         if (owner != Owner.FUNCTION) return emptyList()
@@ -179,8 +230,9 @@ internal class PokerBuiltInInputAdapter(
         state: TouchState,
         event: PokerTouchEvent,
     ): List<PokerInputController.Result> {
-        if (state.operation == null && abs(event.y - state.downY) >= touchSlopPx) {
-            state.operation = operationFor(state.fingerCount, event.y - state.downY)
+        if (state.gesture == null && abs(event.y - state.downY) >= touchSlopPx) {
+            state.gesture = gestureFor(state.fingerCount, event.y - state.downY)
+            state.operation = state.map.operationFor(PokerBindingControl.glasses(state.gesture!!))
             val result = dispatch(
                 PokerInteraction(
                     source = PokerInputSource.GLASSES,
@@ -208,11 +260,12 @@ internal class PokerBuiltInInputAdapter(
         state: TouchState,
         eventTimeMs: Long,
     ): List<PokerInputController.Result> {
-        val operation = state.operation ?: if (state.fingerCount >= 2) {
-            PokerOperation.TAPTAP
+        val gesture = state.gesture ?: if (state.fingerCount >= 2) {
+            PokerGlassesGesture.DUAL_FINGER_TAP
         } else {
-            PokerOperation.TAP
+            PokerGlassesGesture.SINGLE_FINGER_TAP
         }
+        val operation = state.operation ?: state.map.operationFor(PokerBindingControl.glasses(gesture))
         val results = mutableListOf<PokerInputController.Result>()
         if (state.domainStarted) {
             dispatch(
@@ -234,7 +287,7 @@ internal class PokerBuiltInInputAdapter(
             dispatch(
                 PokerInteraction(
                     source = PokerInputSource.GLASSES,
-                    operation = PokerOperation.FN,
+                    operation = state.operation,
                     phase = PokerInteractionPhase.RELEASE,
                     eventTimeMs = eventTimeMs,
                 ),
@@ -291,11 +344,11 @@ internal class PokerBuiltInInputAdapter(
             }
         }
 
-    private fun operationFor(fingerCount: Int, deltaY: Float): PokerOperation = when {
-        fingerCount >= 2 && deltaY > 0 -> PokerOperation.RIGHT
-        fingerCount >= 2 -> PokerOperation.LEFT
-        deltaY > 0 -> PokerOperation.DOWN
-        else -> PokerOperation.UP
+    private fun gestureFor(fingerCount: Int, deltaY: Float): PokerGlassesGesture = when {
+        fingerCount >= 2 && deltaY > 0 -> PokerGlassesGesture.DOUBLE_FINGER_SWIPE_FORWARD
+        fingerCount >= 2 -> PokerGlassesGesture.DOUBLE_FINGER_SWIPE_BACKWARD
+        deltaY > 0 -> PokerGlassesGesture.SINGLE_FINGER_SWIPE_FORWARD
+        else -> PokerGlassesGesture.SINGLE_FINGER_SWIPE_BACKWARD
     }
 
     private fun clearTouch() {
@@ -315,10 +368,197 @@ internal class PokerBuiltInInputAdapter(
     }
 }
 
+internal enum class PokerRemoteKeyAction {
+    DOWN,
+    UP,
+    MULTIPLE,
+}
+
+internal data class PokerRemoteKeyEvent(
+    val descriptor: String,
+    val keyCode: Int,
+    val action: PokerRemoteKeyAction,
+    val eventTimeMs: Long,
+    val repeatCount: Int = 0,
+) {
+    init {
+        require(descriptor.isNotBlank()) { "Remote descriptor must not be blank" }
+        require(keyCode >= 0) { "Remote key code must not be negative" }
+        require(eventTimeMs >= 0) { "Remote event time must be non-negative" }
+        require(repeatCount >= 0) { "Remote repeat count must not be negative" }
+    }
+}
+
+/** Converts one bonded remote's exact descriptor/keyCode stream into canonical Poker input. */
+internal class PokerRemoteInputAdapter(
+    private val controller: PokerInputController,
+    private val bindings: PokerBindingController,
+    private val isForeground: () -> Boolean = { true },
+    private val onNavigationChanged: () -> Unit = {},
+    private val onBindingChanged: () -> Unit = {},
+    private val onNotice: (String) -> Unit = {},
+) {
+    private data class ActiveKey(
+        val descriptor: String,
+        val keyCode: Int,
+        val operation: PokerOperation?,
+        val learning: Boolean,
+        val startedAtMs: Long,
+    )
+
+    private var active: ActiveKey? = null
+
+    fun onKeyEvent(event: PokerRemoteKeyEvent): Boolean {
+        if (!isForeground()) return false
+
+        if (bindings.observeRemote(event.descriptor)) onBindingChanged()
+        val learning = bindings.learningTarget?.takeIf {
+            it.device == PokerBindingDevice.remote(event.descriptor)
+        }
+        val managed = event.descriptor in bindings.state.knownRemoteDescriptors
+        if (learning == null && !managed) return false
+
+        return when (event.action) {
+            PokerRemoteKeyAction.DOWN -> onDown(event, learning != null)
+            PokerRemoteKeyAction.UP -> onUp(event)
+            PokerRemoteKeyAction.MULTIPLE -> onMultiple(event)
+        }
+    }
+
+    fun onFocusLost(eventTimeMs: Long = SystemClock.uptimeMillis()) {
+        cancelActive(PokerCancellationReason.FOCUS_LOST, eventTimeMs)
+        if (bindings.learningTarget != null) {
+            bindings.cancelLearning()
+            onBindingChanged()
+        }
+    }
+
+    fun onDisconnected(descriptor: String, eventTimeMs: Long = SystemClock.uptimeMillis()) {
+        if (active?.descriptor == descriptor) {
+            cancelActive(PokerCancellationReason.DISCONNECTED, eventTimeMs)
+        }
+        val wasLearning = bindings.learningTarget?.device?.descriptor == descriptor
+        bindings.deviceDisconnected(descriptor)
+        if (wasLearning) onBindingChanged()
+    }
+
+    fun onConnectionLost(eventTimeMs: Long = SystemClock.uptimeMillis()) {
+        cancelActive(PokerCancellationReason.DISCONNECTED, eventTimeMs)
+        bindings.connectionLost()
+    }
+
+    private fun onDown(event: PokerRemoteKeyEvent, learning: Boolean): Boolean {
+        if (event.repeatCount > 0) return true
+        active?.let { current ->
+            if (current.learning &&
+                (current.descriptor != event.descriptor || current.keyCode != event.keyCode)
+            ) {
+                active = null
+                onNotice("Cannot bind")
+            }
+            return true
+        }
+        if (learning) {
+            if (event.keyCode <= 0) {
+                onNotice("Cannot bind")
+                return true
+            }
+            active = ActiveKey(
+                descriptor = event.descriptor,
+                keyCode = event.keyCode,
+                operation = null,
+                learning = true,
+                startedAtMs = event.eventTimeMs,
+            )
+            return true
+        }
+
+        val operation = runCatching {
+            bindings.map.operationFor(PokerBindingControl.remote(event.descriptor, event.keyCode))
+        }.getOrNull()
+        active = ActiveKey(
+            descriptor = event.descriptor,
+            keyCode = event.keyCode,
+            operation = operation,
+            learning = false,
+            startedAtMs = event.eventTimeMs,
+        )
+        if (operation != null) {
+            dispatch(
+                PokerInteraction(
+                    source = PokerInputSource.REMOTE,
+                    operation = operation,
+                    phase = PokerInteractionPhase.BEGIN,
+                    eventTimeMs = event.eventTimeMs,
+                ),
+            )
+        }
+        return true
+    }
+
+    private fun onUp(event: PokerRemoteKeyEvent): Boolean {
+        val current = active ?: return true
+        if (current.descriptor != event.descriptor || current.keyCode != event.keyCode) return true
+        active = null
+        if (event.eventTimeMs < current.startedAtMs) {
+            if (!current.learning) {
+                controller.cancel(PokerCancellationReason.ACTION_CANCEL, current.startedAtMs)
+            }
+            return true
+        }
+        if (current.learning) {
+            when (bindings.capture(PokerBindingControl.remote(event.descriptor, event.keyCode))) {
+                PokerBindingCaptureResult.APPLIED -> onBindingChanged()
+                PokerBindingCaptureResult.UNSUPPORTED -> onNotice("Cannot bind")
+                PokerBindingCaptureResult.IGNORED -> Unit
+            }
+        } else if (current.operation != null) {
+            dispatch(
+                PokerInteraction(
+                    source = PokerInputSource.REMOTE,
+                    operation = current.operation,
+                    phase = PokerInteractionPhase.RELEASE,
+                    eventTimeMs = event.eventTimeMs,
+                ),
+            )
+        }
+        return true
+    }
+
+    private fun onMultiple(event: PokerRemoteKeyEvent): Boolean {
+        val current = active ?: run {
+            if (bindings.learningTarget != null) onNotice("Cannot bind")
+            return true
+        }
+        active = null
+        if (current.learning) {
+            onNotice("Cannot bind")
+        } else {
+            controller.cancel(PokerCancellationReason.ACTION_CANCEL, event.eventTimeMs)
+        }
+        return true
+    }
+
+    private fun cancelActive(reason: PokerCancellationReason, eventTimeMs: Long) {
+        val current = active ?: return
+        if (!current.learning) controller.cancel(reason, eventTimeMs)
+        active = null
+    }
+
+    private fun dispatch(interaction: PokerInteraction) {
+        controller.reduce(interaction)?.let {
+            if (it.navigationEffect != com.code2hack.pokerdealer.domain.PokerNavigationEffect.NONE) {
+                onNavigationChanged()
+            }
+        }
+    }
+}
+
 /** Android-only edge: MotionEvent/KeyEvent never cross into domain navigation. */
 internal class PokerAndroidInputAdapter(
     private val builtIn: PokerBuiltInInputAdapter,
     private val functionKeyCode: Int = KeyEvent.KEYCODE_FUNCTION,
+    private val remote: PokerRemoteInputAdapter? = null,
 ) {
     fun onTouchEvent(event: MotionEvent): Boolean {
         val action = pokerTouchAction(event.actionMasked) ?: return false
@@ -336,19 +576,67 @@ internal class PokerAndroidInputAdapter(
 
     @Suppress("DEPRECATION")
     fun onKeyEvent(event: KeyEvent): Boolean {
-        if (event.keyCode != functionKeyCode) return false
+        val device = event.device
+        return onKeyEvent(
+            PokerAndroidKeyEvent(
+                deviceKind = pokerAndroidInputDeviceKind(device),
+                descriptor = device?.descriptor,
+                keyCode = event.keyCode,
+                action = event.action,
+                eventTimeMs = event.eventTime,
+                repeatCount = event.repeatCount,
+            ),
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    fun onKeyEvent(event: PokerAndroidKeyEvent): Boolean {
+        if (event.deviceKind == PokerAndroidInputDeviceKind.EXTERNAL_HID) {
+            val descriptor = event.descriptor?.takeIf(String::isNotBlank) ?: return false
+            val action = when (event.action) {
+                KeyEvent.ACTION_DOWN -> PokerRemoteKeyAction.DOWN
+                KeyEvent.ACTION_UP -> PokerRemoteKeyAction.UP
+                KeyEvent.ACTION_MULTIPLE -> PokerRemoteKeyAction.MULTIPLE
+                else -> return true
+            }
+            return remote?.onKeyEvent(
+                PokerRemoteKeyEvent(
+                    descriptor = descriptor,
+                    keyCode = event.keyCode,
+                    action = action,
+                    eventTimeMs = event.eventTimeMs,
+                    repeatCount = event.repeatCount,
+                ),
+            ) == true
+        }
+        if (event.deviceKind != PokerAndroidInputDeviceKind.BUILT_IN ||
+            event.keyCode != functionKeyCode
+        ) return false
         val action = pokerFunctionAction(event.action) ?: return true
         builtIn.onFunctionEvent(
             PokerFunctionEvent(
                 action = action,
-                eventTimeMs = event.eventTime,
+                eventTimeMs = event.eventTimeMs,
                 repeatCount = event.repeatCount,
             ),
         )
         return true
     }
 
-    fun onFocusLost() = builtIn.onFocusLost()
+    fun onFocusLost() {
+        builtIn.onFocusLost()
+        remote?.onFocusLost()
+    }
 
-    fun onDisconnected() = builtIn.onDisconnected()
+    fun onDisconnected() {
+        builtIn.onDisconnected()
+        remote?.onConnectionLost()
+    }
+
+    fun onConnectionLost() {
+        builtIn.onDisconnected()
+        remote?.onConnectionLost()
+    }
+
+    fun onRemoteDisconnected(descriptor: String) = remote?.onDisconnected(descriptor)
 }

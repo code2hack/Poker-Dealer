@@ -39,6 +39,7 @@ const val POKER_USER_INPUT_PROJECTION_TYPE = "user-input.projection"
 const val POKER_USER_INPUT_MUTATION_TYPE = "user-input.mutation"
 const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
 const val POKER_LISTENER_PORT = 39_817
+const val POKER_BINDINGS_CAPABILITY = "bindings.v1"
 
 val PokerProtocolJson = Json {
     encodeDefaults = true

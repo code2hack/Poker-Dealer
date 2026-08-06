@@ -1,7 +1,9 @@
 package com.code2hack.pokerdealer.domain
 
+import kotlinx.serialization.Serializable
 import java.util.UUID
 
+@Serializable
 enum class PokerOperation {
     DOWN,
     UP,
@@ -30,6 +32,7 @@ enum class PokerCancellationReason {
     DISCONNECTED,
 }
 
+@Serializable
 enum class PokerGlassesGesture {
     SINGLE_FINGER_SWIPE_FORWARD,
     SINGLE_FINGER_SWIPE_BACKWARD,

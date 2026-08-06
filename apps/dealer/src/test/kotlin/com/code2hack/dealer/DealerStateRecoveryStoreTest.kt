@@ -22,6 +22,11 @@ import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.UserInputQuestion
 import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.domain.UserInputRequestState
+import com.code2hack.pokerdealer.domain.PokerBindingControl
+import com.code2hack.pokerdealer.domain.PokerBindingDevice
+import com.code2hack.pokerdealer.domain.PokerBindingMap
+import com.code2hack.pokerdealer.domain.PokerBindingEntry
+import com.code2hack.pokerdealer.domain.PokerOperation
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -158,6 +163,36 @@ class DealerStateRecoveryStoreTest {
         assertFalse(requestFailure.pendingRequestsWritable)
         assertTrue(root.resolve("pending-requests-v1.json").exists())
         assertTrue(requestFailure.errors.single().startsWith("Unable to restore pending request uncertainty"))
+
+        root.resolve("poker-bindings-v1.json").writeText("{")
+        val bindingFailure = store.read()
+
+        assertFalse(bindingFailure.pokerBindingsWritable)
+        assertTrue(root.resolve("poker-bindings-v1.json").exists())
+        assertTrue(bindingFailure.errors.last().startsWith("Unable to restore Poker bindings"))
+    }
+
+    @Test
+    fun pokerBindingsSurviveRecovery() = runBlocking {
+        val map = PokerBindingMap(
+            revision = 2,
+            entries = listOf(
+                PokerBindingEntry(
+                    PokerOperation.FN,
+                    listOf(PokerBindingControl.remote("remote-a", 42)),
+                ),
+            ),
+        )
+        val root = temporaryFolder.newFolder()
+        DealerStateRecoveryStore(root).apply {
+            writePokerBindings(DealerPokerBindingSnapshot(map, listOf("remote-a", "remote-b")))
+        }
+
+        val recovered = DealerStateRecoveryStore(root).read()
+
+        assertEquals(map, recovered.pokerBindings.map)
+        assertEquals(listOf("remote-a", "remote-b"), recovered.pokerBindings.knownRemoteDescriptors)
+        assertEquals(PokerBindingDevice.remote("remote-a"), recovered.pokerBindings.map.devices.single())
     }
 
     private fun card(locator: CodexThreadLocator) = Card(

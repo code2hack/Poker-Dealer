@@ -577,6 +577,7 @@ class PokerConnectionOwner<Snapshot>(
     private val connector: PokerConnectionConnector? = null,
     private val callbacks: PokerConnectionCallbacks? = null,
     private val onConnected: suspend (PokerConnectionEpoch, PokerProtocolNegotiation) -> Unit = { _, _ -> },
+    private val onStateChanged: (PokerConnectionState) -> Unit = {},
     private val onEnvelope: suspend (PokerConnectionEpoch, ProtocolEnvelope) -> Unit = { _, _ -> },
 ) {
     init {
@@ -600,6 +601,12 @@ class PokerConnectionOwner<Snapshot>(
 
     val isListening: Boolean
         get() = synchronized(lock) { listener != null }
+
+    val connectionState: PokerConnectionState
+        get() = session.state
+
+    val isConnected: Boolean
+        get() = connectionState == PokerConnectionState.CONNECTED
 
     /** Sends one application envelope on the current negotiated control stream. */
     suspend fun send(
@@ -644,6 +651,7 @@ class PokerConnectionOwner<Snapshot>(
             active?.cancel()
             active = null
             session.close()
+            onStateChanged(PokerConnectionState.DISCONNECTED)
             val delay = reconnect.request(trigger, jitterUnit)
             if (delay != null) scheduleOpenLocked(delay, generation)
             return delay
@@ -664,6 +672,7 @@ class PokerConnectionOwner<Snapshot>(
             active?.cancel()
             active = null
             session.close()
+            onStateChanged(PokerConnectionState.DISCONNECTED)
             reconnect.cancel()
         }
     }
@@ -770,6 +779,7 @@ class PokerConnectionOwner<Snapshot>(
                     it.cancel()
                 }
                 val epoch = session.replaceAuthenticatedConnection(socket)
+                onStateChanged(PokerConnectionState.NEGOTIATING)
                 ActiveConnection(
                     epoch = epoch,
                     socket = socket,
@@ -789,6 +799,7 @@ class PokerConnectionOwner<Snapshot>(
             )
             val negotiation = session.negotiate(epoch, peerOffer)
                 ?: throw IllegalStateException("Stale Poker negotiation")
+            onStateChanged(session.state)
             runtime.peerEnvelopeVersion = if (
                 negotiation.access == PokerProtocolAccess.READ_ONLY &&
                 !negotiation.majorCompatible
@@ -855,6 +866,7 @@ class PokerConnectionOwner<Snapshot>(
             runtime.heartbeatTask?.cancel()
             socket.close()
             val wasCurrent = session.close(epoch)
+            if (wasCurrent) onStateChanged(PokerConnectionState.DISCONNECTED)
             synchronized(lock) {
                 if (active === runtime) active = null
                 if (wasCurrent && running && generation == expectedGeneration) {
@@ -922,6 +934,17 @@ class PokerConnectionOwner<Snapshot>(
             )
             runtime.socket.sendFrame(PokerFrameCodec.encode(envelope))
         }
+    }
+
+    /** Sends one typed control message on the current negotiated epoch. */
+    suspend fun send(
+        type: String,
+        payload: JsonObject,
+        replyTo: String? = null,
+    ) {
+        val epoch = synchronized(lock) { active?.epoch }
+            ?: throw IllegalStateException("Poker connection is not active")
+        send(epoch, type, payload, POKER_CONTROL_STREAM, replyTo)
     }
 
     private fun buildOfferPayload(): JsonObject = PokerProtocolJson.encodeToJsonElement(
