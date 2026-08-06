@@ -124,6 +124,12 @@ Git history may contain these designs. History is evidence only, not current gui
 
 ## Host-specific rules
 
+### DGX Spark native Android builds
+
+- DGX Spark is ARM64. Build the embedded-tailnet Android/arm64 artifact there with `native/embedded-tailnet/build.sh`; it runs the repository-pinned Linux/amd64 Go, `gomobile`, and `gobind` toolchain through Docker/QEMU.
+- Treat `native/embedded-tailnet/build.sh` and `native/embedded-tailnet/versions.env` as the executable source of truth for this build; do not duplicate mutable toolchain versions in this file.
+- u4090 MUST NOT be used for builds or artifact production.
+
 ### DGX Spark and u4090
 
 - Distribution: upstream Linux Codex.
