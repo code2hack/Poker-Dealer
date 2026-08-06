@@ -19,6 +19,8 @@ import com.code2hack.dealer.asr.DealerAsrDownloadState
 import com.code2hack.dealer.asr.DealerAsrCapture
 import com.code2hack.dealer.asr.DealerAsrSliceSession
 import com.code2hack.dealer.asr.DealerAsrSourceSettings
+import com.code2hack.dealer.asr.DealerAsrSourceSession
+import com.code2hack.dealer.asr.DealerAsrStartDecision
 import com.code2hack.dealer.asr.dealerAsrCursorAfter
 import com.code2hack.dealer.asr.insertDealerAsrText
 import com.code2hack.tailnet.embeddedtailnet.Engine
@@ -306,6 +308,7 @@ class DealerConnectionService : Service() {
     private val pokerAsrResults = mutableMapOf<String, Any>()
     private lateinit var asrProcess: DealerAsrProcess
     private lateinit var asrSourceSettings: DealerAsrSourceSettings
+    private lateinit var asrSourceSession: DealerAsrSourceSession
     private var pokerAsrSession: DealerAsrSliceSession? = null
     private var dealerAsrCapture: DealerAsrCapture? = null
     private var pokerAsrPreparing: PokerAsrStartRequest? = null
@@ -410,6 +413,7 @@ class DealerConnectionService : Service() {
         )
         asrProcess = DealerAsrProcess.shared(this)
         asrSourceSettings = DealerAsrSourceSettings(this)
+        asrSourceSession = DealerAsrSourceSession()
         scope.launch { runCatching { asrProcess.start() } }
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
@@ -460,6 +464,7 @@ class DealerConnectionService : Service() {
             }
             val restoredAsrSource = runCatching { asrSourceSettings.read() }
                 .getOrDefault(PokerAsrSource.GLASSES)
+            asrSourceSession.setFutureSource(restoredAsrSource)
             mutableState.value = DealerUiState().restoreAfterProcessDeath(
                 attachments = restoredAttachments,
                 actions = restoredActions,
@@ -692,10 +697,10 @@ class DealerConnectionService : Service() {
     }
 
     fun setAsrSource(source: PokerAsrSource) {
-        if (pokerAsrSession != null || pokerAsrPreparing != null) return
         scope.launch {
             runCatching {
                 asrSourceSettings.save(source)
+                asrSourceSession.setFutureSource(source)
                 mutableState.update { it.copy(asr = it.asr.copy(selectedSource = source)) }
             }.onFailure { failure ->
                 mutableState.update {
@@ -1631,11 +1636,7 @@ class DealerConnectionService : Service() {
             return
         }
 
-        val selectedSource = if (request.source == PokerAsrSource.DEALER_PHONE) {
-            PokerAsrSource.DEALER_PHONE
-        } else {
-            runCatching { asrSourceSettings.read() }.getOrDefault(PokerAsrSource.GLASSES)
-        }
+        val selectedSource = asrSourceSession.preferredSource(request.source)
         pokerAsrPreparing = request
         val result = try {
             val availability = asrProcess.availability()
@@ -1659,6 +1660,14 @@ class DealerConnectionService : Service() {
                     source = selectedSource,
                 )
                 pokerAsrSession = session
+                fun startSource(phoneAvailable: Boolean, glassesAvailable: Boolean): DealerAsrStartDecision =
+                    asrSourceSession.start(
+                        requestSource = request.source,
+                        phoneAvailable = phoneAvailable,
+                        glassesAvailable = glassesAvailable,
+                    ).also { decision ->
+                        decision.source?.let { session.source = it }
+                    }
                 val result = if (selectedSource == PokerAsrSource.DEALER_PHONE) {
                     val announced = AtomicBoolean(false)
                     val failure = AtomicReference<String?>()
@@ -1692,28 +1701,52 @@ class DealerConnectionService : Service() {
                     }.getOrNull()
                     if (capture == null) {
                         runCatching { ensureForeground() }
-                        session.source = PokerAsrSource.GLASSES
-                        PokerAsrStartResult(
-                            request.target,
-                            request.sessionId,
-                            PokerAsrStartOutcome.READY,
-                            pack,
-                            source = PokerAsrSource.GLASSES,
-                        )
+                        val decision = startSource(phoneAvailable = false, glassesAvailable = true)
+                        val source = decision.source
+                        if (source == null) {
+                            closePokerAsrSession()
+                            PokerAsrStartResult(
+                                request.target,
+                                request.sessionId,
+                                PokerAsrStartOutcome.REJECTED,
+                                reason = decision.reason ?: "ASR source unavailable",
+                                source = selectedSource,
+                            )
+                        } else {
+                            PokerAsrStartResult(
+                                request.target,
+                                request.sessionId,
+                                PokerAsrStartOutcome.READY,
+                                pack,
+                                source = source,
+                            )
+                        }
                     } else {
                         dealerAsrCapture = capture
                         val started = runCatching { capture.start() }.getOrDefault(false)
                         if (!started) {
                             closeDealerAsrCapture()
                             runCatching { ensureForeground() }
-                            session.source = PokerAsrSource.GLASSES
-                            PokerAsrStartResult(
-                                request.target,
-                                request.sessionId,
-                                PokerAsrStartOutcome.READY,
-                                pack,
-                                source = PokerAsrSource.GLASSES,
-                            )
+                            val decision = startSource(phoneAvailable = false, glassesAvailable = true)
+                            val source = decision.source
+                            if (source == null) {
+                                closePokerAsrSession()
+                                PokerAsrStartResult(
+                                    request.target,
+                                    request.sessionId,
+                                    PokerAsrStartOutcome.REJECTED,
+                                    reason = decision.reason ?: "ASR source unavailable",
+                                    source = selectedSource,
+                                )
+                            } else {
+                                PokerAsrStartResult(
+                                    request.target,
+                                    request.sessionId,
+                                    PokerAsrStartOutcome.READY,
+                                    pack,
+                                    source = source,
+                                )
+                            }
                         } else if (failure.get() != null) {
                             val reason = failure.get() ?: "dealer-microphone-unavailable"
                             closePokerAsrSession()
@@ -1726,23 +1759,49 @@ class DealerConnectionService : Service() {
                             )
                         } else {
                             announced.set(true)
-                            PokerAsrStartResult(
-                                request.target,
-                                request.sessionId,
-                                PokerAsrStartOutcome.READY,
-                                pack,
-                                source = PokerAsrSource.DEALER_PHONE,
-                            )
+                            val decision = startSource(phoneAvailable = true, glassesAvailable = true)
+                            val source = decision.source
+                            if (source == null) {
+                                closePokerAsrSession()
+                                PokerAsrStartResult(
+                                    request.target,
+                                    request.sessionId,
+                                    PokerAsrStartOutcome.REJECTED,
+                                    reason = decision.reason ?: "ASR source unavailable",
+                                    source = selectedSource,
+                                )
+                            } else {
+                                PokerAsrStartResult(
+                                    request.target,
+                                    request.sessionId,
+                                    PokerAsrStartOutcome.READY,
+                                    pack,
+                                    source = source,
+                                )
+                            }
                         }
                     }
                 } else {
-                    PokerAsrStartResult(
-                        request.target,
-                        request.sessionId,
-                        PokerAsrStartOutcome.READY,
-                        pack,
-                        source = PokerAsrSource.GLASSES,
-                    )
+                    val decision = startSource(phoneAvailable = false, glassesAvailable = true)
+                    val source = decision.source
+                    if (source == null) {
+                        closePokerAsrSession()
+                        PokerAsrStartResult(
+                            request.target,
+                            request.sessionId,
+                            PokerAsrStartOutcome.REJECTED,
+                            reason = decision.reason ?: "ASR source unavailable",
+                            source = selectedSource,
+                        )
+                    } else {
+                        PokerAsrStartResult(
+                            request.target,
+                            request.sessionId,
+                            PokerAsrStartOutcome.READY,
+                            pack,
+                            source = source,
+                        )
+                    }
                 }
                 if (result.outcome == PokerAsrStartOutcome.READY) {
                     mutableState.update {

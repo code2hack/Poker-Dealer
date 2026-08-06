@@ -263,12 +263,21 @@ internal class PokerAsrController(
     }
 
     fun onExitResult(result: PokerAsrExitResult) {
-        if (result.sessionId != sessionId || result.target != target) return
-        if (pendingExitOperationId != null && result.operationId != pendingExitOperationId) return
-        if (pendingExitOperationId == null && result.outcome != PokerAsrMutationOutcome.REJECTED) return
-        pendingExitOperationId = null
-        if (exitWasActive && result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) onExitNotice()
-        reset()
+        if (result.sessionId != sessionId) return
+        if (result.operationId == pendingExitOperationId) {
+            pendingExitOperationId = null
+            if (result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) {
+                if (exitWasActive) onExitNotice()
+            } else {
+                onFailureNotice(asrFailureNotice(result.reason))
+            }
+            reset()
+            return
+        }
+        if (state != PokerAsrState.IDLE) {
+            onFailureNotice(asrFailureNotice(result.reason))
+            reset()
+        }
     }
 
     suspend fun cancel() {

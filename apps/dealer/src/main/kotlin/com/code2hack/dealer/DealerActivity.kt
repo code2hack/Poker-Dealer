@@ -66,6 +66,7 @@ import com.code2hack.dealer.asr.DealerAsrMode
 import com.code2hack.dealer.asr.DealerAsrProfileSaveResult
 import com.code2hack.dealer.asr.DealerAsrProcess
 import com.code2hack.dealer.asr.prettyDealerAsrProfile
+import com.code2hack.dealer.asr.shouldRequestDealerAsrPhonePermission
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
@@ -125,6 +126,9 @@ class DealerActivity : ComponentActivity() {
     private var presentationScaleJob: Job? = null
     private var pendingThreadNotificationKey: String? = null
     private var bound = false
+    private val asrAudioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { _ -> }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -292,7 +296,7 @@ class DealerActivity : ComponentActivity() {
                                 result(asrDownloadManager.saveProfile(key, raw))
                             }
                         },
-                        onSetAsrSource = { service?.setAsrSource(it) },
+                        onSetAsrSource = ::setAsrSource,
                     )
                     }
                 }
@@ -412,6 +416,17 @@ class DealerActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+        }
+    }
+
+    private fun setAsrSource(source: PokerAsrSource) {
+        service?.setAsrSource(source)
+        if (shouldRequestDealerAsrPhonePermission(
+                source,
+                checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+            )
+        ) {
+            asrAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
     }
 
