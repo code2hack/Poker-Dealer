@@ -187,13 +187,27 @@ class DealerAsrRuntime private constructor(
     }
 
     internal fun openParakeetStreaming(pack: VerifiedAsrPack): DealerAsrSession =
-        openStreaming(pack, featureDim = 128)
+        openStreaming(pack, featureDim = 128, profile = null)
+
+    internal fun openParakeetStreaming(
+        pack: VerifiedAsrPack,
+        profile: DealerAsrProfile,
+    ): DealerAsrSession {
+        check(profile.packId == pack.id && profile.revision == pack.revision) {
+            "ASR profile does not match pack"
+        }
+        return openStreaming(pack, featureDim = 128, profile = profile)
+    }
 
     /** Test-only compact transducer fixture; it is not a production adapter capability. */
     internal fun openInstrumentationStreamingFixture(pack: VerifiedAsrPack): DealerAsrSession =
-        openStreaming(pack, featureDim = 80)
+        openStreaming(pack, featureDim = 80, profile = null)
 
-    private fun openStreaming(pack: VerifiedAsrPack, featureDim: Int): DealerAsrSession {
+    private fun openStreaming(
+        pack: VerifiedAsrPack,
+        featureDim: Int,
+        profile: DealerAsrProfile?,
+    ): DealerAsrSession {
         check(pack.belongsTo(ownerToken)) { "ASR pack belongs to another runtime" }
         check(pack.adapter == DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
             "ASR adapter is not implemented"
@@ -232,7 +246,7 @@ class DealerAsrRuntime private constructor(
                 enableEndpoint = true,
             ),
         )
-        return DealerAsrSession(recognizer, recognizer.createStream())
+        return DealerAsrSession(recognizer, recognizer.createStream(), profile)
     }
 
     private fun validate(manifest: DealerAsrPackManifest): String? {
@@ -398,6 +412,7 @@ private class PackRejected(val reason: String) : Exception()
 class DealerAsrSession internal constructor(
     private val recognizer: OnlineRecognizer,
     private val stream: OnlineStream,
+    internal val profile: DealerAsrProfile? = null,
 ) : Closeable {
     private var closed = false
     private var finished = false
