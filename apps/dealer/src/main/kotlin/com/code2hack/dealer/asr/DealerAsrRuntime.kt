@@ -15,6 +15,11 @@ import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.security.MessageDigest
+import java.util.ArrayDeque
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 enum class DealerAsrAdapter {
     PARAKEET_UNIFIED_STREAMING,
@@ -117,13 +122,83 @@ class VerifiedAsrPack private constructor(
     }
 }
 
+internal interface DealerAsrRuntimeCallbacks {
+    fun onSessionStarted(key: DealerAsrPackKey)
+
+    fun onSessionClosed(key: DealerAsrPackKey)
+
+    fun onPackFailure(key: DealerAsrPackKey, reason: String)
+}
+
+private object NoopDealerAsrRuntimeCallbacks : DealerAsrRuntimeCallbacks {
+    override fun onSessionStarted(key: DealerAsrPackKey) = Unit
+
+    override fun onSessionClosed(key: DealerAsrPackKey) = Unit
+
+    override fun onPackFailure(key: DealerAsrPackKey, reason: String) = Unit
+}
+
+internal class DealerAsrDownloadLifecycle(
+    private val manager: () -> DealerAsrDownloadManager,
+    private val scope: CoroutineScope,
+) : DealerAsrRuntimeCallbacks {
+    private val lock = Mutex()
+    private val sessions = mutableMapOf<DealerAsrPackKey, ArrayDeque<DealerAsrSessionProfile>>()
+
+    override fun onSessionStarted(key: DealerAsrPackKey) {
+        scope.launch {
+            lock.withLock {
+                runCatching {
+                    val profile = manager().beginAsrSession(key)
+                    sessions.getOrPut(key, ::ArrayDeque).addLast(profile)
+                }
+            }
+        }
+    }
+
+    override fun onSessionClosed(key: DealerAsrPackKey) {
+        scope.launch {
+            lock.withLock {
+                val session = sessions[key]?.let { pending ->
+                    if (pending.isEmpty()) null else pending.removeLast().also {
+                        if (pending.isEmpty()) sessions.remove(key)
+                    }
+                }
+                runCatching {
+                    if (session == null) manager().setActive(key, false)
+                    else manager().endAsrSession(session)
+                }
+            }
+        }
+    }
+
+    override fun onPackFailure(key: DealerAsrPackKey, reason: String) {
+        scope.launch {
+            lock.withLock {
+                runCatching { manager().markRepairNeeded(key, reason) }
+            }
+        }
+    }
+
+    fun unloadIdleDefault(key: DealerAsrPackKey) {
+        manager().evictIdleRecognizer(key)
+    }
+}
+
 class DealerAsrRuntime private constructor(
     private val packSource: PackSource,
     private val loadNativeRuntime: () -> Unit,
+    private val callbacks: DealerAsrRuntimeCallbacks = NoopDealerAsrRuntimeCallbacks,
 ) {
     constructor(context: Context) : this(
         packSource = FilePackSource(context.noBackupFilesDir.resolve(INSTALLED_PACKS_DIRECTORY)),
         loadNativeRuntime = ::loadSherpaRuntime,
+    )
+
+    internal constructor(context: Context, callbacks: DealerAsrRuntimeCallbacks) : this(
+        packSource = FilePackSource(context.noBackupFilesDir.resolve(INSTALLED_PACKS_DIRECTORY)),
+        loadNativeRuntime = ::loadSherpaRuntime,
+        callbacks = callbacks,
     )
 
     internal constructor(assets: AssetManager) : this(
@@ -136,9 +211,28 @@ class DealerAsrRuntime private constructor(
         loadNativeRuntime = loadNativeRuntime,
     )
 
+    internal constructor(
+        loadNativeRuntime: () -> Unit,
+        callbacks: DealerAsrRuntimeCallbacks,
+    ) : this(
+        packSource = UnavailablePackSource,
+        loadNativeRuntime = loadNativeRuntime,
+        callbacks = callbacks,
+    )
+
     internal constructor(installedPacksRoot: File, loadNativeRuntime: () -> Unit) : this(
         packSource = FilePackSource(installedPacksRoot),
         loadNativeRuntime = loadNativeRuntime,
+    )
+
+    internal constructor(
+        installedPacksRoot: File,
+        loadNativeRuntime: () -> Unit,
+        callbacks: DealerAsrRuntimeCallbacks,
+    ) : this(
+        packSource = FilePackSource(installedPacksRoot),
+        loadNativeRuntime = loadNativeRuntime,
+        callbacks = callbacks,
     )
 
     private val ownerToken = Any()
@@ -149,6 +243,7 @@ class DealerAsrRuntime private constructor(
             return DealerAsrStartup.Unavailable("model-pack-owner-mismatch")
         }
         if (pack.adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
+            notifyPackFailure(pack, "adapter-not-supported")
             return DealerAsrStartup.Unavailable("adapter-not-supported")
         }
         return try {
@@ -161,14 +256,19 @@ class DealerAsrRuntime private constructor(
                 ),
             )
         } catch (_: LinkageError) {
+            notifyPackFailure(pack, "runtime-load-failed")
             DealerAsrStartup.Unavailable("runtime-load-failed")
         } catch (_: Exception) {
+            notifyPackFailure(pack, "runtime-load-failed")
             DealerAsrStartup.Unavailable("runtime-load-failed")
         }
     }
 
     fun verifyPack(manifest: DealerAsrPackManifest): DealerAsrPackVerification {
-        validate(manifest)?.let { return DealerAsrPackVerification.Rejected(it) }
+        validate(manifest)?.let {
+            notifyManifestFailure(manifest, it)
+            return DealerAsrPackVerification.Rejected(it)
+        }
         return try {
             DealerAsrPackVerification.Verified(
                 VerifiedAsrPack.create(
@@ -180,59 +280,113 @@ class DealerAsrRuntime private constructor(
                 ),
             )
         } catch (rejected: PackRejected) {
+            notifyManifestFailure(manifest, rejected.reason)
             DealerAsrPackVerification.Rejected(rejected.reason)
         } catch (_: Exception) {
+            notifyManifestFailure(manifest, "pack-unreadable")
             DealerAsrPackVerification.Rejected("pack-unreadable")
         }
     }
 
+    internal fun checkInstalledPack(job: DealerAsrDownloadJob): String? {
+        val manifest = job.runtimeManifest() ?: return "pack-manifest-invalid"
+        return when (val verification = verifyPack(manifest)) {
+            is DealerAsrPackVerification.Rejected -> verification.reason
+            is DealerAsrPackVerification.Verified -> when (val startup = startup(verification.pack)) {
+                is DealerAsrStartup.Ready -> null
+                is DealerAsrStartup.Unavailable -> startup.reason
+            }
+        }
+    }
+
     internal fun openParakeetStreaming(pack: VerifiedAsrPack): DealerAsrSession =
-        openStreaming(pack, featureDim = 128)
+        openStreaming(pack, featureDim = 128, profile = null)
+
+    internal fun openParakeetStreaming(
+        pack: VerifiedAsrPack,
+        profile: DealerAsrProfile,
+    ): DealerAsrSession {
+        check(profile.packId == pack.id && profile.revision == pack.revision) {
+            "ASR profile does not match pack"
+        }
+        return openStreaming(pack, featureDim = 128, profile = profile)
+    }
 
     /** Test-only compact transducer fixture; it is not a production adapter capability. */
     internal fun openInstrumentationStreamingFixture(pack: VerifiedAsrPack): DealerAsrSession =
-        openStreaming(pack, featureDim = 80)
+        openStreaming(pack, featureDim = 80, profile = null)
 
-    private fun openStreaming(pack: VerifiedAsrPack, featureDim: Int): DealerAsrSession {
+    private fun openStreaming(
+        pack: VerifiedAsrPack,
+        featureDim: Int,
+        profile: DealerAsrProfile?,
+    ): DealerAsrSession {
         check(pack.belongsTo(ownerToken)) { "ASR pack belongs to another runtime" }
         check(pack.adapter == DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
             "ASR adapter is not implemented"
         }
-        pack.source.revalidate()
-        val paths = when (val source = pack.source) {
-            is VerifiedAsrPackSource.Assets -> RecognizerPaths(
-                assetManager = source.assetManager,
-                encoder = source.encoderPath,
-                decoder = source.decoderPath,
-                joiner = source.joinerPath,
-                tokens = source.tokensPath,
-            )
-            is VerifiedAsrPackSource.Files -> RecognizerPaths(
-                assetManager = null,
-                encoder = source.encoder.path,
-                decoder = source.decoder.path,
-                joiner = source.joiner.path,
-                tokens = source.tokens.path,
-            )
-        }
-        val recognizer = OnlineRecognizer(
-            assetManager = paths.assetManager,
-            config = OnlineRecognizerConfig(
-                featConfig = FeatureConfig(sampleRate = 16_000, featureDim = featureDim),
-                modelConfig = OnlineModelConfig(
-                    transducer = OnlineTransducerModelConfig(
-                        encoder = paths.encoder,
-                        decoder = paths.decoder,
-                        joiner = paths.joiner,
+        val key = DealerAsrPackKey(pack.id, pack.revision)
+        return try {
+            pack.source.revalidate()
+            val paths = when (val source = pack.source) {
+                is VerifiedAsrPackSource.Assets -> RecognizerPaths(
+                    assetManager = source.assetManager,
+                    encoder = source.encoderPath,
+                    decoder = source.decoderPath,
+                    joiner = source.joinerPath,
+                    tokens = source.tokensPath,
+                )
+                is VerifiedAsrPackSource.Files -> RecognizerPaths(
+                    assetManager = null,
+                    encoder = source.encoder.path,
+                    decoder = source.decoder.path,
+                    joiner = source.joiner.path,
+                    tokens = source.tokens.path,
+                )
+            }
+            val recognizer = OnlineRecognizer(
+                assetManager = paths.assetManager,
+                config = OnlineRecognizerConfig(
+                    featConfig = FeatureConfig(sampleRate = 16_000, featureDim = featureDim),
+                    modelConfig = OnlineModelConfig(
+                        transducer = OnlineTransducerModelConfig(
+                            encoder = paths.encoder,
+                            decoder = paths.decoder,
+                            joiner = paths.joiner,
+                        ),
+                        tokens = paths.tokens,
+                        numThreads = 1,
+                        provider = "cpu",
                     ),
-                    tokens = paths.tokens,
-                    numThreads = 1,
-                    provider = "cpu",
+                    enableEndpoint = true,
                 ),
-                enableEndpoint = true,
-            ),
-        )
-        return DealerAsrSession(recognizer, recognizer.createStream())
+            )
+            val session = DealerAsrSession(
+                recognizer = recognizer,
+                stream = recognizer.createStream(),
+                profile = profile,
+                onClosed = { callbacks.onSessionClosed(key) },
+            )
+            callbacks.onSessionStarted(key)
+            session
+        } catch (failure: Throwable) {
+            notifyPackFailure(key, "pack-unloadable")
+            throw failure
+        }
+    }
+
+    private fun notifyManifestFailure(manifest: DealerAsrPackManifest, reason: String) {
+        if (PACK_ID.matches(manifest.id) && PACK_ID.matches(manifest.revision)) {
+            notifyPackFailure(DealerAsrPackKey(manifest.id, manifest.revision), reason)
+        }
+    }
+
+    private fun notifyPackFailure(pack: VerifiedAsrPack, reason: String) {
+        notifyPackFailure(DealerAsrPackKey(pack.id, pack.revision), reason)
+    }
+
+    private fun notifyPackFailure(key: DealerAsrPackKey, reason: String) {
+        runCatching { callbacks.onPackFailure(key, reason) }
     }
 
     private fun validate(manifest: DealerAsrPackManifest): String? {
@@ -378,6 +532,47 @@ private class FilePackSource(private val installedPacksRoot: File) : PackSource 
 
 private data class PackArtifact(val path: String, val sha256: String)
 
+private fun DealerAsrDownloadJob.runtimeManifest(): DealerAsrPackManifest? {
+    if (artifacts.isEmpty()) return null
+    if (adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
+        return DealerAsrPackManifest(
+            id = packId,
+            revision = revision,
+            adapter = adapter,
+            encoderPath = "encoder.onnx",
+            encoderSha256 = "0".repeat(64),
+            decoderPath = "decoder.onnx",
+            decoderSha256 = "0".repeat(64),
+            joinerPath = "joiner.onnx",
+            joinerSha256 = "0".repeat(64),
+            tokensPath = "tokens.txt",
+            tokensSha256 = "0".repeat(64),
+        )
+    }
+    fun artifact(prefix: String, suffix: String): DealerAsrDownloadArtifact? =
+        artifacts.firstOrNull { artifact ->
+            val name = artifact.path.substringAfterLast('/')
+            name.startsWith(prefix) && name.endsWith(suffix)
+        }
+    val encoder = artifact("encoder", ".onnx") ?: return null
+    val decoder = artifact("decoder", ".onnx") ?: return null
+    val joiner = artifact("joiner", ".onnx") ?: return null
+    val tokens = artifacts.firstOrNull { it.path.substringAfterLast('/') == "tokens.txt" } ?: return null
+    return DealerAsrPackManifest(
+        id = packId,
+        revision = revision,
+        adapter = adapter,
+        encoderPath = encoder.path,
+        encoderSha256 = encoder.sha256,
+        decoderPath = decoder.path,
+        decoderSha256 = decoder.sha256,
+        joinerPath = joiner.path,
+        joinerSha256 = joiner.sha256,
+        tokensPath = tokens.path,
+        tokensSha256 = tokens.sha256,
+    )
+}
+
 private fun DealerAsrPackManifest.artifacts(): List<PackArtifact> = listOf(
     PackArtifact(encoderPath, encoderSha256),
     PackArtifact(decoderPath, decoderSha256),
@@ -398,6 +593,8 @@ private class PackRejected(val reason: String) : Exception()
 class DealerAsrSession internal constructor(
     private val recognizer: OnlineRecognizer,
     private val stream: OnlineStream,
+    internal val profile: DealerAsrProfile? = null,
+    private val onClosed: () -> Unit = {},
 ) : Closeable {
     private var closed = false
     private var finished = false
@@ -438,7 +635,11 @@ class DealerAsrSession internal constructor(
         try {
             stream.release()
         } finally {
-            recognizer.release()
+            try {
+                recognizer.release()
+            } finally {
+                onClosed()
+            }
         }
     }
 

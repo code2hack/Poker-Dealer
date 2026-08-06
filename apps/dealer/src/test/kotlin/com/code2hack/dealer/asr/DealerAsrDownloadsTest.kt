@@ -2,13 +2,17 @@ package com.code2hack.dealer.asr
 
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -20,13 +24,13 @@ class DealerAsrDownloadsTest {
     fun revisionsRemainSideBySideAndUseTheirOwnCatalogProfiles() = runBlocking {
         val fixture = fixture()
         val secondRevision = "b".repeat(40)
-        val secondEntry = fixture.entry.copy(revision = secondRevision, displayName = "Second revision")
+        val secondEntry = fixture.entry.withRevision(secondRevision, "Second revision")
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
         val manager = manager(fixture.root, transport)
         try {
             val first = manager.queue(fixture.entry)
             await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
-            manager.saveProfile(first.key, "{\"packId\":\"${first.key.packId}\",\"custom\":true}")
+            manager.saveProfile(first.key, customProfile(first.key, 600))
 
             val second = manager.queue(secondEntry)
             await {
@@ -40,7 +44,7 @@ class DealerAsrDownloadsTest {
                 manager.profile(second.key),
             )
             assertEquals(
-                "{\"packId\":\"${first.key.packId}\",\"custom\":true}",
+                customProfile(first.key, 600),
                 manager.profile(first.key),
             )
             assertTrue(fixture.root.resolve("installed/${first.key.packId}/${first.key.revision}").isDirectory)
@@ -54,7 +58,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun activeAndDefaultPacksAreProtectedAndIdleDefaultsUnload() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
         val unloaded = mutableListOf<DealerAsrPackKey>()
         val manager = manager(fixture.root, transport, unloadIdleDefault = unloaded::add)
@@ -82,11 +86,73 @@ class DealerAsrDownloadsTest {
     }
 
     @Test
+    fun productionLifecycleCallbacksDriveActiveProtectionAndIdleUnload() = runBlocking {
+        val fixture = fixture()
+        val second = fixture.entry.withPackId("second-pack")
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val unloaded = mutableListOf<DealerAsrPackKey>()
+        val manager = manager(fixture.root, transport, unloadIdleDefault = unloaded::add)
+        val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val lifecycle = DealerAsrDownloadLifecycle({ manager }, lifecycleScope)
+        try {
+            val first = manager.queue(fixture.entry)
+            val secondJob = manager.queue(second)
+            await { manager.stateFlow.value.jobs.all { it.state == DealerAsrDownloadState.READY } }
+
+            lifecycle.onSessionStarted(first.key)
+            await {
+                manager.stateFlow.value.activeSessions.contains(first.key) &&
+                    manager.stateFlow.value.installed.first { it.key == first.key }.isActive
+            }
+            manager.setDefault(secondJob.key)
+            assertTrue(unloaded.isEmpty())
+            assertEquals(
+                "model-pack-active",
+                runCatching { manager.delete(first.key, confirmed = true) }.exceptionOrNull()?.message,
+            )
+
+            lifecycle.onSessionClosed(first.key)
+            await {
+                first.key !in manager.stateFlow.value.activeSessions &&
+                    !manager.stateFlow.value.installed.first { it.key == first.key }.isActive
+            }
+            assertEquals(listOf(first.key), unloaded)
+        } finally {
+            lifecycleScope.cancel()
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun productionRuntimeHealthFailureMarksDefaultRepairNeeded() = runBlocking {
+        val fixture = fixture()
+        val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val manager = manager(
+            fixture.root,
+            transport,
+            runtimeHealth = { "runtime-load-failed" },
+        )
+        try {
+            val queued = manager.queue(fixture.entry)
+            await { manager.stateFlow.value.jobs.single().state == DealerAsrDownloadState.REPAIR_NEEDED }
+            assertEquals(queued.key, manager.stateFlow.value.defaultPack)
+            assertEquals("runtime-load-failed", manager.stateFlow.value.jobs.single().error)
+        } finally {
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun corruptDefaultBecomesRepairNeededWithoutFallbackAndRepairKeepsProfile() = runBlocking {
         val fixture = fixture()
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
         val manager = manager(fixture.root, transport)
-        val customProfile = "{\"packId\":\"${fixture.entry.id}\",\"custom\":true}"
+        val customProfile = customProfile(
+            DealerAsrPackKey(fixture.entry.id, fixture.entry.revision),
+            600,
+        )
         try {
             val queued = manager.queue(fixture.entry)
             await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
@@ -119,10 +185,25 @@ class DealerAsrDownloadsTest {
     fun installedRevisionSurvivesCatalogRemovalAndRestart() = runBlocking {
         val fixture = fixture()
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
+        val catalogRoot = Files.createTempDirectory("dealer-asr-catalog").toFile()
+        val oldCatalog = catalogRaw(fixture.entry.revision, fixture.bytes)
+        val removedRevision = "c".repeat(40)
+        val removedCatalog = catalogRaw(removedRevision, fixture.bytes)
+        val catalogStore = DealerAsrCatalogStore(
+            catalogFile = catalogRoot.resolve("catalog.json"),
+            embeddedCatalog = { oldCatalog },
+            fetchCatalog = { removedCatalog },
+            supportedAdapters = setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
+        )
         val manager = manager(fixture.root, transport)
         try {
-            val queued = manager.queue(fixture.entry)
+            val initial = catalogStore.load().catalog
+            val queued = manager.queue(initial.entries.single())
             await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
+            val refresh = catalogStore.refresh()
+            assertTrue(refresh.updated)
+            assertTrue(refresh.catalog.entries.none { it.revision == queued.key.revision })
+            manager.syncCatalog(refresh.catalog)
             manager.close()
 
             val restarted = manager(fixture.root, transport)
@@ -130,42 +211,42 @@ class DealerAsrDownloadsTest {
                 restarted.start()
                 assertEquals(DealerAsrDownloadState.READY, restarted.stateFlow.value.jobs.single().state)
                 assertEquals(queued.key, restarted.stateFlow.value.defaultPack)
+                assertEquals(queued.key, restarted.stateFlow.value.installed.single().key)
             } finally {
                 restarted.close()
             }
         } finally {
             fixture.root.deleteRecursively()
+            catalogRoot.deleteRecursively()
         }
     }
 
     @Test
-    fun stateV1MigratesAtomicallyAndUnsupportedStateRemainsUntouched() = runBlocking {
+    fun migrationWriteFailurePreservesCompleteStateAndSurfacesFailure() = runBlocking {
         val fixture = fixture()
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
         val manager = manager(fixture.root, transport)
         try {
-            manager.queue(fixture.entry)
+            val queued = manager.queue(fixture.entry)
             await { manager.stateFlow.value.jobs.singleOrNull()?.state == DealerAsrDownloadState.READY }
             manager.close()
 
             val stateFile = fixture.root.resolve("state.json")
             val v1 = stateFile.readText().replace("\"schemaVersion\":2,", "")
             stateFile.writeText(v1)
-            val migrated = manager(fixture.root, transport)
-            try {
-                migrated.start()
-                assertTrue(stateFile.readText().contains("\"schemaVersion\":2"))
-            } finally {
-                migrated.close()
-            }
-
-            val unsupported = stateFile.readText().replace("\"schemaVersion\":2", "\"schemaVersion\":99")
-            stateFile.writeText(unsupported)
-            val rejected = manager(fixture.root, transport)
+            val previousCompleteState = stateFile.readText()
+            val rejected = manager(
+                fixture.root,
+                transport,
+                stateCommit = { _, _ -> error("forced-migration-write-failure") },
+            )
             try {
                 rejected.start()
-                assertEquals("download-state-unsupported", rejected.stateFlow.value.error)
-                assertEquals(unsupported, stateFile.readText())
+                assertEquals("download-state-migration-failed", rejected.stateFlow.value.error)
+                assertEquals(previousCompleteState, stateFile.readText())
+                assertEquals(DealerAsrDownloadState.READY, rejected.stateFlow.value.jobs.single().state)
+                assertEquals(queued.key, rejected.stateFlow.value.defaultPack)
+                assertEquals(queued.key, rejected.stateFlow.value.installed.single().key)
             } finally {
                 rejected.close()
             }
@@ -226,7 +307,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun activePauseYieldsToQueuedWorkAndResumeUsesRangeValidator() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -268,7 +349,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun pausingQueuedPackDoesNotInterruptActivePack() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -305,7 +386,7 @@ class DealerAsrDownloadsTest {
     @Test
     fun cancellingQueuedPackDoesNotInterruptActivePackOrCreatePartialReadyInstall() = runBlocking {
         val fixture = fixture()
-        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val second = fixture.entry.withPackId("second-pack")
         val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
         val manager = manager(fixture.root, transport)
         try {
@@ -388,6 +469,10 @@ class DealerAsrDownloadsTest {
             lowStorageBytes = { 0L },
         ),
         unloadIdleDefault: (DealerAsrPackKey) -> Unit = {},
+        runtimeHealth: (DealerAsrDownloadJob) -> String? = { null },
+        stateCommit: (java.io.File, java.io.File) -> Unit = { temporary, target ->
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        },
     ) = DealerAsrDownloadManager(
         stateFile = root.resolve("state.json"),
         partialRoot = root.resolve("partials"),
@@ -395,6 +480,8 @@ class DealerAsrDownloadsTest {
         transport = transport,
         storage = storage,
         unloadIdleDefault = unloadIdleDefault,
+        runtimeHealth = runtimeHealth,
+        stateCommit = stateCommit,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
@@ -408,9 +495,16 @@ class DealerAsrDownloadsTest {
         val root = Files.createTempDirectory("dealer-asr-download").toFile()
         val bytes = "verified-model".toByteArray()
         val revision = "a".repeat(40)
-        val digest = sha256(bytes)
         val entry = DealerAsrCatalog.parse(
-            """
+            catalogRaw(revision, bytes),
+            supportedAdapters = setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
+        ).entries.single()
+        return Fixture(root, bytes, entry)
+    }
+
+    private fun catalogRaw(revision: String, bytes: ByteArray): String {
+        val digest = sha256(bytes)
+        return """
             {
               "schemaVersion": 1,
               "runtime": {"backend": "cpu", "engine": "onnxruntime", "adapters": ["PARAKEET_UNIFIED_STREAMING"]},
@@ -433,15 +527,33 @@ class DealerAsrDownloadsTest {
                 "profileSchema": {"packId": "parakeet-unified-en-0.6b-int8-streaming-560ms", "revision": "$revision", "schemaVersion": 1, "fields": [{"name": "warmRetentionSeconds", "type": "integer", "default": 300}]}
               }]
             }
-            """.trimIndent(),
-            supportedAdapters = setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
-        ).entries.single()
-        return Fixture(root, bytes, entry)
+        """.trimIndent()
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
         .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+    private fun DealerAsrCatalogEntry.withPackId(id: String): DealerAsrCatalogEntry = copy(
+        id = id,
+        displayName = "Second",
+        defaultProfile = JsonObject(defaultProfile + ("packId" to JsonPrimitive(id))),
+        profileSchema = JsonObject(profileSchema + ("packId" to JsonPrimitive(id))),
+    )
+
+    private fun DealerAsrCatalogEntry.withRevision(
+        revision: String,
+        displayName: String,
+    ): DealerAsrCatalogEntry = copy(
+        revision = revision,
+        displayName = displayName,
+        defaultProfile = JsonObject(defaultProfile + ("revision" to JsonPrimitive(revision))),
+        profileSchema = JsonObject(profileSchema + ("revision" to JsonPrimitive(revision))),
+    )
+
+    private fun customProfile(key: DealerAsrPackKey, warmRetentionSeconds: Int): String =
+        "{\"packId\":\"${key.packId}\",\"revision\":\"${key.revision}\",\"schemaVersion\":1," +
+            "\"settings\":{\"warmRetentionSeconds\":$warmRetentionSeconds}}"
 
     private data class Fixture(
         val root: java.io.File,

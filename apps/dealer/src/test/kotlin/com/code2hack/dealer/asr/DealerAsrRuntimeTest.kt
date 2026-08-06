@@ -35,6 +35,38 @@ class DealerAsrRuntimeTest {
     }
 
     @Test
+    fun runtimeLoadFailureNotifiesProductionLifecycle() {
+        val fixture = installedPack()
+        val failures = mutableListOf<Pair<DealerAsrPackKey, String>>()
+        try {
+            val runtime = DealerAsrRuntime(
+                fixture.root,
+                { throw UnsatisfiedLinkError("test") },
+                object : DealerAsrRuntimeCallbacks {
+                    override fun onSessionStarted(key: DealerAsrPackKey) = Unit
+
+                    override fun onSessionClosed(key: DealerAsrPackKey) = Unit
+
+                    override fun onPackFailure(key: DealerAsrPackKey, reason: String) {
+                        failures += key to reason
+                    }
+                },
+            )
+            val pack = verifiedPack(runtime, fixture.manifest)
+            assertEquals(
+                DealerAsrStartup.Unavailable("runtime-load-failed"),
+                runtime.startup(pack),
+            )
+            assertEquals(
+                listOf(DealerAsrPackKey("test-pack", "r1") to "runtime-load-failed"),
+                failures,
+            )
+        } finally {
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun verifierRejectsUnsupportedMoonshineUntilItsRuntimeExists() {
         assertEquals(
             DealerAsrPackVerification.Rejected("adapter-not-supported"),
