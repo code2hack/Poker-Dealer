@@ -12,6 +12,7 @@ class ThreadWorkProjectionTest {
     private val attentionTie = CodexThreadLocator("u4090", "attention-tie")
     private val readyOld = CodexThreadLocator("spark", "ready-old")
     private val readyTie = CodexThreadLocator("u4090", "ready-tie")
+    private val busyOld = CodexThreadLocator("spark", "busy-old")
 
     @Test
     fun `authoritative evidence derives only the three work states`() {
@@ -30,11 +31,24 @@ class ThreadWorkProjectionTest {
         reducer.attach(busy, evidence(true), atMs = 99)
         reducer.attach(attentionOld, evidence(true), atMs = 10)
         reducer.attach(readyOld, evidence(false), atMs = 30)
+        reducer.attach(busyOld, evidence(true), atMs = 1)
         reducer.transition(attentionTie, evidence(true, 1), atMs = 40)
         reducer.transition(attentionOld, evidence(true, 1), atMs = 40)
 
         assertEquals(
-            listOf(busy, attentionTie, attentionOld, readyTie, readyOld),
+            listOf(busyOld, busy, attentionTie, attentionOld, readyTie, readyOld),
+            reducer.metadata().orderedPiles.map(ThreadPile::locator),
+        )
+
+        reducer.acceptedPromptOrSteer(busyOld, atMs = 100)
+        assertEquals(
+            listOf(busy, busyOld, attentionTie, attentionOld, readyTie, readyOld),
+            reducer.metadata().orderedPiles.map(ThreadPile::locator),
+        )
+
+        reducer.transition(busyOld, evidence(true), atMs = 101)
+        assertEquals(
+            listOf(busy, busyOld, attentionTie, attentionOld, readyTie, readyOld),
             reducer.metadata().orderedPiles.map(ThreadPile::locator),
         )
     }
@@ -66,7 +80,7 @@ class ThreadWorkProjectionTest {
     }
 
     @Test
-    fun `visible HUD never has focus stolen and accepted input advances or hides`() {
+    fun `visible HUD preserves focus through reorder and accepted input`() {
         val reducer = ThreadPileReducer()
         reducer.attach(readyOld, evidence(false), atMs = 1)
         reducer.attach(attentionOld, evidence(true), atMs = 2)
@@ -80,11 +94,54 @@ class ThreadWorkProjectionTest {
         reducer.manualWake()
         assertEquals(attentionOld, reducer.metadata().focused)
         reducer.view(readyOld)
-        reducer.acceptedPromptOrSteer(readyOld, atMs = 5)
+        reducer.transition(readyOld, evidence(true), atMs = 5)
+        assertEquals(readyOld, reducer.metadata().focused)
+        assertTrue(reducer.metadata().hudVisible)
+        reducer.acceptedPromptOrSteer(readyOld, atMs = 6)
+        assertEquals(readyOld, reducer.metadata().focused)
+        reducer.acceptedPromptOrSteer(attentionOld, atMs = 7)
+        assertEquals(readyOld, reducer.metadata().focused)
+        reducer.acceptedPromptOrSteer(readyTie, atMs = 8)
+        assertEquals(readyOld, reducer.metadata().focused)
+        assertTrue(reducer.metadata().hudVisible)
+    }
+
+    @Test
+    fun `focus movement stops at horizontal boundaries`() {
+        val reducer = ThreadPileReducer()
+        reducer.attach(busy, evidence(true), atMs = 1)
+        reducer.attach(attentionOld, evidence(true, 1), atMs = 2)
+        reducer.attach(readyOld, evidence(false), atMs = 3)
+        reducer.view(attentionOld)
+
+        assertTrue(reducer.moveFocus(PileDirection.LEFT))
+        assertEquals(busy, reducer.metadata().focused)
+        assertFalse(reducer.moveFocus(PileDirection.LEFT))
+        assertEquals(busy, reducer.metadata().focused)
+        assertTrue(reducer.moveFocus(PileDirection.RIGHT))
         assertEquals(attentionOld, reducer.metadata().focused)
-        reducer.acceptedPromptOrSteer(attentionOld, atMs = 6)
-        assertEquals(readyTie, reducer.metadata().focused)
-        reducer.acceptedPromptOrSteer(readyTie, atMs = 7)
+        assertTrue(reducer.moveFocus(PileDirection.RIGHT))
+        assertEquals(readyOld, reducer.metadata().focused)
+        assertFalse(reducer.moveFocus(PileDirection.RIGHT))
+        assertEquals(readyOld, reducer.metadata().focused)
+    }
+
+    @Test
+    fun `removing the focused pile selects the new occupant then the preceding pile`() {
+        val reducer = ThreadPileReducer()
+        reducer.attach(busy, evidence(true), atMs = 1)
+        reducer.attach(attentionOld, evidence(true, 1), atMs = 2)
+        reducer.attach(readyOld, evidence(false), atMs = 3)
+
+        reducer.view(attentionOld)
+        reducer.detach(attentionOld)
+        assertEquals(readyOld, reducer.metadata().focused)
+        assertTrue(reducer.metadata().hudVisible)
+
+        reducer.detach(readyOld)
+        assertEquals(busy, reducer.metadata().focused)
+        reducer.detach(busy)
+        assertNull(reducer.metadata().focused)
         assertFalse(reducer.metadata().hudVisible)
     }
 
