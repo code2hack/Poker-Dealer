@@ -80,7 +80,6 @@ internal class PokerBuiltInInputAdapter(
     }
 
     private data class TouchState(
-        val downTimeMs: Long,
         val downY: Float,
         var fingerCount: Int,
         var lastEventTimeMs: Long,
@@ -104,13 +103,22 @@ internal class PokerBuiltInInputAdapter(
     fun onTouchEvent(event: PokerTouchEvent): List<PokerInputController.Result> {
         if (owner == null && event.action == PokerTouchAction.DOWN) {
             owner = Owner.TOUCH
-            touch = TouchState(
-                downTimeMs = event.eventTimeMs,
+            val state = TouchState(
                 downY = event.y,
                 fingerCount = event.pointerCount.coerceAtLeast(1),
                 lastEventTimeMs = event.eventTimeMs,
             )
-            return emptyList()
+            touch = state
+            val result = dispatch(
+                PokerInteraction(
+                    source = PokerInputSource.GLASSES,
+                    operation = null,
+                    phase = PokerInteractionPhase.BEGIN,
+                    eventTimeMs = event.eventTimeMs,
+                ),
+            )
+            state.domainStarted = result != null
+            return listOfNotNull(result)
         }
         if (owner != Owner.TOUCH) return emptyList()
 
@@ -176,11 +184,10 @@ internal class PokerBuiltInInputAdapter(
                 PokerInteraction(
                     source = PokerInputSource.GLASSES,
                     operation = state.operation!!,
-                    phase = PokerInteractionPhase.BEGIN,
-                    eventTimeMs = state.downTimeMs,
+                    phase = PokerInteractionPhase.UPDATE,
+                    eventTimeMs = event.eventTimeMs,
                 ),
             )
-            state.domainStarted = result != null
             return listOfNotNull(result)
         }
         val operation = state.operation ?: return emptyList()
@@ -206,18 +213,6 @@ internal class PokerBuiltInInputAdapter(
             PokerOperation.TAP
         }
         val results = mutableListOf<PokerInputController.Result>()
-        if (state.operation == null) {
-            val begin = dispatch(
-                PokerInteraction(
-                    source = PokerInputSource.GLASSES,
-                    operation = operation,
-                    phase = PokerInteractionPhase.BEGIN,
-                    eventTimeMs = state.downTimeMs,
-                ),
-            )
-            state.domainStarted = begin != null
-            begin?.let(results::add)
-        }
         if (state.domainStarted) {
             dispatch(
                 PokerInteraction(

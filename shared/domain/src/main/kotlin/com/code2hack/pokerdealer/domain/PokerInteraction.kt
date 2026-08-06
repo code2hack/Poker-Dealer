@@ -50,7 +50,7 @@ fun PokerGlassesGesture.toOperation(): PokerOperation = when (this) {
 
 data class PokerInteraction(
     val source: PokerInputSource,
-    val operation: PokerOperation,
+    val operation: PokerOperation?,
     val phase: PokerInteractionPhase,
     val eventTimeMs: Long,
     val durationMs: Long = 0L,
@@ -77,7 +77,7 @@ fun glassesInteraction(
 class PokerInteractionReducer {
     private data class ActiveInteraction(
         val source: PokerInputSource,
-        val operation: PokerOperation,
+        val operation: PokerOperation?,
         val startedAtMs: Long,
         val lastEventTimeMs: Long,
     )
@@ -140,14 +140,20 @@ class PokerInteractionReducer {
 
     private fun updateTimestamp(interaction: PokerInteraction) {
         lastEventTimeBySource[interaction.source] = interaction.eventTimeMs
-        active = active?.copy(lastEventTimeMs = interaction.eventTimeMs)
+        active = active?.let { current ->
+            current.copy(
+                operation = interaction.operation ?: current.operation,
+                lastEventTimeMs = interaction.eventTimeMs,
+            )
+        }
     }
 
     private fun PokerInteraction.withDuration(active: ActiveInteraction?): PokerInteraction =
         copy(durationMs = eventTimeMs - (active?.startedAtMs ?: eventTimeMs))
 
     private fun PokerInteraction.matches(active: ActiveInteraction?): Boolean =
-        active != null && source == active.source && operation == active.operation
+        active != null && source == active.source &&
+            (active.operation == null || operation == active.operation)
 }
 
 enum class PokerNavigationMode {
@@ -577,7 +583,7 @@ class PokerInputController(
     fun reduce(interaction: PokerInteraction): Result? {
         val accepted = interactions.reduce(interaction) ?: return null
         val effect = if (accepted.phase == PokerInteractionPhase.RELEASE) {
-            navigation.apply(accepted.operation)
+            accepted.operation?.let(navigation::apply) ?: PokerNavigationEffect.NONE
         } else {
             PokerNavigationEffect.NONE
         }
