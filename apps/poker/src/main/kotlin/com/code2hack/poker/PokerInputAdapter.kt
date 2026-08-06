@@ -17,6 +17,8 @@ import com.code2hack.pokerdealer.domain.PokerInputSource
 import com.code2hack.pokerdealer.domain.PokerInteraction
 import com.code2hack.pokerdealer.domain.PokerInteractionPhase
 import com.code2hack.pokerdealer.domain.PokerOperation
+import com.code2hack.pokerdealer.domain.PokerPostureSample
+import com.code2hack.pokerdealer.domain.PokerWheelState
 import kotlin.math.abs
 
 internal enum class PokerTouchAction {
@@ -114,6 +116,7 @@ internal class PokerBuiltInInputAdapter(
     private val monotonicNowMs: () -> Long = { SystemClock.uptimeMillis() },
     private val onNavigationChanged: () -> Unit = {},
     private val onResult: (PokerInputController.Result) -> Unit = {},
+    private val onWheelChanged: (PokerWheelState) -> Unit = {},
 ) {
     private enum class Owner {
         TOUCH,
@@ -226,6 +229,9 @@ internal class PokerBuiltInInputAdapter(
 
     fun onDisconnected(): List<PokerInputController.Result> = cancelOwned(PokerCancellationReason.DISCONNECTED)
 
+    fun onPosture(sample: PokerPostureSample): PokerWheelState? =
+        controller.updatePosture(sample)?.also(onWheelChanged)
+
     private fun moveTouch(
         state: TouchState,
         event: PokerTouchEvent,
@@ -302,7 +308,10 @@ internal class PokerBuiltInInputAdapter(
     private fun cancelTouch(eventTimeMs: Long): List<PokerInputController.Result> {
         val state = touch ?: return emptyList()
         val result = if (state.domainStarted) {
-            controller.cancel(PokerCancellationReason.ACTION_CANCEL, eventTimeMs)
+            controller.cancel(PokerCancellationReason.ACTION_CANCEL, eventTimeMs)?.also {
+                onResult(it)
+                onWheelChanged(it.wheelState)
+            }
         } else {
             null
         }
@@ -313,7 +322,10 @@ internal class PokerBuiltInInputAdapter(
     private fun cancelFunction(eventTimeMs: Long): List<PokerInputController.Result> {
         val state = function ?: return emptyList()
         val result = if (state.domainStarted) {
-            controller.cancel(PokerCancellationReason.ACTION_CANCEL, eventTimeMs)
+            controller.cancel(PokerCancellationReason.ACTION_CANCEL, eventTimeMs)?.also {
+                onResult(it)
+                onWheelChanged(it.wheelState)
+            }
         } else {
             null
         }
@@ -325,10 +337,16 @@ internal class PokerBuiltInInputAdapter(
         val eventTimeMs = monotonicNowMs()
         val result = when (owner) {
             Owner.TOUCH -> touch?.takeIf { it.domainStarted }?.let {
-                controller.cancel(reason, eventTimeMs)
+                controller.cancel(reason, eventTimeMs)?.also { result ->
+                    onResult(result)
+                    onWheelChanged(result.wheelState)
+                }
             }
             Owner.FUNCTION -> function?.takeIf { it.domainStarted }?.let {
-                controller.cancel(reason, eventTimeMs)
+                controller.cancel(reason, eventTimeMs)?.also { result ->
+                    onResult(result)
+                    onWheelChanged(result.wheelState)
+                }
             }
             null -> null
         }
@@ -339,6 +357,7 @@ internal class PokerBuiltInInputAdapter(
     private fun dispatch(interaction: PokerInteraction): PokerInputController.Result? =
         controller.reduce(interaction)?.also {
             onResult(it)
+            onWheelChanged(it.wheelState)
             if (it.navigationEffect != com.code2hack.pokerdealer.domain.PokerNavigationEffect.NONE) {
                 onNavigationChanged()
             }
@@ -397,6 +416,8 @@ internal class PokerRemoteInputAdapter(
     private val onNavigationChanged: () -> Unit = {},
     private val onBindingChanged: () -> Unit = {},
     private val onNotice: (String) -> Unit = {},
+    private val onResult: (PokerInputController.Result) -> Unit = {},
+    private val onWheelChanged: (PokerWheelState) -> Unit = {},
 ) {
     private data class ActiveKey(
         val descriptor: String,
@@ -502,7 +523,10 @@ internal class PokerRemoteInputAdapter(
         active = null
         if (event.eventTimeMs < current.startedAtMs) {
             if (!current.learning) {
-                controller.cancel(PokerCancellationReason.ACTION_CANCEL, current.startedAtMs)
+                controller.cancel(PokerCancellationReason.ACTION_CANCEL, current.startedAtMs)?.also {
+                    onResult(it)
+                    onWheelChanged(it.wheelState)
+                }
             }
             return true
         }
@@ -534,19 +558,29 @@ internal class PokerRemoteInputAdapter(
         if (current.learning) {
             onNotice("Cannot bind")
         } else {
-            controller.cancel(PokerCancellationReason.ACTION_CANCEL, event.eventTimeMs)
+            controller.cancel(PokerCancellationReason.ACTION_CANCEL, event.eventTimeMs)?.also {
+                onResult(it)
+                onWheelChanged(it.wheelState)
+            }
         }
         return true
     }
 
     private fun cancelActive(reason: PokerCancellationReason, eventTimeMs: Long) {
         val current = active ?: return
-        if (!current.learning) controller.cancel(reason, eventTimeMs)
+        if (!current.learning) {
+            controller.cancel(reason, eventTimeMs)?.also {
+                onResult(it)
+                onWheelChanged(it.wheelState)
+            }
+        }
         active = null
     }
 
     private fun dispatch(interaction: PokerInteraction) {
         controller.reduce(interaction)?.let {
+            onResult(it)
+            onWheelChanged(it.wheelState)
             if (it.navigationEffect != com.code2hack.pokerdealer.domain.PokerNavigationEffect.NONE) {
                 onNavigationChanged()
             }
@@ -639,4 +673,6 @@ internal class PokerAndroidInputAdapter(
     }
 
     fun onRemoteDisconnected(descriptor: String) = remote?.onDisconnected(descriptor)
+
+    fun onPosture(sample: PokerPostureSample): PokerWheelState? = builtIn.onPosture(sample)
 }

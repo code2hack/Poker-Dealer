@@ -1,7 +1,11 @@
 package com.code2hack.poker
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerPileAnchor
 import com.code2hack.pokerdealer.domain.PokerPileMetadata
+import com.code2hack.pokerdealer.domain.PokerWheelAction
+import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 
@@ -69,6 +75,7 @@ internal fun PokerPilePages(
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
     composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
     requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
+    wheelState: PokerWheelState = PokerWheelState(),
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
@@ -85,14 +92,15 @@ internal fun PokerPilePages(
         listState.scrollToItem(scrollOffset)
     }
 
-    Column(modifier = modifier.fillMaxSize()) {
-        LazyColumn(
+    Box(modifier = modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
             state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .padding(horizontal = 18.dp, vertical = 8.dp),
-        ) {
+            ) {
             itemsIndexed(
                 items = lines,
                 key = { index, _ -> "${page.locator.hostId}:${page.locator.threadId}:$index" },
@@ -104,24 +112,24 @@ internal fun PokerPilePages(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-        }
+            }
 
-        page.composerText?.let { draft ->
-            Text(
-                text = "Draft: $draft",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 8.dp),
-                color = Color(0xFFB7E3C0),
-            )
-        }
+            page.composerText?.let { draft ->
+                Text(
+                    text = "Draft: $draft",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                    color = Color(0xFFB7E3C0),
+                )
+            }
 
-        page.requestProjections.forEach { projection ->
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 8.dp),
-            ) {
+            page.requestProjections.forEach { projection ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                ) {
                 Text(
                     "Request ${projection.request.locator.requestId} | ${projection.request.resolution}",
                     color = Color(0xFFFFD18A),
@@ -170,16 +178,48 @@ internal fun PokerPilePages(
                         controlPosition++
                     }
                 }
+                }
             }
+
+            Text(
+                "Swipe/drag to scroll · full Codex text retained",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF101820))
+                    .padding(12.dp),
+                color = Color(0xFFAFC4D8),
+            )
         }
 
-        Text(
-            "Swipe/drag to scroll · full Codex text retained",
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF101820))
-                .padding(12.dp),
-            color = Color(0xFFAFC4D8),
-        )
+        if (wheelState.opened) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color(0xEE18232D))
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                wheelLabel(wheelState, PokerWheelAction.PHOTO, "Photo")
+                Row {
+                    wheelLabel(wheelState, PokerWheelAction.MORSE, "Morse")
+                    wheelLabel(wheelState, PokerWheelAction.ASR, "ASR")
+                }
+                wheelLabel(wheelState, PokerWheelAction.PRIMARY, "Primary")
+            }
+        }
     }
+}
+
+@Composable
+private fun wheelLabel(state: PokerWheelState, action: PokerWheelAction, label: String) {
+    val available = state.context.isAvailable(action)
+    Text(
+        text = if (state.highlightedAction == action) "▶ $label" else label,
+        color = when {
+            !available -> Color(0xFF65727C)
+            state.highlightedAction == action -> Color(0xFFFFD18A)
+            else -> Color(0xFFE8EEF4)
+        },
+        modifier = Modifier.width(96.dp).padding(6.dp),
+    )
 }

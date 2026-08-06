@@ -2,16 +2,21 @@ package com.code2hack.poker
 
 import com.code2hack.pokerdealer.domain.PokerNavigationMode
 import com.code2hack.pokerdealer.domain.PokerNavigationReducer
+import com.code2hack.pokerdealer.domain.PokerOperation
 import com.code2hack.pokerdealer.domain.PokerPileLayout
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
+import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.toPokerRequestPanelLayout
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationKind
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationTarget
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
 import java.util.UUID
 
 /** Keeps request-panel focus local while Dealer remains authoritative for answer content. */
@@ -21,6 +26,7 @@ internal class PokerUserInputController(
 ) {
     private val projections = mutableMapOf<ServerRequestLocator, UserInputRequestProjection>()
     private val pending = mutableMapOf<ServerRequestLocator, UserInputAnswerMutationTarget>()
+    private val pendingPrimary = mutableMapOf<ServerRequestLocator, PokerPrimaryActionTarget>()
 
     fun applyProjection(projection: UserInputRequestProjection) {
         val supersedingGeneration = projections.keys.any {
@@ -30,6 +36,8 @@ internal class PokerUserInputController(
         }
         if (supersedingGeneration) return
         val existing = projections[projection.request.locator]
+        val resolvedPrimary = projection.request.resolution == RequestResolutionState.RESOLVED &&
+            pendingPrimary[projection.request.locator] != null
         if (existing != null && projectionIsStale(existing, projection)) return
         projections.keys
             .filter {
@@ -43,10 +51,51 @@ internal class PokerUserInputController(
                 pending.remove(oldLocator)
             }
         if (existing != null && existing != projection) {
-            pending.remove(projection.request.locator)
+            val primary = pendingPrimary[projection.request.locator]
+            if (primary == null ||
+                projection.request.resolution == RequestResolutionState.RESOLVED ||
+                primary.requestFingerprint != projection.request.fingerprint ||
+                primary.answerRevision != projection.buffer.revision ||
+                primary.controlGeneration != projection.controlGeneration ||
+                primary.connectionEpoch != projection.connectionEpoch ||
+                primary.modeSession != projection.modeSession
+            ) {
+                pendingPrimary.remove(projection.request.locator)
+                pending.remove(projection.request.locator)
+            }
         }
         projections[projection.request.locator] = projection
+        if (projection.request.resolution == RequestResolutionState.RESOLVED) {
+            pendingPrimary.remove(projection.request.locator)
+        }
         updateLayout(projection)
+        if (resolvedPrimary && navigation.metadata().focused == projection.request.thread) {
+            val anchor = navigation.anchor(projection.request.thread)
+            if (anchor?.mode == PokerNavigationMode.REQUEST_PANEL &&
+                anchor.inputId == projection.request.panelId
+            ) {
+                navigation.apply(PokerOperation.UP)
+            }
+        }
+    }
+
+    fun focusedSubmission(): UserInputRequestProjection? {
+        val thread = navigation.metadata().focused ?: return null
+        val anchor = navigation.anchor(thread)
+            ?.takeIf { it.mode == PokerNavigationMode.REQUEST_PANEL }
+            ?: return null
+        val layout = navigation.layout(thread) ?: return null
+        val panel = layout.cards.firstOrNull { it.id == anchor.cardId }
+            ?.requestPanel
+            ?.takeIf { it.id == anchor.inputId }
+            ?: return null
+        return projections.values.firstOrNull {
+                it.request.thread == thread &&
+                it.request.panelId == panel.id &&
+                it.hasDealerClaim &&
+                it.request.resolution == RequestResolutionState.PENDING &&
+                it.buffer.isComplete(it.request)
+        }
     }
 
     suspend fun selectFocused(): Boolean {
@@ -92,7 +141,7 @@ internal class PokerUserInputController(
         if (projection.request.resolution != RequestResolutionState.PENDING) {
             return false
         }
-        if (pending[locator] != null) return false
+        if (pending[locator] != null || pendingPrimary[locator] != null) return false
         val target = UserInputAnswerMutationTarget(
             locator = locator,
             questionId = questionId,
@@ -119,6 +168,36 @@ internal class PokerUserInputController(
         return true
     }
 
+    fun beginPrimary(target: PokerPrimaryActionTarget): Boolean {
+        if (target.action != PokerPrimaryAction.REQUEST) return false
+        val locator = target.requestLocator ?: return false
+        if (pendingPrimary[locator] != null || pending[locator] != null) return false
+        val projection = projections[locator] ?: return false
+        if (projection.request.resolution != RequestResolutionState.PENDING ||
+            projection.buffer.revision != target.answerRevision ||
+            projection.request.fingerprint != target.requestFingerprint ||
+            projection.controlGeneration != target.controlGeneration ||
+            projection.connectionEpoch != target.connectionEpoch ||
+            projection.modeSession != target.modeSession ||
+            !projection.hasDealerClaim ||
+            !projection.buffer.isComplete(projection.request)
+        ) return false
+        pendingPrimary[locator] = target
+        updateLayout(projection)
+        return true
+    }
+
+    fun applyPrimaryResult(result: PokerPrimaryActionResult) {
+        val locator = result.target.requestLocator ?: return
+        if (pendingPrimary[locator] != result.target) return
+        if (result.outcome == PokerPrimaryActionOutcome.REJECTED) {
+            pendingPrimary.remove(locator)
+            projections[locator]?.let(::updateLayout)
+        }
+    }
+
+    fun isPrimaryLocked(locator: ServerRequestLocator): Boolean = pendingPrimary[locator] != null
+
     fun applyResult(result: UserInputAnswerMutationResult) {
         val projection = projections[result.target.locator] ?: return
         if (pending[result.target.locator] != result.target) return
@@ -141,6 +220,10 @@ internal class PokerUserInputController(
                     it.resolution == RequestResolutionState.RESPONDING
             }
             ?.toPokerRequestPanelLayout()
+            ?.copy(
+                primaryActionLocked = pendingPrimary[projection.request.locator] != null,
+                hasDealerClaim = projection.hasDealerClaim,
+            )
         navigation.setLayout(
             locator,
             PokerPileLayout(

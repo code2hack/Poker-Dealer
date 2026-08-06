@@ -7,6 +7,10 @@ import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
+import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
@@ -30,6 +34,7 @@ internal object PokerComposerBridge {
         MutableStateFlow<Map<ServerRequestLocator, UserInputRequestProjection>>(emptyMap())
     private val userInputResultState =
         MutableStateFlow<Map<String, UserInputAnswerMutationResult>>(emptyMap())
+    private val primaryResultState = MutableStateFlow<Map<String, PokerPrimaryActionResult>>(emptyMap())
     private var sender: (suspend (String, JsonObject, Boolean) -> Boolean)? = null
 
     val projections: StateFlow<Map<com.code2hack.pokerdealer.domain.CodexThreadLocator, ComposerDraftProjection>> =
@@ -39,6 +44,7 @@ internal object PokerComposerBridge {
         userInputProjectionState
     val userInputResults: StateFlow<Map<String, UserInputAnswerMutationResult>> =
         userInputResultState
+    val primaryResults: StateFlow<Map<String, PokerPrimaryActionResult>> = primaryResultState
 
     fun attach(sender: suspend (String, JsonObject, Boolean) -> Boolean) {
         this.sender = sender
@@ -46,6 +52,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        primaryResultState.value = emptyMap()
     }
 
     fun detach() {
@@ -54,6 +61,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        primaryResultState.value = emptyMap()
     }
 
     fun receive(envelope: ProtocolEnvelope): Boolean = try {
@@ -88,6 +96,14 @@ internal object PokerComposerBridge {
                 userInputResultState.value = userInputResultState.value +
                     (result.target.operationId to result)
             }
+            POKER_PRIMARY_ACTION_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    PokerPrimaryActionResult.serializer(),
+                    envelope.payload,
+                )
+                primaryResultState.value = primaryResultState.value +
+                    (result.target.operationId to result)
+            }
             else -> return false
         }
         true
@@ -111,5 +127,14 @@ internal object PokerComposerBridge {
             request,
         ).jsonObject
         return send(POKER_USER_INPUT_MUTATION_TYPE, payload, true)
+    }
+
+    suspend fun sendPrimaryAction(target: PokerPrimaryActionTarget): Boolean {
+        val send = sender ?: return false
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            PokerPrimaryActionTarget.serializer(),
+            target,
+        ).jsonObject
+        return send(POKER_PRIMARY_ACTION_TYPE, payload, true)
     }
 }
