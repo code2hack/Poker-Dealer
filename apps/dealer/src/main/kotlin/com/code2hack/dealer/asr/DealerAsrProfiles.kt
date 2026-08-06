@@ -16,6 +16,8 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 internal enum class DealerAsrProfileValueType {
     BOOLEAN,
@@ -233,6 +235,12 @@ internal data class DealerAsrProfile(
     val warmRetentionSeconds: Int
         get() = settings["warmRetentionSeconds"]?.asInt()
             ?: error("validated profile lacks warmRetentionSeconds")
+
+    /** Used only at an explicit speech fence when the recognizer emitted no terminal punctuation. */
+    val pausePunctuation: String
+        get() = settings["pausePunctuation"]?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it in setOf("", ".", "?", "!") }
+            ?: "."
 
     fun matches(key: DealerAsrPackKey): Boolean =
         packId == key.packId && revision == key.revision

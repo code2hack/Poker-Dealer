@@ -33,6 +33,7 @@ import com.code2hack.pokerdealer.domain.PokerWheelAction
 import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
+import com.code2hack.pokerdealer.protocol.PokerAsrProjection
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.PokerApprovalDecision
 import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
@@ -50,6 +51,8 @@ internal data class PokerPilePage(
     val threadLabel: String = "",
     val unreadCount: Int = 0,
     val approvalProjections: List<PokerApprovalRequestProjection> = emptyList(),
+    val asrProjection: PokerAsrProjection? = null,
+    val asrNoticeVisible: Boolean = false,
 )
 
 internal data class PokerPileRenderProjection(
@@ -69,6 +72,8 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
     metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
     unreadCount: Int = 0,
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
+    asrProjection: PokerAsrProjection? = null,
+    asrNoticeVisible: Boolean = false,
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -85,6 +90,8 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 threadLabel = metadataByLocator[pile.locator]?.threadLabel().orEmpty(),
                 unreadCount = unreadCount,
                 approvalProjections = approvalProjectionsByLocator[pile.locator].orEmpty(),
+                asrProjection = asrProjection?.takeIf { it.target.locator == pile.locator },
+                asrNoticeVisible = asrNoticeVisible && asrProjection?.target?.locator == pile.locator,
             )
         }
     },
@@ -106,6 +113,8 @@ internal fun PokerPilePages(
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
     wheelState: PokerWheelState = PokerWheelState(),
     notice: String? = null,
+    asrProjection: PokerAsrProjection? = null,
+    asrNoticeVisible: Boolean = false,
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
@@ -116,6 +125,8 @@ internal fun PokerPilePages(
         metadataByLocator,
         unreadCount,
         approvalProjectionsByLocator,
+        asrProjection,
+        asrNoticeVisible,
     )
     val page = projection.visiblePage ?: return
     val lines = remember(page.locator, page.cardText, page.cards) { page.renderLines() }
@@ -168,6 +179,22 @@ internal fun PokerPilePages(
                         .fillMaxWidth()
                         .padding(horizontal = 18.dp, vertical = 8.dp),
                     color = Color(0xFFB7E3C0),
+                )
+            }
+            page.asrProjection?.takeIf { it.sliceText.isNotEmpty() }?.let { projection ->
+                Text(
+                    text = "ASR: ${projection.sliceText}",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 4.dp),
+                    color = Color(0xFFFFE08A),
+                )
+            }
+            if (page.asrNoticeVisible) {
+                Text(
+                    text = "ASR exited",
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
+                    color = Color(0xFFFFD18A),
                 )
             }
 

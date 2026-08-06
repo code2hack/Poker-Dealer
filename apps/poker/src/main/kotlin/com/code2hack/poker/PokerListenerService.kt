@@ -96,6 +96,7 @@ class PokerListenerService : Service() {
                     POKER_PRIMARY_ACTION_CAPABILITY,
                     POKER_PHOTO_CAPABILITY,
                     POKER_MORSE_CAPABILITY,
+                    com.code2hack.pokerdealer.protocol.POKER_ASR_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,
@@ -111,15 +112,20 @@ class PokerListenerService : Service() {
             onStateChanged = { state ->
                 if (state != com.code2hack.pokerdealer.protocol.PokerConnectionState.CONNECTED) {
                     PokerBindingRuntime.notifyConnectionLost()
+                    PokerAsrBridge.connectionLost()
                 }
             },
             onEnvelope = { _, envelope ->
                 PokerComposerBridge.receive(envelope)
+                PokerAsrBridge.receive(envelope)
                 handleBindingEnvelope(envelope)
             },
             callbacks = pokerSnapshotHandler,
         )
         PokerComposerBridge.attach { type, payload, requireWritable ->
+            owner.send(type, payload, requireWritable = requireWritable)
+        }
+        PokerAsrBridge.attach { type, payload, requireWritable ->
             owner.send(type, payload, requireWritable = requireWritable)
         }
         registerNetworkCallback()
@@ -171,6 +177,7 @@ class PokerListenerService : Service() {
         }
         networkCallback = null
         PokerComposerBridge.detach()
+        PokerAsrBridge.detach()
         PokerSnapshotRuntime.detachForegroundRequester()
         owner.stop()
         PokerBindingRuntime.notifyConnectionLost()

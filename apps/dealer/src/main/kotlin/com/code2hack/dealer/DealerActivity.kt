@@ -61,8 +61,7 @@ import com.code2hack.dealer.asr.DealerAsrDownloadManager
 import com.code2hack.dealer.asr.DealerAsrPackKey
 import com.code2hack.dealer.asr.DealerAsrMode
 import com.code2hack.dealer.asr.DealerAsrProfileSaveResult
-import com.code2hack.dealer.asr.DealerAsrDownloadLifecycle
-import com.code2hack.dealer.asr.DealerAsrRuntime
+import com.code2hack.dealer.asr.DealerAsrProcess
 import com.code2hack.dealer.asr.prettyDealerAsrProfile
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
@@ -112,8 +111,7 @@ class DealerActivity : ComponentActivity() {
     private var service: DealerConnectionService? = null
     private lateinit var asrCatalogStore: DealerAsrCatalogStore
     private lateinit var asrDownloadManager: DealerAsrDownloadManager
-    private lateinit var asrRuntime: DealerAsrRuntime
-    private lateinit var asrDownloadLifecycle: DealerAsrDownloadLifecycle
+    private lateinit var asrProcess: DealerAsrProcess
     private var serviceStateJob: Job? = null
     private var asrCatalogJob: Job? = null
     private var asrDownloadJob: Job? = null
@@ -149,13 +147,8 @@ class DealerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         openThreadNotification(intent)
         asrCatalogStore = DealerAsrCatalogStore(this)
-        asrDownloadLifecycle = DealerAsrDownloadLifecycle({ asrDownloadManager })
-        asrRuntime = DealerAsrRuntime(this, asrDownloadLifecycle)
-        asrDownloadManager = DealerAsrDownloadManager(
-            context = this,
-            runtimeHealth = asrRuntime::checkInstalledPack,
-            unloadIdleDefault = asrDownloadLifecycle::unloadIdleDefault,
-        )
+        asrProcess = DealerAsrProcess.shared(applicationContext)
+        asrDownloadManager = asrProcess.downloadManager
         asrCatalogJob = lifecycleScope.launch {
             val loaded = asrCatalogStore.load()
             asrDownloadManager.syncCatalog(loaded.catalog)
@@ -309,7 +302,6 @@ class DealerActivity : ComponentActivity() {
     override fun onDestroy() {
         asrCatalogJob?.cancel()
         asrDownloadJob?.cancel()
-        if (::asrDownloadManager.isInitialized) asrDownloadManager.close()
         privateKey?.fill(0)
         knownHosts?.fill(0)
         super.onDestroy()
@@ -702,6 +694,13 @@ private fun DealerApp(
                     style = MaterialTheme.typography.labelSmall,
                 )
                 Text(it.action, color = Color(0xFFFFC38B), style = MaterialTheme.typography.labelSmall)
+            }
+            if (state.asr.active) {
+                Text(
+                    "ASR: ${state.asr.provisionalText.ifBlank { "Preparing…" }}",
+                    color = Color(0xFFFFD18A),
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
         }
 
