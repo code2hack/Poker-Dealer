@@ -138,6 +138,7 @@ class PokerActivity : ComponentActivity() {
             wheelContext = { primaryActionController.wheelContext() },
             scope = lifecycleScope,
             sendMutation = PokerComposerBridge::sendMorseMutation,
+            sendCompletion = PokerComposerBridge::sendMorseCompletion,
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             onNotice = { message, durationMs ->
                 PokerNoticeRuntime.show(PokerTransientNotice(message, durationMs))
@@ -235,6 +236,12 @@ class PokerActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
+            PokerComposerBridge.morseCompletion.collect { projection ->
+                projection?.let(morseController::applyCompletion)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
             PokerComposerBridge.approvalProjections.collect { projections ->
                 projections.values.forEach(approvalController::applyProjection)
                 screenState.value = currentScreenState(screenState.value.wheelState)
@@ -319,6 +326,7 @@ class PokerActivity : ComponentActivity() {
                         }
                     }
                     morseController.handle(result.morseEvent)
+                    screenState.value = currentScreenState(result.wheelState)
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
@@ -338,6 +346,7 @@ class PokerActivity : ComponentActivity() {
                         handleWheelSelection(selection)
                     }
                     morseController.handle(result.morseEvent)
+                    screenState.value = currentScreenState(result.wheelState)
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
@@ -350,6 +359,7 @@ class PokerActivity : ComponentActivity() {
                 delay(50L)
                 if (morseController.input.isActive) {
                     morseController.tick(SystemClock.uptimeMillis())
+                    screenState.value = currentScreenState(screenState.value.wheelState)
                 }
             }
         }
@@ -441,6 +451,8 @@ class PokerActivity : ComponentActivity() {
         requestCardsByLocator = requestCardsByLocator,
         unreadCount = PokerSnapshotRuntime.unreadCount.value,
         wheelState = wheelState,
+        morseWord = morseController.input.state().word.takeIf { morseController.input.isActive },
+        morseSuffix = morseController.input.state().completion?.suffix,
     )
 
 }
@@ -519,6 +531,8 @@ private fun PokerCardReader(
                 cardTextByLocator = state.cardTextByLocator,
                 anchorByLocator = state.anchors,
                 composerTextByLocator = state.composerTextByLocator,
+                morseWord = state.morseWord,
+                morseSuffix = state.morseSuffix,
                 requestProjectionsByLocator = state.requestProjectionsByLocator,
                 approvalProjectionsByLocator = state.approvalProjectionsByLocator,
                 cardsByLocator = state.cardsByLocator,
@@ -613,6 +627,8 @@ private data class PokerScreenState(
     val anchors: Map<CodexThreadLocator, com.code2hack.pokerdealer.domain.PokerPileAnchor>,
     val cardTextByLocator: Map<CodexThreadLocator, String>,
     val composerTextByLocator: Map<CodexThreadLocator, String>,
+    val morseWord: String? = null,
+    val morseSuffix: String? = null,
     val requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>>,
     val cardsByLocator: Map<CodexThreadLocator, List<Card>>,
     val metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata>,
@@ -631,6 +647,8 @@ private fun PokerNavigationReducer.snapshot(
     unreadCount: Int = PokerSnapshotRuntime.unreadCount.value,
     wheelState: PokerWheelState = PokerWheelState(),
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>> = currentApprovalProjections(),
+    morseWord: String? = null,
+    morseSuffix: String? = null,
 ): PokerScreenState {
     val metadata = metadata()
     return PokerScreenState(
@@ -647,6 +665,8 @@ private fun PokerNavigationReducer.snapshot(
         unreadCount = unreadCount,
         approvalProjectionsByLocator = approvalProjectionsByLocator,
         wheelState = wheelState,
+        morseWord = morseWord,
+        morseSuffix = morseSuffix,
     )
 }
 
