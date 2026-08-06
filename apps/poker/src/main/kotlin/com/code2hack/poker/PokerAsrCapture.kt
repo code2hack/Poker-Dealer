@@ -1,5 +1,6 @@
 package com.code2hack.poker
 
+import android.annotation.SuppressLint
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -44,6 +45,7 @@ private class AndroidPokerAsrRecorder(
     override fun release() = audio.release()
 }
 
+@SuppressLint("MissingPermission")
 private fun createAndroidPokerAsrRecorder(minimum: Int): PokerAsrRecorder? = runCatching {
     AudioRecord(
         MediaRecorder.AudioSource.DEFAULT,
