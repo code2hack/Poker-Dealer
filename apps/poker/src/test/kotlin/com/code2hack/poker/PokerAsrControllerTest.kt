@@ -51,6 +51,7 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -462,6 +463,30 @@ class PokerAsrControllerTest {
         )
         assertEquals(PokerAsrState.IDLE, harness.controller.state)
         assertEquals(1, harness.counters.notices)
+    }
+
+    @Test
+    fun `dealer phone source leaves capture and fence ownership on Dealer`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                outcome = PokerAsrStartOutcome.READY,
+                pack = pack,
+                source = PokerAsrSource.DEALER_PHONE,
+            ),
+        )
+
+        assertEquals(PokerAsrState.ACTIVE, harness.controller.state)
+        assertEquals(0, harness.counters.captures)
+        assertTrue(!harness.controller.sendAudio(byteArrayOf(1, 0)))
+
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
+        assertNull(commit.fenceSampleOffset)
     }
 
     private fun composerHarness(): Harness {

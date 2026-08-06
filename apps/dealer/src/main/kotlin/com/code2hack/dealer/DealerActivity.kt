@@ -95,6 +95,7 @@ import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import com.code2hack.pokerdealer.protocol.PokerFontScaleState
+import com.code2hack.pokerdealer.protocol.PokerAsrSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -291,6 +292,7 @@ class DealerActivity : ComponentActivity() {
                                 result(asrDownloadManager.saveProfile(key, raw))
                             }
                         },
+                        onSetAsrSource = { service?.setAsrSource(it) },
                     )
                     }
                 }
@@ -541,6 +543,7 @@ private fun DealerApp(
     onDeleteAsrPack: (DealerAsrPackKey) -> Unit,
     onSetAsrMirror: (String?) -> Unit,
     onSaveAsrProfile: (DealerAsrPackKey, String, (DealerAsrProfileSaveResult) -> Unit) -> Unit,
+    onSetAsrSource: (PokerAsrSource) -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
         mutableStateOf(state.browsedThread?.hostId ?: state.hostId ?: "u4090")
@@ -857,6 +860,9 @@ private fun DealerApp(
                 onDelete = onDeleteAsrPack,
                 onSetMirror = onSetAsrMirror,
                 onSaveProfile = onSaveAsrProfile,
+                selectedSource = state.asr.selectedSource,
+                sourceLocked = state.asr.active,
+                onSource = onSetAsrSource,
             )
             discoveredThreads.forEach { thread ->
                 ThreadRow(
@@ -1194,6 +1200,9 @@ private fun DealerAsrCatalogPanel(
     onDelete: (DealerAsrPackKey) -> Unit,
     onSetMirror: (String?) -> Unit,
     onSaveProfile: (DealerAsrPackKey, String, (DealerAsrProfileSaveResult) -> Unit) -> Unit,
+    selectedSource: PokerAsrSource,
+    sourceLocked: Boolean,
+    onSource: (PokerAsrSource) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var selectedLanguage by remember { mutableStateOf<String?>(null) }
@@ -1223,6 +1232,29 @@ private fun DealerAsrCatalogPanel(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        Text("ASR microphone", style = MaterialTheme.typography.titleMedium)
+        Text("The source is fixed for each session; changes apply to the next session.")
+        PokerAsrSource.entries.forEach { source ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !sourceLocked) { onSource(source) },
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                RadioButton(
+                    selected = selectedSource == source,
+                    onClick = { if (!sourceLocked) onSource(source) },
+                    enabled = !sourceLocked,
+                )
+                Text(
+                    when (source) {
+                        PokerAsrSource.GLASSES -> "Glasses microphone (default)"
+                        PokerAsrSource.DEALER_PHONE -> "Dealer phone microphone"
+                    },
+                )
+            }
+        }
+        if (sourceLocked) Text("Locked while ASR is active.", style = MaterialTheme.typography.labelSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("ASR model catalog", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(onClick = { showCatalog = !showCatalog }) {

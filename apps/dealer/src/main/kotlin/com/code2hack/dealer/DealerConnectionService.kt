@@ -6,7 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.os.Build
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Binder
@@ -14,7 +16,9 @@ import android.os.IBinder
 import android.os.PowerManager
 import com.code2hack.dealer.asr.DealerAsrProcess
 import com.code2hack.dealer.asr.DealerAsrDownloadState
+import com.code2hack.dealer.asr.DealerAsrCapture
 import com.code2hack.dealer.asr.DealerAsrSliceSession
+import com.code2hack.dealer.asr.DealerAsrSourceSettings
 import com.code2hack.dealer.asr.dealerAsrCursorAfter
 import com.code2hack.dealer.asr.insertDealerAsrText
 import com.code2hack.tailnet.embeddedtailnet.Engine
@@ -161,6 +165,7 @@ import com.code2hack.pokerdealer.protocol.PokerAsrProjection
 import com.code2hack.pokerdealer.protocol.PokerAsrStartOutcome
 import com.code2hack.pokerdealer.protocol.PokerAsrStartRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrStartResult
+import com.code2hack.pokerdealer.protocol.PokerAsrSource
 import com.code2hack.pokerdealer.protocol.PokerAsrTarget
 import com.code2hack.pokerdealer.protocol.PokerAsrTargetField
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
@@ -263,6 +268,9 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
+import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class DealerConnectionService : Service() {
     private val binder = LocalBinder()
@@ -297,7 +305,9 @@ class DealerConnectionService : Service() {
     private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val pokerAsrResults = mutableMapOf<String, Any>()
     private lateinit var asrProcess: DealerAsrProcess
+    private lateinit var asrSourceSettings: DealerAsrSourceSettings
     private var pokerAsrSession: DealerAsrSliceSession? = null
+    private var dealerAsrCapture: DealerAsrCapture? = null
     private var pokerAsrPreparing: PokerAsrStartRequest? = null
     private val pokerAsrCancelledSessions = mutableSetOf<String>()
     private var pendingAsrTakeover: CodexThreadLocator? = null
@@ -399,6 +409,7 @@ class DealerConnectionService : Service() {
             callbacks = pokerSnapshotHandler,
         )
         asrProcess = DealerAsrProcess.shared(this)
+        asrSourceSettings = DealerAsrSourceSettings(this)
         scope.launch { runCatching { asrProcess.start() } }
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
@@ -447,6 +458,8 @@ class DealerConnectionService : Service() {
                     }
                     .getOrDefault(emptyList())
             }
+            val restoredAsrSource = runCatching { asrSourceSettings.read() }
+                .getOrDefault(PokerAsrSource.GLASSES)
             mutableState.value = DealerUiState().restoreAfterProcessDeath(
                 attachments = restoredAttachments,
                 actions = restoredActions,
@@ -456,6 +469,7 @@ class DealerConnectionService : Service() {
                 error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
             ).copy(
                 pokerBindings = pokerBindings.state,
+                asr = DealerAsrUiState(selectedSource = restoredAsrSource),
                 pokerFont = restoredPokerFont,
                 pokerDiagnostics = DealerPokerDiagnostics(
                     pairing = pokerPairing.status.state,
@@ -674,6 +688,20 @@ class DealerConnectionService : Service() {
             val snapshot = pokerSnapshotSource.current()
             pokerSnapshotHandler.publish(snapshot)
             recordPokerSnapshotRevision(snapshot)
+        }
+    }
+
+    fun setAsrSource(source: PokerAsrSource) {
+        if (pokerAsrSession != null || pokerAsrPreparing != null) return
+        scope.launch {
+            runCatching {
+                asrSourceSettings.save(source)
+                mutableState.update { it.copy(asr = it.asr.copy(selectedSource = source)) }
+            }.onFailure { failure ->
+                mutableState.update {
+                    it.copy(error = failure.message ?: "ASR source setting failed")
+                }
+            }
         }
     }
 
@@ -1588,6 +1616,7 @@ class DealerConnectionService : Service() {
                     request.sessionId,
                     PokerAsrStartOutcome.READY,
                     existing.pack,
+                    source = existing.source,
                 )
             } else {
                 PokerAsrStartResult(
@@ -1602,6 +1631,11 @@ class DealerConnectionService : Service() {
             return
         }
 
+        val selectedSource = if (request.source == PokerAsrSource.DEALER_PHONE) {
+            PokerAsrSource.DEALER_PHONE
+        } else {
+            runCatching { asrSourceSettings.read() }.getOrDefault(PokerAsrSource.GLASSES)
+        }
         pokerAsrPreparing = request
         val result = try {
             val availability = asrProcess.availability()
@@ -1610,25 +1644,120 @@ class DealerConnectionService : Service() {
             if (request.sessionId in pokerAsrCancelledSessions) {
                 pokerAsrCancelledSessions -= request.sessionId
                 opened.close()
-                PokerAsrStartResult(request.target, request.sessionId, PokerAsrStartOutcome.CANCELLED)
+                PokerAsrStartResult(
+                    request.target,
+                    request.sessionId,
+                    PokerAsrStartOutcome.CANCELLED,
+                    source = selectedSource,
+                )
             } else {
-                pokerAsrSession = DealerAsrSliceSession(
+                val session = DealerAsrSliceSession(
                     sessionId = request.sessionId,
                     target = request.target,
                     pack = pack,
                     recognizer = opened,
+                    source = selectedSource,
                 )
-                mutableState.update {
-                    it.copy(
-                        asr = DealerAsrUiState(
-                            active = true,
-                            sessionId = request.sessionId,
-                            target = request.target,
-                            pack = pack,
-                        ),
+                pokerAsrSession = session
+                val result = if (selectedSource == PokerAsrSource.DEALER_PHONE) {
+                    val announced = AtomicBoolean(false)
+                    val failure = AtomicReference<String?>()
+                    val capture = runCatching {
+                        ensureForeground(includeMicrophone = true)
+                        DealerAsrCapture(
+                            context = this,
+                            scope = scope,
+                            send = { firstSampleOffset, pcm16 ->
+                                withContext(Dispatchers.Main.immediate) {
+                                    handleDealerAsrAudio(
+                                        epoch = epoch,
+                                        sessionId = request.sessionId,
+                                        firstSampleOffset = firstSampleOffset,
+                                        pcm16 = pcm16,
+                                    )
+                                }
+                            },
+                            onFailure = { reason ->
+                                if (announced.get()) {
+                                    scope.launch {
+                                        if (pokerAsrSession?.sessionId == request.sessionId) {
+                                            terminatePokerAsr(epoch, reason)
+                                        }
+                                    }
+                                } else {
+                                    failure.compareAndSet(null, reason)
+                                }
+                            },
+                        )
+                    }.getOrNull()
+                    if (capture == null) {
+                        runCatching { ensureForeground() }
+                        session.source = PokerAsrSource.GLASSES
+                        PokerAsrStartResult(
+                            request.target,
+                            request.sessionId,
+                            PokerAsrStartOutcome.READY,
+                            pack,
+                            source = PokerAsrSource.GLASSES,
+                        )
+                    } else {
+                        dealerAsrCapture = capture
+                        val started = runCatching { capture.start() }.getOrDefault(false)
+                        if (!started) {
+                            closeDealerAsrCapture()
+                            runCatching { ensureForeground() }
+                            session.source = PokerAsrSource.GLASSES
+                            PokerAsrStartResult(
+                                request.target,
+                                request.sessionId,
+                                PokerAsrStartOutcome.READY,
+                                pack,
+                                source = PokerAsrSource.GLASSES,
+                            )
+                        } else if (failure.get() != null) {
+                            val reason = failure.get() ?: "dealer-microphone-unavailable"
+                            closePokerAsrSession()
+                            PokerAsrStartResult(
+                                request.target,
+                                request.sessionId,
+                                PokerAsrStartOutcome.REJECTED,
+                                reason = reason,
+                                source = PokerAsrSource.DEALER_PHONE,
+                            )
+                        } else {
+                            announced.set(true)
+                            PokerAsrStartResult(
+                                request.target,
+                                request.sessionId,
+                                PokerAsrStartOutcome.READY,
+                                pack,
+                                source = PokerAsrSource.DEALER_PHONE,
+                            )
+                        }
+                    }
+                } else {
+                    PokerAsrStartResult(
+                        request.target,
+                        request.sessionId,
+                        PokerAsrStartOutcome.READY,
+                        pack,
+                        source = PokerAsrSource.GLASSES,
                     )
                 }
-                PokerAsrStartResult(request.target, request.sessionId, PokerAsrStartOutcome.READY, pack)
+                if (result.outcome == PokerAsrStartOutcome.READY) {
+                    mutableState.update {
+                        it.copy(
+                            asr = DealerAsrUiState(
+                                active = true,
+                                sessionId = request.sessionId,
+                                target = request.target,
+                                pack = pack,
+                                selectedSource = result.source,
+                            ),
+                        )
+                    }
+                }
+                result
             }
         } catch (failure: Throwable) {
             PokerAsrStartResult(
@@ -1636,6 +1765,7 @@ class DealerConnectionService : Service() {
                 request.sessionId,
                 PokerAsrStartOutcome.REJECTED,
                 reason = failure.message ?: "ASR runtime unavailable",
+                source = selectedSource,
             )
         } finally {
             pokerAsrPreparing = null
@@ -1669,6 +1799,28 @@ class DealerConnectionService : Service() {
         sendPokerAsrProjection(epoch, session, immediate = false)
     }
 
+    private suspend fun handleDealerAsrAudio(
+        epoch: PokerConnectionEpoch,
+        sessionId: String,
+        firstSampleOffset: Long,
+        pcm16: ByteArray,
+    ): Boolean {
+        val session = pokerAsrSession
+        if (session == null ||
+            session.sessionId != sessionId ||
+            session.source != PokerAsrSource.DEALER_PHONE
+        ) return false
+        handlePokerAsrAudio(
+            epoch,
+            PokerAsrAudioFrame(
+                sessionId = sessionId,
+                firstSampleOffset = firstSampleOffset,
+                pcm16Base64 = Base64.getEncoder().encodeToString(pcm16),
+            ),
+        )
+        return pokerAsrSession === session
+    }
+
     private suspend fun handlePokerAsrCommit(
         epoch: PokerConnectionEpoch,
         envelope: ProtocolEnvelope,
@@ -1683,7 +1835,10 @@ class DealerConnectionService : Service() {
             session == null -> "ASR session is no longer active"
             session.sessionId != request.sessionId -> "ASR session is stale"
             session.target != request.target -> "ASR target is stale"
-            request.fenceSampleOffset != session.nextSampleOffset -> "ASR commit fence is stale"
+            session.source == PokerAsrSource.GLASSES &&
+                request.fenceSampleOffset != session.nextSampleOffset -> "ASR commit fence is stale"
+            session.source == PokerAsrSource.DEALER_PHONE &&
+                request.fenceSampleOffset != null -> "ASR phone fence must be source-owned"
             else -> validatePokerAsrTarget(epoch, request.target)
         }
         if (rejection != null) {
@@ -1701,7 +1856,7 @@ class DealerConnectionService : Service() {
 
         val active = checkNotNull(session)
         val committedText = try {
-            active.commitSlice(request.fenceSampleOffset)
+            active.commitSlice(request.fenceSampleOffset ?: active.nextSampleOffset)
         } catch (failure: Throwable) {
             terminatePokerAsr(epoch, "runtime-decode-failed")
             val result = PokerAsrCommitResult(
@@ -2136,9 +2291,11 @@ class DealerConnectionService : Service() {
     }
 
     private fun closePokerAsrSession(failureReason: String? = null) {
+        closeDealerAsrCapture()
+        if (::asrSourceSession.isInitialized) asrSourceSession.end()
         val session = pokerAsrSession ?: return
         pokerAsrSession = null
-        mutableState.update { it.copy(asr = DealerAsrUiState()) }
+        mutableState.update { it.copy(asr = DealerAsrUiState(selectedSource = it.asr.selectedSource)) }
         scope.launch {
             runCatching { session.close() }
         }
@@ -2159,6 +2316,11 @@ class DealerConnectionService : Service() {
                 )
             }
         }
+    }
+
+    private fun closeDealerAsrCapture() {
+        dealerAsrCapture?.stop()
+        dealerAsrCapture = null
     }
 
     private suspend fun <T> sendPokerAsr(
@@ -5832,10 +5994,7 @@ class DealerConnectionService : Service() {
         photoDeleteResults.clear()
         pokerMorseResults.clear()
         pokerApprovalBindings.clear()
-        pokerAsrSession?.let { session ->
-            pokerAsrSession = null
-            scope.launch { runCatching { session.close() } }
-        }
+        closePokerAsrSession()
         if (::asrProcess.isInitialized) DealerAsrProcess.closeShared(asrProcess)
         pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }
@@ -5949,7 +6108,7 @@ class DealerConnectionService : Service() {
     private fun isScreenInteractive(): Boolean =
         getSystemService(PowerManager::class.java).isInteractive
 
-    private fun ensureForeground() {
+    private fun ensureForeground(includeMicrophone: Boolean = false) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
@@ -5985,7 +6144,13 @@ class DealerConnectionService : Service() {
                 ).build(),
             )
         }
-        startForeground(NOTIFICATION_ID, builder.build())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                if (includeMicrophone) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+            startForeground(NOTIFICATION_ID, builder.build(), type)
+        } else {
+            startForeground(NOTIFICATION_ID, builder.build())
+        }
     }
 
     private fun stopIfIdle() {
@@ -6239,6 +6404,7 @@ enum class DealerRunState(
 }
 
 data class DealerAsrUiState(
+    val selectedSource: PokerAsrSource = PokerAsrSource.GLASSES,
     val active: Boolean = false,
     val sessionId: String? = null,
     val target: PokerAsrTarget? = null,

@@ -30,6 +30,7 @@ enum class PokerAsrTargetField {
 @Serializable
 enum class PokerAsrSource {
     GLASSES,
+    DEALER_PHONE,
 }
 
 @Serializable
@@ -111,6 +112,7 @@ data class PokerAsrStartResult(
     val outcome: PokerAsrStartOutcome,
     val pack: PokerAsrPackSelection? = null,
     val reason: String? = null,
+    val source: PokerAsrSource = PokerAsrSource.GLASSES,
 )
 
 @Serializable
@@ -155,12 +157,14 @@ data class PokerAsrProjection(
 data class PokerAsrCommitRequest(
     val target: PokerAsrTarget,
     @SerialName("session_id") val sessionId: String,
-    @SerialName("fence_sample_offset") val fenceSampleOffset: Long,
+    @SerialName("fence_sample_offset") val fenceSampleOffset: Long?,
     @SerialName("operation_id") val operationId: String,
 ) {
     init {
         require(sessionId.isNotBlank()) { "ASR commit session id must not be blank" }
-        require(fenceSampleOffset >= 0) { "ASR commit fence must not be negative" }
+        require(fenceSampleOffset == null || fenceSampleOffset >= 0) {
+            "ASR commit fence must not be negative"
+        }
         require(operationId.isNotBlank()) { "ASR operation id must not be blank" }
     }
 }
