@@ -16,7 +16,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,7 +30,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -48,7 +53,12 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.dealer.asr.DealerAsrCatalogStore
+import com.code2hack.dealer.asr.DealerAsrCatalogEntry
 import com.code2hack.dealer.asr.DealerAsrCatalogUiState
+import com.code2hack.dealer.asr.DealerAsrDownloadState
+import com.code2hack.dealer.asr.DealerAsrDownloadUiState
+import com.code2hack.dealer.asr.DealerAsrDownloadManager
+import com.code2hack.dealer.asr.DealerAsrPackKey
 import com.code2hack.dealer.asr.DealerAsrMode
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
@@ -92,12 +102,15 @@ class DealerActivity : ComponentActivity() {
     private val uiState = MutableStateFlow(DealerUiState())
     private val setupState = MutableStateFlow(DealerSetupState())
     private val asrCatalogState = MutableStateFlow(DealerAsrCatalogUiState())
+    private val asrDownloadState = MutableStateFlow(DealerAsrDownloadUiState())
     private var privateKey: ByteArray? = null
     private var knownHosts: ByteArray? = null
     private var service: DealerConnectionService? = null
     private lateinit var asrCatalogStore: DealerAsrCatalogStore
+    private lateinit var asrDownloadManager: DealerAsrDownloadManager
     private var serviceStateJob: Job? = null
     private var asrCatalogJob: Job? = null
+    private var asrDownloadJob: Job? = null
     private var pendingThreadNotificationKey: String? = null
     private var bound = false
 
@@ -130,6 +143,7 @@ class DealerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         openThreadNotification(intent)
         asrCatalogStore = DealerAsrCatalogStore(this)
+        asrDownloadManager = DealerAsrDownloadManager(this)
         asrCatalogJob = lifecycleScope.launch {
             val loaded = asrCatalogStore.load()
             asrCatalogState.value = DealerAsrCatalogUiState(
@@ -137,16 +151,22 @@ class DealerActivity : ComponentActivity() {
                 error = loaded.error,
             )
         }
+        asrDownloadJob = lifecycleScope.launch {
+            asrDownloadManager.start()
+            asrDownloadManager.stateFlow.collect { asrDownloadState.value = it }
+        }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val state by uiState.collectAsState()
                     val setup by setupState.collectAsState()
                     val asrCatalog by asrCatalogState.collectAsState()
+                    val asrDownloads by asrDownloadState.collectAsState()
                     DealerApp(
                         state = state,
                         setup = setup,
                         asrCatalog = asrCatalog,
+                        asrDownloads = asrDownloads,
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
@@ -201,6 +221,27 @@ class DealerActivity : ComponentActivity() {
                         onResetPokerGlassesDefaults = { service?.resetPokerGlassesDefaults() },
                         onClearPokerRemote = { service?.clearPokerRemote() },
                         onRefreshAsrCatalog = ::refreshAsrCatalog,
+                        onQueueAsrPack = { entry ->
+                            lifecycleScope.launch { asrDownloadManager.queue(entry) }
+                        },
+                        onPauseAsrPack = { key ->
+                            lifecycleScope.launch { asrDownloadManager.pause(key) }
+                        },
+                        onResumeAsrPack = { key ->
+                            lifecycleScope.launch { asrDownloadManager.resume(key) }
+                        },
+                        onCancelAsrPack = { key ->
+                            lifecycleScope.launch { asrDownloadManager.cancel(key) }
+                        },
+                        onSetDefaultAsrPack = { key ->
+                            lifecycleScope.launch { asrDownloadManager.setDefault(key) }
+                        },
+                        onSetAsrMirror = { value ->
+                            lifecycleScope.launch {
+                                runCatching { asrDownloadManager.setMirrorBaseUrl(value) }
+                                    .onFailure { asrDownloadState.update { it.copy(error = "mirror-url-invalid") } }
+                            }
+                        },
                     )
                 }
             }
@@ -236,6 +277,8 @@ class DealerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         asrCatalogJob?.cancel()
+        asrDownloadJob?.cancel()
+        if (::asrDownloadManager.isInitialized) asrDownloadManager.close()
         privateKey?.fill(0)
         knownHosts?.fill(0)
         super.onDestroy()
@@ -382,6 +425,7 @@ private fun DealerApp(
     state: DealerUiState,
     setup: DealerSetupState,
     asrCatalog: DealerAsrCatalogUiState,
+    asrDownloads: DealerAsrDownloadUiState,
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
@@ -426,6 +470,12 @@ private fun DealerApp(
     onResetPokerGlassesDefaults: () -> Unit,
     onClearPokerRemote: () -> Unit,
     onRefreshAsrCatalog: () -> Unit,
+    onQueueAsrPack: (DealerAsrCatalogEntry) -> Unit,
+    onPauseAsrPack: (DealerAsrPackKey) -> Unit,
+    onResumeAsrPack: (DealerAsrPackKey) -> Unit,
+    onCancelAsrPack: (DealerAsrPackKey) -> Unit,
+    onSetDefaultAsrPack: (DealerAsrPackKey) -> Unit,
+    onSetAsrMirror: (String?) -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
         mutableStateOf(state.browsedThread?.hostId ?: state.hostId ?: "u4090")
@@ -712,7 +762,14 @@ private fun DealerApp(
             }
             DealerAsrCatalogPanel(
                 state = asrCatalog,
+                downloads = asrDownloads,
                 onRefresh = onRefreshAsrCatalog,
+                onQueue = onQueueAsrPack,
+                onPause = onPauseAsrPack,
+                onResume = onResumeAsrPack,
+                onCancel = onCancelAsrPack,
+                onSetDefault = onSetDefaultAsrPack,
+                onSetMirror = onSetAsrMirror,
             )
             discoveredThreads.forEach { thread ->
                 ThreadRow(
@@ -1039,16 +1096,31 @@ private fun DealerApp(
 @Composable
 private fun DealerAsrCatalogPanel(
     state: DealerAsrCatalogUiState,
+    downloads: DealerAsrDownloadUiState,
     onRefresh: () -> Unit,
+    onQueue: (DealerAsrCatalogEntry) -> Unit,
+    onPause: (DealerAsrPackKey) -> Unit,
+    onResume: (DealerAsrPackKey) -> Unit,
+    onCancel: (DealerAsrPackKey) -> Unit,
+    onSetDefault: (DealerAsrPackKey) -> Unit,
+    onSetMirror: (String?) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var selectedLanguage by remember { mutableStateOf<String?>(null) }
     var selectedMode by remember { mutableStateOf<DealerAsrMode?>(null) }
+    var showCatalog by remember { mutableStateOf(false) }
+    var mirrorUrl by remember(downloads.mirrorBaseUrl) {
+        mutableStateOf(downloads.mirrorBaseUrl.orEmpty())
+    }
     val languages = state.catalog.entries
         .flatMap { it.languages }
         .distinct()
         .sorted()
     val entries = state.catalog.filtered(search, selectedLanguage, selectedMode)
+    val activeKeys = downloads.jobs
+        .filter { it.state != DealerAsrDownloadState.FAILED }
+        .map { it.key }
+        .toSet()
 
     Column(
         modifier = Modifier
@@ -1059,9 +1131,111 @@ private fun DealerAsrCatalogPanel(
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("ASR model catalog", style = MaterialTheme.typography.titleMedium)
+            OutlinedButton(onClick = { showCatalog = !showCatalog }) {
+                Text(if (showCatalog) "Close catalog" else "+ Add pack")
+            }
             OutlinedButton(onClick = onRefresh, enabled = !state.refreshing) {
                 Text(if (state.refreshing) "Updating…" else "Update")
             }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = mirrorUrl,
+                onValueChange = { mirrorUrl = it },
+                label = { Text("Optional HTTPS mirror base") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = { onSetMirror(mirrorUrl.takeIf(String::isNotBlank)) }) {
+                Text("Save")
+            }
+        }
+        downloads.error?.let {
+            Text("Download state: $it", color = MaterialTheme.colorScheme.error)
+        }
+        downloads.jobs.forEach { job ->
+            var menuExpanded by remember(job.key) { mutableStateOf(false) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .clickable(
+                        enabled = job.state in setOf(
+                            DealerAsrDownloadState.QUEUED,
+                            DealerAsrDownloadState.DOWNLOADING,
+                            DealerAsrDownloadState.PAUSED,
+                        ),
+                    ) {
+                        if (job.state == DealerAsrDownloadState.PAUSED) onResume(job.key) else onPause(job.key)
+                    }
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(job.displayName)
+                when (job.state) {
+                    DealerAsrDownloadState.READY -> {
+                        Text(if (job.key == downloads.defaultPack) "Ready · default" else "Ready")
+                        job.warning?.let {
+                            Text(it, color = Color(0xFF9A5B00), style = MaterialTheme.typography.labelSmall)
+                        }
+                        if (job.key != downloads.defaultPack) {
+                            OutlinedButton(onClick = { onSetDefault(job.key) }) {
+                                Text("Use as default")
+                            }
+                        }
+                    }
+                    DealerAsrDownloadState.FAILED -> {
+                        Text("Failed: ${job.error ?: "download-failed"}", color = MaterialTheme.colorScheme.error)
+                        job.warning?.let {
+                            Text(it, color = Color(0xFF9A5B00), style = MaterialTheme.typography.labelSmall)
+                        }
+                        OutlinedButton(onClick = { onResume(job.key) }) { Text("Retry") }
+                    }
+                    DealerAsrDownloadState.QUEUED,
+                    DealerAsrDownloadState.DOWNLOADING,
+                    DealerAsrDownloadState.PAUSED,
+                    -> {
+                        LinearProgressIndicator(
+                            progress = { job.progressFraction },
+                            color = Color(0xFF2E9B57),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "${job.percentage}% · ${job.etaMillis?.let { DateUtils.formatElapsedTime(it / 1000) } ?: "ETA …"} · " +
+                                (job.currentSource ?: "queued"),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        job.warning?.let {
+                            Text(it, color = Color(0xFF9A5B00), style = MaterialTheme.typography.labelSmall)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (job.state == DealerAsrDownloadState.PAUSED) {
+                                OutlinedButton(onClick = { onResume(job.key) }) { Text("Resume") }
+                            } else {
+                                OutlinedButton(onClick = { onPause(job.key) }) { Text("Pause") }
+                            }
+                            Box {
+                                OutlinedButton(onClick = { menuExpanded = true }) { Text("⋮") }
+                                DropdownMenu(
+                                    expanded = menuExpanded,
+                                    onDismissRequest = { menuExpanded = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Cancel") },
+                                        onClick = {
+                                            menuExpanded = false
+                                            onCancel(job.key)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (showCatalog) {
+            Text("Add a compatible model pack", style = MaterialTheme.typography.titleSmall)
         }
         OutlinedTextField(
             value = search,
@@ -1090,7 +1264,7 @@ private fun DealerAsrCatalogPanel(
                 }
             }
         }
-        entries.forEach { entry ->
+        if (showCatalog) entries.filter { DealerAsrPackKey(it.id, it.revision) !in activeKeys }.forEach { entry ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1114,9 +1288,10 @@ private fun DealerAsrCatalogPanel(
                     style = MaterialTheme.typography.labelSmall,
                     fontFamily = FontFamily.Monospace,
                 )
+                Button(onClick = { onQueue(entry) }) { Text("Queue") }
             }
         }
-        if (entries.isEmpty()) {
+        if (showCatalog && entries.none { DealerAsrPackKey(it.id, it.revision) !in activeKeys }) {
             Text("No compatible model packs match the current filters.")
         }
         state.error?.let {

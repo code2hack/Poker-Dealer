@@ -238,7 +238,8 @@ internal data class DealerAsrCatalog(
 
         private fun isArtifactPath(path: String): Boolean {
             if (path.isBlank() || path.length > 256 || path.startsWith('/') ||
-                '\\' in path || ':' in path || '?' in path || '#' in path || "//" in path
+                '\\' in path || ':' in path || '?' in path || '#' in path || "//" in path ||
+                path.split('/').any { it == ".ready.json" }
             ) {
                 return false
             }
