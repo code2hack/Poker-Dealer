@@ -49,9 +49,11 @@ Poker–Dealer is a private mobile and wearable Codex client.
 
 ## Current host availability
 
-u4090 is unavailable and MUST NOT be used for builds, tests, artifact production, CI, fallback,
-or any other project task until the user explicitly re-enables it. Current work may use DGX Spark
-and Fold6 Termux only.
+u4090 MUST NOT host source worktrees, builds, host-side tests, artifact production, CI, or fallback
+implementation. It is explicitly enabled only as an SSH-accessed ADB/control relay for the attached
+Rokid glasses and Fold6, an audio-alarm host, and temporary device-transfer staging under
+`~/tmp/Poker-Dealer-ADB`. Current implementation, builds, and host-side tests may use DGX Spark and
+Fold6 Termux only. ADB remains diagnostic tooling, never a product transport.
 
 ## Non-negotiable decisions
 
@@ -165,9 +167,101 @@ The M2 workstation slice proves Spark and u4090 through the same daemon-backed a
 
 M2T now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-M3 is complete. The current slice is the expanded M4: Dealer↔Poker pairing and synchronization, horizontal `BUSY | ATTENTION_REQUIRED | READY` card piles without an attached-thread list, canonical operations and HID bindings, reviewed composer/request input, the fixed action wheel, Photo, Morse, and Dealer-local ASR/model management. The former M5 milestone is retired. Follow `SPEC.md` section 17's narrow issue order before implementation.
+M3 is complete. The current slice is the expanded M4: Dealer↔Poker pairing and synchronization, horizontal `BUSY | ATTENTION_REQUIRED | READY` card piles without an attached-thread list, canonical operations and HID bindings, reviewed composer/request input, the fixed action wheel, Photo, Morse, and Dealer-local ASR/model management. The former M5 milestone is retired. Follow the published dependency DAG for issues #33–#64; `SPEC.md` section 17 defines scope order, not a global serialization barrier.
 
-Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, add an attached-thread list or configurable wheel, revive M5, use u4090 while it is unavailable, or add a terminal, generic slash-command parser, per-thread provider proxy, broad experimental app-server APIs, proprietary Rokid transport, or cross-host migration during M4.
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, add an attached-thread list or configurable wheel, revive M5, use u4090 outside the narrow ADB/audio exception above, or add a terminal, generic slash-command parser, per-thread provider proxy, broad experimental app-server APIs, proprietary Rokid transport, or cross-host migration during M4.
+
+## M4 implementation orchestration
+
+These rules govern issues #33–#64 until #64 is merged and closed. The long-lived M4 manager session
+is the **Product Manager Agent**. A session whose entire first prompt is
+`<manager-session>-#<issue-number>` is the **Engineer Agent** for that one issue; the prompt also
+becomes its Codex session title.
+
+### Product Manager Agent
+
+- Create and retain one milestone goal through the successful merge and closure of issue #64.
+- MUST NOT implement issue code, tests, or documentation, resolve implementation conflicts, or repair
+  an Engineer Agent's changes.
+- Own live GitHub/DAG inspection, scheduling, isolated worktree and branch creation, worker polling,
+  validation, integration, merges, pushes, issue closure, cleanup, and user coordination.
+- Treat an issue as unblocked only after every declared blocker is merged into `origin/main` and
+  closed. Start every live unblocked `ready-for-agent` issue immediately; do not impose a wave-wide
+  barrier or arbitrary concurrency cap. Revalidate #33, #37, and #49 as the initial frontier.
+- Create one isolated `.worktrees/issue-<N>` worktree and `m4/issue-<N>` branch from current
+  `origin/main` for each Engineer Agent.
+- Create one window in the Product Manager Agent's current tmux session named
+  `<manager-session>-#<N>`, launch exactly one Engineer Agent there, and poll every active Engineer
+  Agent at least once every 120 seconds.
+- After `ENGINEER_DONE`, verify the branch scope, commit, checks, clean worktree, and compatibility
+  with current `origin/main`. Return defects or integration conflicts to that Engineer Agent; never
+  fix them directly.
+- When accepted, merge the issue branch into `main`, run the required integration checks, push
+  `main`, close the issue, archive the Engineer Agent's Codex session, remove its worktree and tmux
+  window, and immediately launch every newly unblocked issue. Never force-push.
+- Restart or replace a failed Engineer Agent for the same issue when the failure is agent-resolvable.
+  Ask the user only for unavoidable physical, permission, authentication, approval, or hardware
+  actions; continue independent automated work while waiting.
+- The user's approval of this contract authorizes Engineer Agent issue-branch commits and pushes and
+  Product Manager Agent merges, `main` pushes, and issue closures for #33–#64 without repeated
+  confirmation. It does not authorize unrelated or destructive changes.
+
+### Engineer Agent
+
+- Work on exactly the issue number parsed from the session's complete first prompt and only in the
+  assigned worktree.
+- Follow the mandatory read order above, then read the complete live GitHub issue, comments, labels,
+  and blockers before editing. Verify every blocker in `origin/main`.
+- Implement only the assigned scope, preserve unrelated work, and run proportionate focused and final
+  checks.
+- Before handoff, fetch current `origin/main`, integrate it without force-pushing, resolve conflicts
+  within the assigned scope, rerun affected checks, stage only owned paths, commit, and push the
+  assigned branch automatically.
+- MUST NOT merge into `main`, close or schedule issues, work on another issue, spawn another agent,
+  alert the user, or make architecture decisions outside the issue.
+- Finish with exactly one status line:
+
+  `ENGINEER_DONE #<N> branch=<branch> commit=<sha> checks=<summary>`
+
+  or:
+
+  `ENGINEER_BLOCKED #<N> reason=<reason> user_action=<yes|no>`
+
+### Engineer launch
+
+The Engineer Agent's entire first prompt MUST be the exact tmux-window/session name and contain no
+other text. Launch it from its assigned worktree with exactly this model configuration:
+
+```text
+codex exec --json --strict-config -m gpt-5.6-luna -c 'model_reasoning_effort="max"' -C <worktree> '<manager-session>-#<N>'
+```
+
+No other model or reasoning effort is allowed for Engineer Agents. Keep the tmux window available
+until the Product Manager Agent validates and integrates the result. Record the Codex thread ID from
+the JSON event stream so that rework resumes, and final cleanup archives, the exact session.
+
+### u4090 device relay
+
+- Reach u4090 only through SSH and create or reuse one remote tmux session named `adb` for all ADB
+  operations.
+- Run ADB there with `/opt/android-sdk/platform-tools/adb`.
+- Store temporary remote files only under `~/tmp/Poker-Dealer-ADB` and remove issue-specific files
+  after use.
+- Building an artifact on Spark and temporarily copying it there for ADB installation is allowed;
+  producing or testing the artifact as a u4090 host build is not.
+
+### User-intervention alarm
+
+- Only the Product Manager Agent may start the alarm, and only when an active issue genuinely requires
+  user action.
+- In the remote u4090 `adb` tmux session, run exactly one repeating alarm using the designated Super
+  Mario BGM file under `~/Music`. Report the blocked issue and exact manual action once.
+- Continue the alarm until the user's next message to the Product Manager Agent, then stop it
+  immediately. Do not alert for agent-resolvable failures.
+- Manual actions include device unlock or ADB trust, Android permission/settings dialogs, physical
+  pairing or bonding, glasses/remote gestures, camera or microphone exercises, human approval
+  decisions, and interactive `sudo` password entry. Repository work, builds, tests, merges, and issue
+  administration remain agent-owned.
 
 ## Completion discipline
 
