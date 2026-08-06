@@ -63,6 +63,8 @@ object MockDeck {
 
     val hosts = listOf(sparkHost, u4090Host, termuxHost)
     val host = u4090Host
+    val sparkPileLocator = CodexThreadLocator("spark", "thr_mock_spark_busy")
+    val termuxPileLocator = CodexThreadLocator("fold6-termux", "thr_mock_termux_ready")
 
     val conversation = Conversation(
         id = "mock-conversation",
@@ -79,7 +81,7 @@ object MockDeck {
 
     val pileMetadata: PokerPileMetadata = ThreadPileReducer().run {
         attach(
-            CodexThreadLocator("spark", "thr_mock_spark_busy"),
+            sparkPileLocator,
             ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 0),
             atMs = 1,
         )
@@ -89,7 +91,7 @@ object MockDeck {
             atMs = 2,
         )
         attach(
-            CodexThreadLocator("fold6-termux", "thr_mock_termux_ready"),
+            termuxPileLocator,
             ThreadWorkEvidence(activeTurn = false, unresolvedRequestCount = 0),
             atMs = 3,
         )
@@ -109,6 +111,12 @@ object MockDeck {
         createdAtMs = 1_784_600_000_000,
         updatedAtMs = 1_784_600_000_000,
         source = CardSource.CODEX_AGENT_MESSAGE,
+    )
+
+    val cardTextByLocator: Map<CodexThreadLocator, String> = mapOf(
+        sparkPileLocator to "DGX Spark busy pile\n\nThe focused card remains keyed by the Spark locator.",
+        conversation.locator to longCard.fullText,
+        termuxPileLocator to "Fold6 Termux ready pile\n\nThe focused card remains keyed by the Termux locator.",
     )
 
     private fun longCardText(): String = buildString {
