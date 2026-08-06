@@ -17,6 +17,11 @@ import com.code2hack.pokerdealer.protocol.PokerReconnectController
 import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
 import com.code2hack.pokerdealer.protocol.PokerClock
 import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
+import com.code2hack.pokerdealer.protocol.PokerProtocolOffer
+import com.code2hack.pokerdealer.protocol.PokerSnapshotConnectionHandler
+import com.code2hack.pokerdealer.protocol.PokerSnapshotInstaller
+import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
+import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +31,7 @@ import kotlinx.coroutines.cancel
 class PokerListenerService : Service() {
     private lateinit var serviceScope: CoroutineScope
     private lateinit var owner: PokerConnectionOwner<Unit>
+    private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var foregroundStarted = false
 
@@ -35,13 +41,27 @@ class PokerListenerService : Service() {
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val identity = AndroidKeystorePairingIdentity()
         val pairing = identity.pairingController(this)
+        PokerSnapshotRuntime.clearForRestart()
+        pokerSnapshotHandler = PokerSnapshotConnectionHandler(
+            role = PokerSnapshotRole.POKER,
+            installer = PokerSnapshotInstaller(),
+            onInstalled = PokerSnapshotRuntime::install,
+        )
         owner = PokerConnectionOwner(
             factory = AndroidPokerListenerFactory(this, identity, pairing),
             scope = serviceScope,
+            localOffer = PokerProtocolOffer(
+                capabilities = setOf(POKER_SNAPSHOT_CAPABILITY),
+            ),
             scheduler = CoroutinePokerScheduler(serviceScope),
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
+            onEnvelope = { _, envelope -> PokerComposerBridge.receive(envelope) },
+            callbacks = pokerSnapshotHandler,
         )
+        PokerComposerBridge.attach { type, payload, requireWritable ->
+            owner.send(type, payload, requireWritable = requireWritable)
+        }
         registerNetworkCallback()
     }
 
@@ -90,6 +110,7 @@ class PokerListenerService : Service() {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }
         networkCallback = null
+        PokerComposerBridge.detach()
         owner.stop()
         serviceScope.cancel()
         if (foregroundStarted) {

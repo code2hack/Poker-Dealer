@@ -4,6 +4,7 @@ import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerPileMetadata
 import com.code2hack.pokerdealer.domain.ThreadPile
+import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.TurnOutcome
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -182,6 +183,11 @@ object PokerSnapshotWire {
         }
         require(projection.orderedPiles.all { it.workState != null }) {
             "Ordered snapshot piles require work state"
+        }
+        require(projection.orderedPiles.all {
+            runCatching { ThreadWorkState.valueOf(it.workState!!) }.isSuccess
+        }) {
+            "Snapshot contains an unknown work state"
         }
         require(projection.unknownWorkState.all { it.workState == null }) {
             "Unknown snapshot piles must omit work state"
@@ -532,6 +538,7 @@ class PokerSnapshotConnectionHandler(
     snapshotSource: (suspend () -> PokerSnapshot)? = null,
     private val installer: PokerSnapshotInstaller? = null,
     private val snapshotId: () -> String = { UUID.randomUUID().toString() },
+    private val onInstalled: (PokerSnapshot) -> Unit = {},
 ) : PokerConnectionCallbacks {
     private val snapshotSource = snapshotSource
 
@@ -619,6 +626,9 @@ class PokerSnapshotConnectionHandler(
             PokerSnapshotInstallStatus.DUPLICATE,
             PokerSnapshotInstallStatus.SUPERSEDED,
             -> result.acknowledgement?.let { acknowledgement ->
+                if (result.status == PokerSnapshotInstallStatus.INSTALLED) {
+                    result.snapshot?.let(onInstalled)
+                }
                 send(
                     POKER_SNAPSHOT_ACK_TYPE,
                     POKER_SNAPSHOT_STREAM,

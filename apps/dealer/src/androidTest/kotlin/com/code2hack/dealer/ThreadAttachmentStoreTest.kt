@@ -4,6 +4,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ComposerAction
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.PendingThreadInput
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -59,6 +61,37 @@ class ThreadAttachmentStoreTest {
         assertEquals(true, restored.pendingInputs.getValue(input).uncertain)
         assertEquals("turn-1", restored.pendingInputs.getValue(input).expectedTurnId)
         assertEquals("turn-2", restored.pendingInterrupts[interrupt])
+    }
+
+    @Test
+    fun orderedDraftAndPendingInputSurviveRecreationWithoutEmojiLoss() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val locator = CodexThreadLocator("spark", "ordered-draft")
+        val draft = ComposerDraft(
+            revision = 4,
+            elements = listOf(
+                ComposerElement.Text("before"),
+                ComposerElement.Photo("asset-1"),
+                ComposerElement.Text("after"),
+            ),
+        )
+        val store = DealerThreadAttachmentStore(context)
+        store.writeDraft(locator, draft)
+        store.writePendingInput(
+            locator,
+            PendingThreadInput(
+                clientId = "client",
+                action = ComposerAction.START,
+                expectedTurnId = null,
+                draftText = draft.displayText,
+                draft = draft,
+            ),
+        )
+
+        val restored = DealerThreadAttachmentStore(context)
+        assertEquals(draft, restored.readComposerDrafts()[locator])
+        assertEquals(draft, restored.readActions().pendingInputs.getValue(locator).draft)
+        assertEquals("before📷after", restored.readDrafts()[locator])
     }
 
     @Test

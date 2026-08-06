@@ -23,6 +23,11 @@ import com.code2hack.pokerdealer.domain.CommandApprovalDecision
 import com.code2hack.pokerdealer.domain.CommandApprovalRequest
 import com.code2hack.pokerdealer.domain.CommandApprovalState
 import com.code2hack.pokerdealer.domain.ComposerAction
+import com.code2hack.pokerdealer.domain.ComposerEditResult
+import com.code2hack.pokerdealer.domain.ComposerEditorState
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerElement
+import com.code2hack.pokerdealer.domain.ComposerSurface
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
@@ -77,10 +82,25 @@ import com.code2hack.pokerdealer.protocol.appserver.UserInputParseResult
 import com.code2hack.pokerdealer.protocol.appserver.UserInputProtocol
 import com.code2hack.pokerdealer.protocol.appserver.m1FailurePhase
 import com.code2hack.pokerdealer.protocol.PokerClock
+import com.code2hack.pokerdealer.protocol.ComposerMutationKind
+import com.code2hack.pokerdealer.protocol.ComposerMutationOutcome
+import com.code2hack.pokerdealer.protocol.ComposerMutationRequest
+import com.code2hack.pokerdealer.protocol.ComposerMutationResult
+import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
+import com.code2hack.pokerdealer.protocol.PokerConnectionEpoch
+import com.code2hack.pokerdealer.protocol.PokerProtocolJson
+import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
+import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
+import com.code2hack.pokerdealer.protocol.PokerProtocolOffer
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
 import com.code2hack.pokerdealer.protocol.PokerReconnectTrigger
+import com.code2hack.pokerdealer.protocol.PokerSnapshotConnectionHandler
+import com.code2hack.pokerdealer.protocol.PokerSnapshotRole
+import com.code2hack.pokerdealer.protocol.POKER_SNAPSHOT_CAPABILITY
 import com.code2hack.pokerdealer.protocol.host.HostIdentityException
 import com.code2hack.pokerdealer.protocol.host.HostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.JschHostSshClient
@@ -91,6 +111,7 @@ import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
 import com.code2hack.pokerdealer.protocol.host.SocketHostTcpDialer
 import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -110,6 +131,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -122,7 +145,13 @@ class DealerConnectionService : Service() {
     private var runJob: Job? = null
     private var tailnetJob: Job? = null
     private lateinit var pokerConnectionOwner: PokerConnectionOwner<Unit>
+    private lateinit var pokerSnapshotSource: DealerPokerSnapshotSource
+    private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
+    private val pokerSnapshotReady = CompletableDeferred<Unit>()
     private var pokerNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private var pokerComposerEpoch: PokerConnectionEpoch? = null
+    private val pokerComposerBindings = mutableMapOf<CodexThreadLocator, PokerComposerBinding>()
+    private val pokerComposerResults = mutableMapOf<CodexThreadLocator, ComposerMutationResult>()
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
@@ -164,16 +193,28 @@ class DealerConnectionService : Service() {
         super.onCreate()
         val pairingIdentity = AndroidKeystorePairingIdentity()
         val pokerPairing = pairingIdentity.pairingController(this)
+        pokerSnapshotSource = DealerPokerSnapshotSource { mutableState.value }
+        pokerSnapshotHandler = PokerSnapshotConnectionHandler(
+            role = PokerSnapshotRole.DEALER,
+            snapshotSource = {
+                pokerSnapshotReady.await()
+                pokerSnapshotSource.current()
+            },
+        )
         pokerConnectionOwner = PokerConnectionOwner(
             factory = null,
             connector = AndroidPokerClientConnector(pairingIdentity, pokerPairing),
             scope = scope,
+            localOffer = PokerProtocolOffer(
+                capabilities = setOf(POKER_SNAPSHOT_CAPABILITY),
+            ),
             scheduler = CoroutinePokerScheduler(scope),
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
+            onConnected = { epoch, _ -> onPokerConnected(epoch) },
+            onEnvelope = { epoch, envelope -> onPokerEnvelope(epoch, envelope) },
+            callbacks = pokerSnapshotHandler,
         )
-        registerPokerNetworkCallback()
-        pokerConnectionOwner.start()
         hostConnectionProfiles = DealerHostConnectionProfileStore(this)
         threadAttachmentStore = DealerThreadAttachmentStore(this)
         retainedCardStore = RetainedCardStore(noBackupFilesDir.resolve("thread-cards"))
@@ -188,6 +229,8 @@ class DealerConnectionService : Service() {
             },
             scope = scope,
         )
+        registerPokerNetworkCallback()
+        pokerConnectionOwner.start()
         scope.launch {
             val restoreErrors = mutableListOf<String>()
             val (restoredAttachments, restoredActions) = try {
@@ -213,6 +256,10 @@ class DealerConnectionService : Service() {
                 pendingRequests = recovered.pendingRequests,
                 error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
             )
+            pokerComposerEpoch?.let { epoch ->
+                restoredAttachments.forEach { locator -> sendPokerProjection(epoch, locator) }
+            }
+            pokerSnapshotReady.complete(Unit)
             startRecoveryPersistence(recovered.pendingRequestsWritable)
             if (hostConnectionIntents.readEnabledHostIds().any {
                     hostConnectionProfiles.hasConfiguredTailnetRoute(it)
@@ -618,13 +665,203 @@ class DealerConnectionService : Service() {
         }
     }
 
-    fun updateDraft(locator: CodexThreadLocator, text: String) {
-        mutableState.update { it.copy(threadActions = it.threadActions.editDraft(locator, text)) }
+    fun updateDraft(locator: CodexThreadLocator, text: String) =
+        updateDraft(locator, ComposerDraft.fromText(text))
+
+    fun updateDraft(locator: CodexThreadLocator, draft: ComposerDraft) {
+        mutableState.update { it.copy(threadActions = it.threadActions.editComposerDraft(locator, draft)) }
         scope.launch {
             draftMutex.withLock {
-                threadAttachmentStore.writeDraft(locator, text)
+                threadAttachmentStore.writeDraft(locator, draft)
+            }
+            pokerComposerEpoch?.let { epoch -> sendPokerProjection(epoch, locator) }
+        }
+    }
+
+    private fun refreshPokerProjection(locator: CodexThreadLocator) {
+        pokerComposerEpoch?.let { epoch ->
+            scope.launch { sendPokerProjection(epoch, locator) }
+        }
+    }
+
+    private suspend fun onPokerConnected(epoch: PokerConnectionEpoch) {
+        pokerComposerEpoch = epoch
+        pokerComposerBindings.clear()
+        pokerComposerResults.clear()
+        mutableState.value.threadAttachments.attached
+            .toList()
+            .forEach { locator -> sendPokerProjection(epoch, locator) }
+    }
+
+    private suspend fun onPokerEnvelope(epoch: PokerConnectionEpoch, envelope: ProtocolEnvelope) {
+        if (envelope.type != POKER_COMPOSER_MUTATION_TYPE) return
+        val request = runCatching {
+            PokerProtocolJson.decodeFromJsonElement(
+                ComposerMutationRequest.serializer(),
+                envelope.payload,
+            )
+        }.getOrNull() ?: return
+        handlePokerComposerMutation(epoch, envelope, request)
+    }
+
+    private suspend fun sendPokerProjection(
+        epoch: PokerConnectionEpoch,
+        locator: CodexThreadLocator,
+    ) {
+        if (pokerComposerEpoch != epoch) return
+        val state = mutableState.value
+        if (locator !in state.threadAttachments.attached) return
+        val controlGeneration = state.threadAttachments.controlGeneration(locator)
+        val current = pokerComposerBindings[locator]
+        val modeSession = current
+            ?.takeIf {
+                it.epoch == epoch.value && it.controlGeneration == controlGeneration
+            }
+            ?.modeSession
+            ?: UUID.randomUUID().toString()
+        pokerComposerBindings[locator] = PokerComposerBinding(
+            epoch = epoch.value,
+            controlGeneration = controlGeneration,
+            modeSession = modeSession,
+        )
+        val projection = ComposerDraftProjection(
+            locator = locator,
+            draft = state.threadActions.composerDraft(locator),
+            controlGeneration = controlGeneration,
+            connectionEpoch = epoch.value,
+            modeSession = modeSession,
+        )
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            ComposerDraftProjection.serializer(),
+            projection,
+        ).jsonObject
+        pokerConnectionOwner.send(POKER_COMPOSER_DRAFT_PROJECTION_TYPE, payload)
+    }
+
+    private suspend fun handlePokerComposerMutation(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        request: ComposerMutationRequest,
+    ) {
+        val target = request.target
+        val current = mutableState.value.threadActions.composerDraft(target.locator)
+        fun result(
+            outcome: ComposerMutationOutcome,
+            draft: ComposerDraft = current,
+            reason: String? = null,
+        ) = ComposerMutationResult(target, outcome, draft, reason)
+
+        val binding = pokerComposerBindings[target.locator]
+        val rejection = when {
+            request.kind != ComposerMutationKind.DELETE_THROUGH_NEXT_WORD ->
+                result(ComposerMutationOutcome.REJECTED, reason = "Unsupported composer mutation")
+            target.surface != ComposerSurface.THREAD_COMPOSER ->
+                result(ComposerMutationOutcome.REJECTED, reason = "Request panels are not composers")
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                result(ComposerMutationOutcome.REJECTED, reason = "Composer connection epoch is stale")
+            target.locator !in mutableState.value.threadAttachments.attached ||
+                !mutableState.value.threadAttachments.hasDealerClaim(target.locator) ->
+                result(ComposerMutationOutcome.REJECTED, reason = "Dealer control is unavailable")
+            binding == null || binding.epoch != epoch.value ||
+                binding.controlGeneration != target.controlGeneration ||
+                binding.modeSession != target.modeSession ->
+                result(ComposerMutationOutcome.REJECTED, reason = "Composer control target is stale")
+            else -> null
+        }
+        if (rejection != null) {
+            sendPokerMutationResult(envelope, rejection)
+            return
+        }
+
+        pokerComposerResults[target.locator]
+            ?.takeIf { it.target == target }
+            ?.let {
+                sendPokerMutationResult(envelope, it)
+                return
+            }
+
+        val editor = try {
+            ComposerEditorState.atEnd(
+                locator = target.locator,
+                draft = current,
+                controlGeneration = target.controlGeneration,
+                connectionEpoch = target.connectionEpoch,
+                modeSession = target.modeSession,
+            ).copy(cursorPosition = target.cursorPosition)
+        } catch (failure: IllegalArgumentException) {
+            val response = result(
+                ComposerMutationOutcome.REJECTED,
+                reason = failure.message ?: "Composer cursor is stale",
+            )
+            sendPokerMutationResult(envelope, response)
+            return
+        }
+        val edit = try {
+            editor.beginTextDeletion(target)
+        } catch (failure: IllegalArgumentException) {
+            val response = result(
+                ComposerMutationOutcome.REJECTED,
+                reason = failure.message ?: "Composer target is stale",
+            )
+            sendPokerMutationResult(envelope, response)
+            return
+        }
+        val response = when (edit) {
+            is ComposerEditResult.NoChange -> result(
+                ComposerMutationOutcome.REJECTED,
+                reason = "Composer has no next word",
+            )
+            is ComposerEditResult.PhotoTokenBoundary -> result(
+                ComposerMutationOutcome.REJECTED,
+                reason = "Photo tokens require their own deletion transaction",
+            )
+            is ComposerEditResult.Started -> {
+                var persistenceFailure: Throwable? = null
+                try {
+                    draftMutex.withLock {
+                        threadAttachmentStore.writeDraft(target.locator, edit.mutation.optimistic)
+                    }
+                } catch (failure: Throwable) {
+                    persistenceFailure = failure
+                }
+                if (persistenceFailure == null) {
+                    mutableState.update {
+                        it.copy(
+                            threadActions = it.threadActions.editComposerDraft(
+                                target.locator,
+                                edit.mutation.optimistic,
+                            ),
+                        )
+                    }
+                    result(ComposerMutationOutcome.ACKNOWLEDGED, edit.mutation.optimistic)
+                } else {
+                    result(
+                        ComposerMutationOutcome.UNCERTAIN,
+                        reason = "Composer durability is uncertain: ${persistenceFailure.message}",
+                    )
+                }
             }
         }
+        pokerComposerResults[target.locator] = response
+        sendPokerMutationResult(envelope, response)
+        if (response.outcome == ComposerMutationOutcome.ACKNOWLEDGED) {
+            sendPokerProjection(epoch, target.locator)
+        }
+    }
+
+    private suspend fun sendPokerMutationResult(
+        envelope: ProtocolEnvelope,
+        result: ComposerMutationResult,
+    ) {
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            ComposerMutationResult.serializer(),
+            result,
+        ).jsonObject
+        pokerConnectionOwner.send(
+            type = POKER_COMPOSER_MUTATION_RESULT_TYPE,
+            payload = payload,
+            replyTo = envelope.messageId,
+        )
     }
 
     fun submitDraft(locator: CodexThreadLocator) {
@@ -641,6 +878,12 @@ class DealerConnectionService : Service() {
             )
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        if (pending.draft.elements.any { it is ComposerElement.Photo }) {
+            mutableState.update {
+                it.copy(error = "Photo drafts require image submission support")
+            }
             return
         }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
@@ -732,7 +975,7 @@ class DealerConnectionService : Service() {
                 }
                 recordThreadTransition(locator)
                 if (clearAcceptedDraft) {
-                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    val retainedDraft = mutableState.value.threadActions.composerDraft(locator)
                     runCatching {
                         draftMutex.withLock {
                             threadAttachmentStore.writeDraft(locator, retainedDraft)
@@ -748,6 +991,7 @@ class DealerConnectionService : Service() {
                         }
                     }
                 }
+                refreshPokerProjection(locator)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (rejected: JsonRpcRemoteException) {
@@ -1071,6 +1315,7 @@ class DealerConnectionService : Service() {
                             selection = validated,
                         )
                     }
+                    refreshPokerProjection(locator)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -1506,6 +1751,7 @@ class DealerConnectionService : Service() {
                             grantControl = controlBearing && review.controlClaimed,
                         )
                     }
+                    refreshPokerProjection(review.locator)
                     browseThread(review.locator)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -2176,6 +2422,7 @@ class DealerConnectionService : Service() {
             )
         }
         recordThreadTransition(locator)
+        refreshPokerProjection(locator)
     }
 
     fun browseThread(locator: CodexThreadLocator, request: ServerRequestLocator? = null) {
@@ -2250,7 +2497,7 @@ class DealerConnectionService : Service() {
                     )
                 }
                 if (clearDraft) {
-                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    val retainedDraft = mutableState.value.threadActions.composerDraft(locator)
                     draftMutex.withLock {
                         threadAttachmentStore.writeDraft(locator, retainedDraft)
                         threadAttachmentStore.writePendingInput(locator, null)
@@ -2263,6 +2510,7 @@ class DealerConnectionService : Service() {
                 if (clearInterrupt) {
                     draftMutex.withLock { threadAttachmentStore.writePendingInterrupt(locator, null) }
                 }
+                refreshPokerProjection(locator)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Throwable) {
@@ -2461,6 +2709,7 @@ class DealerConnectionService : Service() {
                 error = null,
             )
         }
+        refreshPokerProjection(locator)
         return true
     }
 
@@ -2478,6 +2727,7 @@ class DealerConnectionService : Service() {
                 } ?: state.threads,
             )
         }
+        refreshPokerProjection(locator)
         return true
     }
 
@@ -2657,6 +2907,9 @@ class DealerConnectionService : Service() {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }
         pokerNetworkCallback = null
+        pokerComposerEpoch = null
+        pokerComposerBindings.clear()
+        pokerComposerResults.clear()
         pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }
         synchronized(hostSessionConfigs) {
@@ -2979,6 +3232,12 @@ private fun Card.reviewMaterialPresent(): Boolean = when (source) {
     CardSource.CODEX_FILE_CHANGE -> status != null && fileChanges.isNotEmpty()
     else -> true
 }
+
+private data class PokerComposerBinding(
+    val epoch: Long,
+    val controlGeneration: Long,
+    val modeSession: String,
+)
 
 enum class DealerRunState(
     val label: String,

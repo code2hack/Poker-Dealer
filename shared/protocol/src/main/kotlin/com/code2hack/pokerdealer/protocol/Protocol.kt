@@ -6,6 +6,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerEditTarget
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
 
 const val POKER_PROTOCOL_NAME = "poker-dealer"
 const val POKER_PROTOCOL_MAJOR = 1
@@ -26,6 +29,9 @@ const val POKER_SNAPSHOT_BEGIN_TYPE = "snapshot.begin"
 const val POKER_SNAPSHOT_CHUNK_TYPE = "snapshot.chunk"
 const val POKER_SNAPSHOT_COMPLETE_TYPE = "snapshot.complete"
 const val POKER_SNAPSHOT_ACK_TYPE = "snapshot.ack"
+const val POKER_COMPOSER_DRAFT_PROJECTION_TYPE = "composer.projection"
+const val POKER_COMPOSER_MUTATION_TYPE = "composer.mutation"
+const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
 const val POKER_LISTENER_PORT = 39_817
 
 val PokerProtocolJson = Json {
@@ -47,6 +53,41 @@ data class ProtocolEnvelope(
     @SerialName("reply_to") val replyTo: String? = null,
     @SerialName("conversation_id") val conversationId: String? = null,
     val payload: JsonObject,
+)
+
+@Serializable
+data class ComposerDraftProjection(
+    val locator: CodexThreadLocator,
+    val draft: ComposerDraft,
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String = "",
+)
+
+@Serializable
+enum class ComposerMutationKind {
+    DELETE_THROUGH_NEXT_WORD,
+}
+
+@Serializable
+data class ComposerMutationRequest(
+    val target: ComposerEditTarget,
+    val kind: ComposerMutationKind,
+)
+
+@Serializable
+enum class ComposerMutationOutcome {
+    ACKNOWLEDGED,
+    REJECTED,
+    UNCERTAIN,
+}
+
+@Serializable
+data class ComposerMutationResult(
+    val target: ComposerEditTarget,
+    val outcome: ComposerMutationOutcome,
+    val draft: ComposerDraft,
+    val reason: String? = null,
 )
 
 @Serializable

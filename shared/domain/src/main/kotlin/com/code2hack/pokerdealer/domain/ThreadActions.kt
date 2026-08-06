@@ -18,16 +18,41 @@ data class PendingThreadInput(
     val expectedTurnId: String?,
     val draftText: String,
     val uncertain: Boolean = false,
+    val draft: ComposerDraft = ComposerDraft.fromText(draftText),
 )
 
 data class ThreadActionState(
+    /** Legacy display projection retained for the existing Dealer UI and app-server text path. */
     val drafts: Map<CodexThreadLocator, String> = emptyMap(),
+    /** Canonical ordered draft state. */
+    val composerDrafts: Map<CodexThreadLocator, ComposerDraft> = emptyMap(),
     val pendingInputs: Map<CodexThreadLocator, PendingThreadInput> = emptyMap(),
     val pendingInterrupts: Map<CodexThreadLocator, String> = emptyMap(),
     val pendingReasoningEfforts: Map<CodexThreadLocator, String> = emptyMap(),
 ) {
+    fun composerDraft(locator: CodexThreadLocator): ComposerDraft =
+        composerDrafts[locator] ?: ComposerDraft.fromLegacy(drafts[locator].orEmpty())
+
     fun editDraft(locator: CodexThreadLocator, text: String): ThreadActionState =
-        copy(drafts = if (text.isEmpty()) drafts - locator else drafts + (locator to text))
+        editComposerDraft(locator, ComposerDraft.fromText(text))
+
+    fun editComposerDraft(locator: CodexThreadLocator, draft: ComposerDraft): ThreadActionState {
+        val normalized = draft.normalized()
+        val current = composerDrafts[locator] ?: ComposerDraft.fromLegacy(drafts[locator].orEmpty())
+        val versioned = if (normalized.elements == current.elements) {
+            normalized.withRevision(current.revision)
+        } else {
+            normalized.withRevision(maxOf(current.revision + 1, normalized.revision))
+        }
+        return copy(
+            drafts = if (versioned.isEmpty) drafts - locator else drafts + (locator to versioned.displayText),
+            composerDrafts = if (versioned.isEmpty) {
+                composerDrafts - locator
+            } else {
+                composerDrafts + (locator to versioned)
+            },
+        )
+    }
 
     fun beginInput(
         locator: CodexThreadLocator,
@@ -38,14 +63,21 @@ data class ThreadActionState(
     ): Pair<ThreadActionState, PendingThreadInput> {
         require(hasDealerClaim) { "Take control before sending" }
         require(locator !in pendingInputs) { "Reconcile the previous input before sending again" }
-        require(drafts[locator].orEmpty().isNotBlank()) { "Draft is empty" }
+        val draft = composerDraft(locator)
+        require(draft.isSubmittable) { "Draft is empty" }
         val action = workState.composerAction()
         require(action != ComposerAction.BLOCKED) { "Prompt submission is unavailable in the current thread state" }
         val expectedTurnId = activeTurnId.takeIf { action == ComposerAction.STEER }
         require(action != ComposerAction.STEER || expectedTurnId != null) {
             "Reconcile the active turn before steering"
         }
-        val pending = PendingThreadInput(clientId, action, expectedTurnId, drafts.getValue(locator))
+        val pending = PendingThreadInput(
+            clientId = clientId,
+            action = action,
+            expectedTurnId = expectedTurnId,
+            draftText = draft.displayText,
+            draft = draft,
+        )
         return copy(pendingInputs = pendingInputs + (locator to pending)) to pending
     }
 
@@ -53,7 +85,12 @@ data class ThreadActionState(
         require(pendingInputs[locator]?.clientId == clientId) { "Input action no longer matches" }
         val pending = pendingInputs.getValue(locator)
         return copy(
-            drafts = if (drafts[locator] == pending.draftText) drafts - locator else drafts,
+            drafts = if (composerDraft(locator) == pending.draft) drafts - locator else drafts,
+            composerDrafts = if (composerDraft(locator) == pending.draft) {
+                composerDrafts - locator
+            } else {
+                composerDrafts
+            },
             pendingInputs = pendingInputs - locator,
             pendingReasoningEfforts = if (pending.action == ComposerAction.START) {
                 pendingReasoningEfforts - locator
@@ -112,6 +149,7 @@ data class ThreadActionState(
 
     fun purge(locators: Set<CodexThreadLocator>): ThreadActionState = copy(
         drafts = drafts - locators,
+        composerDrafts = composerDrafts - locators,
         pendingInputs = pendingInputs - locators,
         pendingInterrupts = pendingInterrupts - locators,
         pendingReasoningEfforts = pendingReasoningEfforts - locators,

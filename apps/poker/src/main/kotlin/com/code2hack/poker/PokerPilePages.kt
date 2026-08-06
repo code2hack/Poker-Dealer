@@ -27,6 +27,7 @@ internal data class PokerPilePage(
     val workState: ThreadWorkState,
     val cardText: String,
     val anchor: PokerPileAnchor? = null,
+    val composerText: String? = null,
 )
 
 internal data class PokerPileRenderProjection(
@@ -40,6 +41,7 @@ internal data class PokerPileRenderProjection(
 internal fun PokerPileMetadata.toPokerPileRenderProjection(
     cardTextByLocator: Map<CodexThreadLocator, String>,
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
+    composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -48,6 +50,7 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 workState = state,
                 cardText = cardTextByLocator[pile.locator].orEmpty(),
                 anchor = anchorByLocator[pile.locator],
+                composerText = composerTextByLocator[pile.locator],
             )
         }
     },
@@ -60,8 +63,13 @@ internal fun PokerPilePages(
     cardTextByLocator: Map<CodexThreadLocator, String>,
     modifier: Modifier = Modifier,
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
+    composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
 ) {
-    val projection = metadata.toPokerPileRenderProjection(cardTextByLocator, anchorByLocator)
+    val projection = metadata.toPokerPileRenderProjection(
+        cardTextByLocator,
+        anchorByLocator,
+        composerTextByLocator,
+    )
     val page = projection.visiblePage ?: return
     val lines = remember(page.locator, page.cardText) { page.cardText.split('\n') }
     val listState: LazyListState = rememberLazyListState()
@@ -90,6 +98,16 @@ internal fun PokerPilePages(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+        }
+
+        page.composerText?.let { draft ->
+            Text(
+                text = "Draft: $draft",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 8.dp),
+                color = Color(0xFFB7E3C0),
+            )
         }
 
         Text(
