@@ -19,14 +19,29 @@ class MorseTest {
     )
 
     @Test
-    fun `written table decodes letters figures punctuation and rejects procedural signals`() {
-        assertEquals('A', MorseCode.decode(".-"))
-        assertEquals('X', MorseCode.decode("-..-"))
-        assertEquals('É', MorseCode.decode("..-.."))
-        assertEquals('?', MorseCode.decode("..--.."))
-        assertEquals('–', MorseCode.decode("-....-"))
-        assertEquals('@', MorseCode.decode(".--.-."))
-        assertNull(MorseCode.decode("...-.-"))
+    fun `ITU printable table decodes every written character and rejects procedural signals`() {
+        val expected = mapOf(
+            ".-" to 'A', "-..." to 'B', "-.-." to 'C', "-.." to 'D', "." to 'E',
+            "..-." to 'F', "--." to 'G', "...." to 'H', ".." to 'I', ".---" to 'J',
+            "-.-" to 'K', ".-.." to 'L', "--" to 'M', "-." to 'N', "---" to 'O',
+            ".--." to 'P', "--.-" to 'Q', ".-." to 'R', "..." to 'S', "-" to 'T',
+            "..-" to 'U', "...-" to 'V', ".--" to 'W', "-..-" to 'X', "-.--" to 'Y',
+            "--.." to 'Z', "..-.." to 'É',
+            ".----" to '1', "..---" to '2', "...--" to '3', "....-" to '4', "....." to '5',
+            "-...." to '6', "--..." to '7', "---.." to '8', "----." to '9', "-----" to '0',
+            ".-.-.-" to '.', "--..--" to ',', "---..." to ':', "..--.." to '?',
+            ".----." to '’', "-....-" to '–', "-..-." to '/', "-.--." to '(',
+            "-.--.-" to ')', ".-..-." to '"', "-...-" to '=', ".-.-." to '+',
+            ".--.-." to '@',
+        )
+
+        expected.forEach { (sequence, character) ->
+            assertEquals(character, MorseCode.decode(sequence), sequence)
+        }
+        assertEquals(expected.values.toSet(), MorseCode.printableCharacters)
+        listOf("...-.", "........", ".-...", "...-.-", "-.-.-").forEach { sequence ->
+            assertNull(MorseCode.decode(sequence), sequence)
+        }
     }
 
     @Test
@@ -116,6 +131,95 @@ class MorseTest {
             MorseInputEvent.Ignored,
             controller.reduce(interaction(PokerOperation.FN, PokerInteractionPhase.RELEASE, 1_600, 100)),
         )
+    }
+
+    @Test
+    fun `deletion starts at the Morse cursor and cannot reach pre-session text`() {
+        val sessionTarget = target.copy(revision = 9, cursorPosition = 5)
+        val controller = MorseInputController(sessionId = { "operation" })
+        controller.begin(sessionTarget)
+        tap(controller, atMs = 100, durationMs = 100)
+        assertEquals(MorseInputEvent.CharacterFinished('E'), controller.advance(900))
+
+        controller.reduce(interaction(PokerOperation.UP, PokerInteractionPhase.BEGIN, 1_000))
+        val commit = controller.reduce(
+            interaction(PokerOperation.UP, PokerInteractionPhase.RELEASE, 1_100, durationMs = 100),
+        ) as MorseInputEvent.MutationRequested
+        assertEquals(5, commit.intent.target.mode.cursorPosition)
+        assertEquals("e ", commit.intent.text)
+        assertEquals(
+            MorseInputEvent.MutationAcknowledged,
+            controller.applyMutation(commit.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 10, 7),
+        )
+
+        controller.reduce(interaction(PokerOperation.FN, PokerInteractionPhase.BEGIN, 1_200))
+        val deletion = controller.reduce(
+            interaction(PokerOperation.FN, PokerInteractionPhase.RELEASE, 1_300, durationMs = 100),
+        ) as MorseInputEvent.MutationRequested
+        assertEquals(MorseMutationKind.DELETE_COMMITTED_WORD, deletion.intent.kind)
+        assertEquals(5, deletion.intent.deleteStart)
+        assertEquals(7, deletion.intent.deleteEndExclusive)
+        assertEquals("e ", deletion.intent.expectedText)
+    }
+
+    @Test
+    fun `commit preserves exact composer and request targets`() {
+        val requestTarget = target.copy(
+            surface = ComposerSurface.REQUEST_PANEL,
+            requestLocator = ServerRequestLocator("spark", 7, "request"),
+            questionId = "question",
+            requestFingerprint = "fingerprint",
+            revision = 2,
+            cursorPosition = 4,
+        )
+        listOf(target, requestTarget).forEachIndexed { index, modeTarget ->
+            val controller = MorseInputController(sessionId = { "operation-$index" })
+            controller.begin(modeTarget)
+            tap(controller, atMs = 100, durationMs = 100)
+            assertEquals(MorseInputEvent.CharacterFinished('E'), controller.advance(900))
+            controller.reduce(interaction(PokerOperation.UP, PokerInteractionPhase.BEGIN, 1_000))
+            val commit = controller.reduce(
+                interaction(PokerOperation.UP, PokerInteractionPhase.RELEASE, 1_100, durationMs = 100),
+            ) as MorseInputEvent.MutationRequested
+
+            assertEquals(modeTarget, commit.intent.target.mode)
+            assertEquals(
+                MorseInputEvent.MutationAcknowledged,
+                controller.applyMutation(commit.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 3, 6),
+            )
+        }
+    }
+
+    @Test
+    fun `duplicate late and uncertain mutation results never replay`() {
+        val controller = MorseInputController(sessionId = { "operation" })
+        controller.begin(target)
+        tap(controller, atMs = 100, durationMs = 100)
+        assertEquals(MorseInputEvent.CharacterFinished('E'), controller.advance(900))
+        controller.reduce(interaction(PokerOperation.UP, PokerInteractionPhase.BEGIN, 1_000))
+        val commit = controller.reduce(
+            interaction(PokerOperation.UP, PokerInteractionPhase.RELEASE, 1_100, durationMs = 100),
+        ) as MorseInputEvent.MutationRequested
+
+        assertEquals(
+            MorseInputEvent.MutationAcknowledged,
+            controller.applyMutation(commit.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 1, 2),
+        )
+        assertNull(controller.applyMutation(commit.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 2, 3))
+        assertEquals(1, controller.state().committedWords.size)
+
+        controller.reduce(interaction(PokerOperation.FN, PokerInteractionPhase.BEGIN, 1_200))
+        val deletion = controller.reduce(
+            interaction(PokerOperation.FN, PokerInteractionPhase.RELEASE, 1_300, durationMs = 100),
+        ) as MorseInputEvent.MutationRequested
+        assertNull(controller.applyMutation(commit.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 3, 4))
+        assertEquals(deletion.intent.target, controller.pendingTarget())
+        assertEquals(
+            MorseInputEvent.Interrupted,
+            controller.applyMutation(deletion.intent.target, MorseMutationOutcome.UNCERTAIN, null, null),
+        )
+        assertFalse(controller.isActive)
+        assertNull(controller.applyMutation(deletion.intent.target, MorseMutationOutcome.ACKNOWLEDGED, 4, 5))
     }
 
     @Test
