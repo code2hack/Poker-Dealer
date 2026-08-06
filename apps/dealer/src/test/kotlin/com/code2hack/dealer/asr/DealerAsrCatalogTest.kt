@@ -29,10 +29,15 @@ class DealerAsrCatalogTest {
             )
             loaded.catalog.entries.forEach { entry ->
                 assertEquals(entry.revision, entry.sourceRevision)
-                assertTrue(entry.artifacts.all { it.canonicalUrl.startsWith("https://huggingface.co/") })
+                assertTrue(entry.artifacts.all { it.canonicalUrl.startsWith("https://") })
                 assertTrue(entry.installedBytes > 0)
                 assertTrue(entry.profileSchema["fields"] != null)
             }
+            assertEquals(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+                loaded.catalog.entries.single { it.adapter == DealerAsrAdapter.MOONSHINE_V2_OFFLINE }
+                    .artifacts.single().canonicalUrl,
+            )
         } finally {
             root.deleteRecursively()
         }
@@ -174,6 +179,11 @@ class DealerAsrCatalogTest {
     ): String {
         val revision = "a".repeat(40)
         val digest = "a".repeat(64)
+        val url = if (adapter == "MOONSHINE_V2_OFFLINE") {
+            ", " + "\"canonicalUrl\": \"https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx\""
+        } else {
+            ""
+        }
         return """
             {
               "id": "$id",
@@ -182,7 +192,7 @@ class DealerAsrCatalogTest {
               "family": "$family",
               "adapter": "$adapter",
               "source": {"repository": "test/repo", "revision": "$revision"},
-              "artifacts": [{"path": "model.onnx", "bytes": 1, "sha256": "$digest"}],
+              "artifacts": [{"path": "model.onnx", "bytes": 1, "sha256": "$digest"$url}],
               "downloadBytes": 1,
               "temporaryBytes": 1,
               "installedBytes": 1,

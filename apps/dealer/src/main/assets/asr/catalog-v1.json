@@ -102,11 +102,17 @@
           "path": "LICENSE",
           "bytes": 13344,
           "sha256": "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"
+        },
+        {
+          "path": "silero_vad.onnx",
+          "bytes": 643854,
+          "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+          "canonicalUrl": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
         }
       ],
-      "downloadBytes": 44256550,
-      "temporaryBytes": 44256550,
-      "installedBytes": 44256550,
+      "downloadBytes": 44900404,
+      "temporaryBytes": 44900404,
+      "installedBytes": 44900404,
       "languages": ["en"],
       "licenses": ["MIT", "Moonshine Community License"],
       "backend": "cpu",

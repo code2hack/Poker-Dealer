@@ -39,6 +39,8 @@ internal class DealerAsrSliceSession(
             recognizer.acceptPcm16(pcm)
             nextSampleOffset += samples
             null
+        } catch (failure: DealerAsrOfflineFailure) {
+            failure.reason
         } catch (_: Throwable) {
             "runtime-decode-failed"
         }
