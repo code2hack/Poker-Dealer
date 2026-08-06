@@ -17,7 +17,7 @@ import java.util.List;
         DealerDatabase.ThreadDraft.class,
         DealerDatabase.PendingThreadAction.class
     },
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 public abstract class DealerDatabase extends RoomDatabase {
@@ -41,17 +41,20 @@ public abstract class DealerDatabase extends RoomDatabase {
         @NonNull public final String hostId;
         @NonNull public final String threadId;
         @NonNull public final String text;
+        @NonNull public final String draftJson;
         public final String reasoningEffort;
 
         public ThreadDraft(
             @NonNull String hostId,
             @NonNull String threadId,
             @NonNull String text,
+            @NonNull String draftJson,
             String reasoningEffort
         ) {
             this.hostId = hostId;
             this.threadId = threadId;
             this.text = text;
+            this.draftJson = draftJson;
             this.reasoningEffort = reasoningEffort;
         }
     }
@@ -64,6 +67,7 @@ public abstract class DealerDatabase extends RoomDatabase {
         public final String clientId;
         public final String expectedTurnId;
         public final String draftText;
+        public final String draftJson;
 
         public PendingThreadAction(
             @NonNull String hostId,
@@ -71,7 +75,8 @@ public abstract class DealerDatabase extends RoomDatabase {
             @NonNull String kind,
             String clientId,
             String expectedTurnId,
-            String draftText
+            String draftText,
+            String draftJson
         ) {
             this.hostId = hostId;
             this.threadId = threadId;
@@ -79,6 +84,7 @@ public abstract class DealerDatabase extends RoomDatabase {
             this.clientId = clientId;
             this.expectedTurnId = expectedTurnId;
             this.draftText = draftText;
+            this.draftJson = draftJson;
         }
     }
 

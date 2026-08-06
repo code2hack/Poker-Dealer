@@ -94,4 +94,23 @@ class ThreadActionsTest {
         assertEquals(mapOf(retained to "turn-keep"), state.pendingInterrupts)
         assertEquals(mapOf(retained to "low"), state.pendingReasoningEfforts)
     }
+
+    @Test
+    fun `ordered composer draft is authoritative while legacy display stays compatible`() {
+        val draft = ComposerDraft(
+            elements = listOf(
+                ComposerElement.Text("before"),
+                ComposerElement.Photo("asset"),
+                ComposerElement.Text("after"),
+            ),
+        )
+
+        val state = ThreadActionState().editComposerDraft(thread, draft)
+
+        assertEquals("before📷after", state.drafts[thread])
+        assertEquals(draft.copy(revision = 1), state.composerDraft(thread))
+        val (_, pending) = state.beginInput(thread, ThreadWorkState.READY, null, true, "photo-turn")
+        assertEquals(draft.copy(revision = 1), pending.draft)
+        assertEquals("before📷after", pending.draftText)
+    }
 }

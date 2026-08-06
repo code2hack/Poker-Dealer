@@ -22,6 +22,8 @@ import com.code2hack.pokerdealer.domain.CommandApprovalDecision
 import com.code2hack.pokerdealer.domain.CommandApprovalRequest
 import com.code2hack.pokerdealer.domain.CommandApprovalState
 import com.code2hack.pokerdealer.domain.ComposerAction
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
@@ -590,11 +592,14 @@ class DealerConnectionService : Service() {
         }
     }
 
-    fun updateDraft(locator: CodexThreadLocator, text: String) {
-        mutableState.update { it.copy(threadActions = it.threadActions.editDraft(locator, text)) }
+    fun updateDraft(locator: CodexThreadLocator, text: String) =
+        updateDraft(locator, ComposerDraft.fromText(text))
+
+    fun updateDraft(locator: CodexThreadLocator, draft: ComposerDraft) {
+        mutableState.update { it.copy(threadActions = it.threadActions.editComposerDraft(locator, draft)) }
         scope.launch {
             draftMutex.withLock {
-                threadAttachmentStore.writeDraft(locator, text)
+                threadAttachmentStore.writeDraft(locator, draft)
             }
         }
     }
@@ -613,6 +618,12 @@ class DealerConnectionService : Service() {
             )
         } catch (failure: IllegalArgumentException) {
             mutableState.update { it.copy(error = failure.message) }
+            return
+        }
+        if (pending.draft.elements.any { it is ComposerElement.Photo }) {
+            mutableState.update {
+                it.copy(error = "Photo drafts require image submission support")
+            }
             return
         }
         val appServer = hostSessions.connectedSession(locator.hostId)?.appServer ?: run {
@@ -704,7 +715,7 @@ class DealerConnectionService : Service() {
                 }
                 recordThreadTransition(locator)
                 if (clearAcceptedDraft) {
-                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    val retainedDraft = mutableState.value.threadActions.composerDraft(locator)
                     runCatching {
                         draftMutex.withLock {
                             threadAttachmentStore.writeDraft(locator, retainedDraft)
@@ -2222,7 +2233,7 @@ class DealerConnectionService : Service() {
                     )
                 }
                 if (clearDraft) {
-                    val retainedDraft = mutableState.value.threadActions.drafts[locator].orEmpty()
+                    val retainedDraft = mutableState.value.threadActions.composerDraft(locator)
                     draftMutex.withLock {
                         threadAttachmentStore.writeDraft(locator, retainedDraft)
                         threadAttachmentStore.writePendingInput(locator, null)

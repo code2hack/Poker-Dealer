@@ -3,6 +3,11 @@ package com.code2hack.pokerdealer.protocol
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerEditTarget
+import com.code2hack.pokerdealer.domain.ComposerElement
+import com.code2hack.pokerdealer.domain.ComposerSurface
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -48,5 +53,35 @@ class ProtocolTest {
         assertThrows(IllegalArgumentException::class.java) {
             Utf8TextChunker.reassemble(chunks.dropLast(1))
         }
+    }
+
+    @Test
+    fun `composer projection and exact mutation target round trip`() {
+        val locator = CodexThreadLocator("spark", "thread")
+        val request = ComposerMutationRequest(
+            target = ComposerEditTarget(
+                locator = locator,
+                draftRevision = 7,
+                cursorPosition = 2,
+                controlGeneration = 3,
+                connectionEpoch = 4,
+                modeSession = "composer-1",
+                operationId = "delete-1",
+                surface = ComposerSurface.THREAD_COMPOSER,
+            ),
+            kind = ComposerMutationKind.DELETE_THROUGH_NEXT_WORD,
+        )
+        val projection = ComposerDraftProjection(
+            locator = locator,
+            draft = ComposerDraft(
+                revision = 7,
+                elements = listOf(ComposerElement.Text("hello"), ComposerElement.Photo("asset")),
+            ),
+            controlGeneration = 3,
+            connectionEpoch = 4,
+        )
+
+        assertEquals(request, PokerProtocolJson.decodeFromString<ComposerMutationRequest>(PokerProtocolJson.encodeToString(request)))
+        assertEquals(projection, PokerProtocolJson.decodeFromString<ComposerDraftProjection>(PokerProtocolJson.encodeToString(projection)))
     }
 }

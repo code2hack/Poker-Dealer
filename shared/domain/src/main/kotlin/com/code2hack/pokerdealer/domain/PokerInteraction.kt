@@ -192,10 +192,17 @@ data class PokerCardLayout(
 
 data class PokerComposerLayout(
     val positionCount: Int = 1,
+    val draft: ComposerDraft? = null,
 ) {
     init {
         require(positionCount > 0) { "Composer position count must be positive" }
     }
+
+    val cursorPositionCount: Int
+        get() = draft?.cursorCount ?: positionCount
+
+    val endCursorPosition: Int
+        get() = cursorPositionCount - 1
 }
 
 data class PokerPileLayout(
@@ -226,6 +233,7 @@ enum class PokerNavigationEffect {
     DETAILS_TOGGLED,
     ENTERED_COMPOSER,
     ENTERED_REQUEST_PANEL,
+    COMPOSER_DELETE_REQUESTED,
     EXITED_INPUT,
     HID,
     WOKE,
@@ -289,7 +297,17 @@ class PokerNavigationReducer(
         require(locator in layouts || locator in piles.metadata().orderedPiles.map(ThreadPile::locator)) {
             "Thread is not attached"
         }
+        val previousComposer = layouts[locator]?.composer
+        val currentAnchor = anchors[locator]
         layouts[locator] = layout
+        val newComposer = layout.composer
+        if (
+            currentAnchor?.mode == PokerNavigationMode.COMPOSER &&
+            previousComposer?.draft != newComposer?.draft &&
+            newComposer?.draft != null
+        ) {
+            anchors[locator] = currentAnchor.copy(cursorPosition = newComposer.endCursorPosition)
+        }
         reanchor(locator)
     }
 
@@ -399,7 +417,7 @@ class PokerNavigationReducer(
                 anchors[locator] = current.copy(
                     mode = PokerNavigationMode.COMPOSER,
                     inputId = COMPOSER_INPUT_ID,
-                    cursorPosition = 0.coerceAtMost(composer.positionCount - 1),
+                    cursorPosition = composer.endCursorPosition,
                 )
                 return PokerNavigationEffect.ENTERED_COMPOSER
             }
@@ -429,6 +447,22 @@ class PokerNavigationReducer(
         delta: Int,
     ): PokerNavigationEffect {
         val composer = layout.composer ?: return reanchorWithEffect(locator)
+        composer.draft?.let { draft ->
+            val target = if (delta > 0) {
+                draft.nextWordStart(current.cursorPosition)
+            } else {
+                draft.previousWordStart(current.cursorPosition)
+            }
+            if (target != current.cursorPosition) {
+                anchors[locator] = current.copy(cursorPosition = target)
+                return PokerNavigationEffect.SCROLLED
+            }
+            if (delta < 0 && current.cursorPosition == 0) {
+                exitInputToCardEnd(locator, layout, current)
+                return PokerNavigationEffect.EXITED_INPUT
+            }
+            return PokerNavigationEffect.NONE
+        }
         return if (delta > 0 && current.cursorPosition + 1 < composer.positionCount) {
             anchors[locator] = current.copy(cursorPosition = current.cursorPosition + 1)
             PokerNavigationEffect.SCROLLED
@@ -547,7 +581,7 @@ class PokerNavigationReducer(
         }
         if (current != null && validInput && currentCard != null) {
             val maxCursor = when (current.mode) {
-                PokerNavigationMode.COMPOSER -> layout.composer!!.positionCount - 1
+                PokerNavigationMode.COMPOSER -> layout.composer!!.cursorPositionCount - 1
                 PokerNavigationMode.REQUEST_PANEL -> card.requestPanel!!.positionCount - 1
                 PokerNavigationMode.NAVIGATION -> 0
             }
@@ -571,6 +605,25 @@ class PokerNavigationReducer(
             .coerceAtLeast(0)
 }
 
+data class ComposerDeletionRequest(
+    val locator: CodexThreadLocator,
+    val draftRevision: Long,
+    val start: Int,
+    val endExclusive: Int,
+)
+
+private const val SHORT_FN_MAX_DURATION_MS = 500L
+
+fun PokerNavigationReducer.shortComposerDeletion(
+    locator: CodexThreadLocator,
+): ComposerDeletionRequest? {
+    val anchor = anchor(locator)?.takeIf { it.mode == PokerNavigationMode.COMPOSER } ?: return null
+    val draft = layout(locator)?.composer?.draft ?: return null
+    val deletion = draft.deleteThroughNextWord(anchor.cursorPosition) ?: return null
+    if (deletion.containsPhoto) return null
+    return ComposerDeletionRequest(locator, draft.revision, deletion.start, deletion.endExclusive)
+}
+
 class PokerInputController(
     private val navigation: PokerNavigationReducer,
     private val interactions: PokerInteractionReducer = PokerInteractionReducer(),
@@ -578,16 +631,28 @@ class PokerInputController(
     data class Result(
         val interaction: PokerInteraction,
         val navigationEffect: PokerNavigationEffect,
+        val composerDeletion: ComposerDeletionRequest? = null,
     )
 
     fun reduce(interaction: PokerInteraction): Result? {
         val accepted = interactions.reduce(interaction) ?: return null
-        val effect = if (accepted.phase == PokerInteractionPhase.RELEASE) {
+        val deletion = if (
+            accepted.phase == PokerInteractionPhase.RELEASE &&
+            accepted.operation == PokerOperation.FN &&
+            accepted.durationMs < SHORT_FN_MAX_DURATION_MS
+        ) {
+            navigation.metadata().focused?.let(navigation::shortComposerDeletion)
+        } else {
+            null
+        }
+        val effect = if (deletion != null) {
+            PokerNavigationEffect.COMPOSER_DELETE_REQUESTED
+        } else if (accepted.phase == PokerInteractionPhase.RELEASE) {
             accepted.operation?.let(navigation::apply) ?: PokerNavigationEffect.NONE
         } else {
             PokerNavigationEffect.NONE
         }
-        return Result(accepted, effect)
+        return Result(accepted, effect, deletion)
     }
 
     fun cancel(reason: PokerCancellationReason, eventTimeMs: Long? = null): Result? =

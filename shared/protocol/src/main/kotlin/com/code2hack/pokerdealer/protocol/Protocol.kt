@@ -6,6 +6,9 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerEditTarget
+import com.code2hack.pokerdealer.domain.CodexThreadLocator
 
 const val POKER_PROTOCOL_NAME = "poker-dealer"
 const val POKER_PROTOCOL_VERSION = 1
@@ -29,6 +32,25 @@ data class ProtocolEnvelope(
     @SerialName("reply_to") val replyTo: String? = null,
     @SerialName("conversation_id") val conversationId: String? = null,
     val payload: JsonObject,
+)
+
+@Serializable
+data class ComposerDraftProjection(
+    val locator: CodexThreadLocator,
+    val draft: ComposerDraft,
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+)
+
+@Serializable
+enum class ComposerMutationKind {
+    DELETE_THROUGH_NEXT_WORD,
+}
+
+@Serializable
+data class ComposerMutationRequest(
+    val target: ComposerEditTarget,
+    val kind: ComposerMutationKind,
 )
 
 enum class PokerTransportState {
