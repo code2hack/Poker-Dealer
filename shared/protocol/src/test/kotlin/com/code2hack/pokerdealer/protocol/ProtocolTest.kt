@@ -260,6 +260,39 @@ class ProtocolTest {
     }
 
     @Test
+    fun `Morse completion preserves target prefix and optional suffix`() {
+        val target = MorseModeTarget(
+            locator = CodexThreadLocator("spark", "thread"),
+            surface = ComposerSurface.THREAD_COMPOSER,
+            revision = 3,
+            cursorPosition = 2,
+            controlGeneration = 4,
+            connectionEpoch = 5,
+            bindingModeSession = "binding",
+            modeSession = "morse",
+        )
+        val request = MorseCompletionRequest(target, "CA")
+        val projection = MorseCompletionProjection(target, "CA", "t")
+
+        assertEquals(
+            request,
+            PokerProtocolJson.decodeFromString<MorseCompletionRequest>(
+                PokerProtocolJson.encodeToString(request),
+            ),
+        )
+        assertEquals(
+            projection,
+            PokerProtocolJson.decodeFromString<MorseCompletionProjection>(
+                PokerProtocolJson.encodeToString(projection),
+            ),
+        )
+        assertEquals(
+            projection.copy(suffix = null),
+            MorseCompletionProjection(target, "CA"),
+        )
+    }
+
+    @Test
     fun `approval projection preserves safe choice order and exact primary decision`() {
         val thread = CodexThreadLocator("spark", "thread")
         val request = CommandApprovalRequest(
