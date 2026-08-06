@@ -47,6 +47,36 @@ class PokerPairingTest {
     }
 
     @Test
+    fun `captured PAKE wire material needs the hidden ephemeral and has no code oracle`() {
+        val poker = controller(
+            PokerPairingRole.POKER,
+            FakeIdentity(byteArrayOf(1, 2, 3)),
+            "123456",
+        )
+        val dealer = controller(PokerPairingRole.DEALER, FakeIdentity(byteArrayOf(4, 5, 6)))
+        val enrollment = poker.openEnrollment(0, physicalEnrollmentConfirmed = true)
+        val response = dealer.respondToEnrollment(enrollment.challenge, enrollment.displayCode, 1)
+        val repeatedResponse = dealer.respondToEnrollment(enrollment.challenge, enrollment.displayCode, 2)
+        val challengeWire = PokerProtocolJson.encodeToString(
+            PokerPairingChallenge.serializer(),
+            enrollment.challenge,
+        )
+        val responseWire = PokerProtocolJson.encodeToString(PokerPairingResponse.serializer(), response)
+        val capturedResponse = PokerProtocolJson.decodeFromString(
+            PokerPairingResponse.serializer(),
+            responseWire,
+        )
+
+        // A passive dictionary checker sees both public ephemerals, but not the
+        // client exponent needed to reproduce a fixed transcript's proof.
+        assertFalse(challengeWire.contains(enrollment.displayCode))
+        assertFalse(responseWire.contains(enrollment.displayCode))
+        assertFalse(capturedResponse.clientEphemeralPublicKey.contentEquals(repeatedResponse.clientEphemeralPublicKey))
+        assertFalse(capturedResponse.clientProof.contentEquals(repeatedResponse.clientProof))
+        assertEquals(32, capturedResponse.clientProof.size)
+    }
+
+    @Test
     fun `enrollment code is always six digits`() {
         val poker = controller(
             PokerPairingRole.POKER,
@@ -213,7 +243,12 @@ class PokerPairingTest {
         val enrollment = poker.openEnrollment(0, physicalEnrollmentConfirmed = true)
         val failure = assertThrows(PokerPairingRejected::class.java) {
             poker.acceptEnrollment(
-                PokerPairingResponse(enrollment.challenge.challengeId, byteArrayOf(9), byteArrayOf(8)),
+                PokerPairingResponse(
+                    challengeId = enrollment.challenge.challengeId,
+                    dealerPublicKey = byteArrayOf(9),
+                    clientEphemeralPublicKey = ByteArray(256),
+                    clientProof = byteArrayOf(8),
+                ),
                 1,
             )
         }

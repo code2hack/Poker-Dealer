@@ -1,6 +1,10 @@
 package com.code2hack.pokerdealer.protocol
 
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.File
+import java.math.BigInteger
+import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -9,8 +13,6 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -19,6 +21,8 @@ const val POKER_PAIRING_MAX_ATTEMPTS = 5
 const val POKER_PAIRING_CHALLENGE_TYPE = "pairing.challenge"
 const val POKER_PAIRING_RESPONSE_TYPE = "pairing.response"
 const val POKER_PAIRING_CONFIRMATION_TYPE = "pairing.confirmation"
+
+private const val POKER_PAIRING_SALT_BYTES = 16
 
 @Serializable
 enum class PokerPairingRole {
@@ -54,13 +58,16 @@ data class PokerPairingChallenge(
     val createdAtMs: Long,
     val expiresAtMs: Long,
     val replacement: Boolean,
+    val salt: ByteArray,
+    val serverEphemeralPublicKey: ByteArray,
 )
 
 @Serializable
 data class PokerPairingResponse(
     val challengeId: String,
     val dealerPublicKey: ByteArray,
-    val proof: ByteArray,
+    val clientEphemeralPublicKey: ByteArray,
+    val clientProof: ByteArray,
 )
 
 @Serializable
@@ -68,6 +75,9 @@ data class PokerPairingConfirmation(
     val challengeId: String,
     val dealerPublicKey: ByteArray,
     val pokerPublicKey: ByteArray,
+    val clientEphemeralPublicKey: ByteArray,
+    val clientProof: ByteArray,
+    val serverProof: ByteArray,
     val pokerSignature: ByteArray,
 )
 
@@ -182,10 +192,15 @@ class FilePokerPairingStore(
 
 private class PairingWindow(
     val challenge: PokerPairingChallenge,
-    val code: String,
+    val server: SrpServerState,
 ) {
     var failedAttempts: Int = 0
 }
+
+private data class SrpServerState(
+    val verifier: BigInteger,
+    val privateExponent: BigInteger,
+)
 
 class AuthenticatedPokerPeer internal constructor(
     private val owner: PokerPairingController,
@@ -206,6 +221,9 @@ class PokerPairingController(
     private var pendingDealerRecord: PokerPairingRecord? = null
     private var pendingChallenge: PokerPairingChallenge? = null
     private var pendingChallengeId: String? = null
+    private var pendingClientEphemeralPublicKey: ByteArray? = null
+    private var pendingClientProof: ByteArray? = null
+    private var pendingSessionKey: ByteArray? = null
     private var failure = PokerPairingFailure.NONE
     private var failedAttempts = 0
 
@@ -233,6 +251,9 @@ class PokerPairingController(
         pendingDealerRecord = null
         pendingChallenge = null
         pendingChallengeId = null
+        pendingClientEphemeralPublicKey = null
+        pendingClientProof = null
+        pendingSessionKey = null
         failedAttempts = 0
         try {
             val stored = store.load()
@@ -291,9 +312,13 @@ class PokerPairingController(
         pendingDealerRecord = null
         pendingChallenge = null
         pendingChallengeId = null
+        pendingClientEphemeralPublicKey = null
+        pendingClientProof = null
+        pendingSessionKey = null
         failedAttempts = 0
         failure = PokerPairingFailure.NONE
 
+        val server = PairingCrypto.serverState(random, code)
         val challenge = PokerPairingChallenge(
             challengeId = randomToken(random, 16),
             nonce = ByteArray(32).also(random::nextBytes),
@@ -301,9 +326,11 @@ class PokerPairingController(
             createdAtMs = nowMs,
             expiresAtMs = nowMs + POKER_PAIRING_WINDOW_MS,
             replacement = replacing,
+            salt = server.salt,
+            serverEphemeralPublicKey = server.publicKey,
         )
-        window = PairingWindow(challenge, code)
-        return PokerPairingEnrollment(challenge, window!!.code)
+        window = PairingWindow(challenge, server.state)
+        return PokerPairingEnrollment(challenge, code)
     }
 
     /** Dealer-only response. The code never enters the serialized response. */
@@ -314,9 +341,7 @@ class PokerPairingController(
     ): PokerPairingResponse {
         requireRole(PokerPairingRole.DEALER)
         ensureKeyUsable()
-        if (challenge.challengeId.isBlank() || challenge.nonce.isEmpty() ||
-            challenge.pokerPublicKey.isEmpty() || challenge.expiresAtMs <= challenge.createdAtMs
-        ) {
+        if (!PairingCrypto.isValidChallenge(challenge)) {
             failure = PokerPairingFailure.INVALID_CHALLENGE
             throw PokerPairingRejected(failure)
         }
@@ -339,13 +364,23 @@ class PokerPairingController(
         }
 
         val dealerKey = currentPublicKey()
+        val clientSession = try {
+            PairingCrypto.clientSession(challenge, normalizeCode(code), dealerKey, random)
+        } catch (_: IllegalArgumentException) {
+            failure = PokerPairingFailure.INVALID_CHALLENGE
+            throw PokerPairingRejected(failure)
+        }
         val response = PokerPairingResponse(
             challengeId = challenge.challengeId,
             dealerPublicKey = dealerKey,
-            proof = PairingCrypto.proof(normalizeCode(code), challenge, dealerKey),
+            clientEphemeralPublicKey = clientSession.publicKey,
+            clientProof = clientSession.proof,
         )
         pendingChallengeId = challenge.challengeId
         pendingChallenge = challenge
+        pendingClientEphemeralPublicKey = clientSession.publicKey
+        pendingClientProof = clientSession.proof
+        pendingSessionKey = clientSession.sessionKey
         pendingDealerRecord = PokerPairingRecord(
             dealerPublicKey = dealerKey,
             pokerPublicKey = challenge.pokerPublicKey,
@@ -376,10 +411,24 @@ class PokerPairingController(
             closeEnrollment(PokerPairingFailure.ENROLLMENT_EXPIRED)
             throw PokerPairingRejected(failure, failedAttempts)
         }
-        val proofMatches = PairingCrypto.proofMatches(
-            expected = PairingCrypto.proof(active.code, active.challenge, response.dealerPublicKey),
-            actual = response.proof,
-        ) && response.dealerPublicKey.isNotEmpty()
+        val sessionKey = runCatching {
+            PairingCrypto.serverSessionKey(
+                active.challenge,
+                response.dealerPublicKey,
+                response.clientEphemeralPublicKey,
+                active.server,
+            )
+        }.getOrNull()
+        val proofMatches = sessionKey != null && response.dealerPublicKey.isNotEmpty() &&
+            PairingCrypto.proofMatches(
+                expected = PairingCrypto.clientProof(
+                    active.challenge,
+                    response.dealerPublicKey,
+                    response.clientEphemeralPublicKey,
+                    sessionKey,
+                ),
+                actual = response.clientProof,
+            )
         if (!proofMatches) {
             active.failedAttempts++
             failedAttempts = active.failedAttempts
@@ -391,7 +440,21 @@ class PokerPairingController(
             throw PokerPairingRejected(failure, failedAttempts)
         }
 
-        val localKey = currentPublicKey()
+        val localKey = try {
+            currentPublicKey()
+        } catch (_: PairingKeyUnavailableException) {
+            closeEnrollment(PokerPairingFailure.KEYSTORE_INVALID)
+            record = null
+            store.clear()
+            throw PokerPairingRejected(failure, failedAttempts)
+        }
+        val serverProof = PairingCrypto.serverProof(
+            active.challenge,
+            response.dealerPublicKey,
+            response.clientEphemeralPublicKey,
+            response.clientProof,
+            sessionKey,
+        )
         val paired = PokerPairingRecord(
             dealerPublicKey = response.dealerPublicKey,
             pokerPublicKey = localKey,
@@ -407,6 +470,9 @@ class PokerPairingController(
                     active.challenge,
                     response.dealerPublicKey,
                     localKey,
+                    response.clientEphemeralPublicKey,
+                    response.clientProof,
+                    serverProof,
                 ),
             )
         } catch (_: PairingKeyUnavailableException) {
@@ -419,6 +485,9 @@ class PokerPairingController(
             challengeId = response.challengeId,
             dealerPublicKey = response.dealerPublicKey,
             pokerPublicKey = localKey,
+            clientEphemeralPublicKey = response.clientEphemeralPublicKey,
+            clientProof = response.clientProof,
+            serverProof = serverProof,
             pokerSignature = pokerSignature,
         )
     }
@@ -428,15 +497,35 @@ class PokerPairingController(
         requireRole(PokerPairingRole.DEALER)
         val pending = pendingDealerRecord
         val challenge = pendingChallenge
-        if (pending == null || challenge == null || pendingChallengeId != confirmation.challengeId ||
+        val clientEphemeralPublicKey = pendingClientEphemeralPublicKey
+        val clientProof = pendingClientProof
+        val sessionKey = pendingSessionKey
+        if (pending == null || challenge == null || clientEphemeralPublicKey == null ||
+            clientProof == null || sessionKey == null || pendingChallengeId != confirmation.challengeId ||
             !sameBytes(pending.dealerPublicKey, confirmation.dealerPublicKey) ||
             !sameBytes(pending.pokerPublicKey, confirmation.pokerPublicKey) ||
+            !sameBytes(clientEphemeralPublicKey, confirmation.clientEphemeralPublicKey) ||
+            !sameBytes(clientProof, confirmation.clientProof) ||
+            !sameBytes(challenge.pokerPublicKey, confirmation.pokerPublicKey) ||
+            !PairingCrypto.proofMatches(
+                PairingCrypto.serverProof(
+                    challenge,
+                    confirmation.dealerPublicKey,
+                    confirmation.clientEphemeralPublicKey,
+                    confirmation.clientProof,
+                    sessionKey,
+                ),
+                confirmation.serverProof,
+            ) ||
             !PairingCrypto.verifySignature(
                 confirmation.pokerPublicKey,
                 PairingCrypto.confirmationPayload(
                     challenge,
                     confirmation.dealerPublicKey,
                     confirmation.pokerPublicKey,
+                    confirmation.clientEphemeralPublicKey,
+                    confirmation.clientProof,
+                    confirmation.serverProof,
                 ),
                 confirmation.pokerSignature,
             )
@@ -444,6 +533,9 @@ class PokerPairingController(
             pendingDealerRecord = null
             pendingChallenge = null
             pendingChallengeId = null
+            pendingClientEphemeralPublicKey = null
+            pendingClientProof = null
+            pendingSessionKey = null
             record = null
             failure = PokerPairingFailure.PAIRING_MISMATCH
             throw PokerPairingRejected(failure)
@@ -453,6 +545,9 @@ class PokerPairingController(
         pendingDealerRecord = null
         pendingChallenge = null
         pendingChallengeId = null
+        pendingClientEphemeralPublicKey = null
+        pendingClientProof = null
+        pendingSessionKey = null
         failure = PokerPairingFailure.NONE
     }
 
@@ -573,26 +668,139 @@ class PokerPairingController(
     }
 }
 
+private data class SrpServerEnrollment(
+    val salt: ByteArray,
+    val publicKey: ByteArray,
+    val state: SrpServerState,
+)
+
+private data class SrpClientSession(
+    val publicKey: ByteArray,
+    val proof: ByteArray,
+    val sessionKey: ByteArray,
+)
+
+/** SRP-6a-style PAKE: the six-digit code is never a wire-verifiable MAC key. */
 private object PairingCrypto {
-    fun proof(
+    private val modulus = BigInteger(
+        """
+        FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1
+        29024E088A67CC74020BBEA63B139B22514A08798E3404DD
+        EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E
+        485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED
+        EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC
+        2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F836
+        55D23DCA3AD961C62F356208552BB9ED529077096966D670C
+        354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E77
+        2C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6
+        955817183995497CEA956AE515D2261898FA051015728E5A8
+        AACAA68FFFFFFFFFFFFFFFF
+        """.replace("\n", "").replace(" ", ""),
+        16,
+    )
+    private val generator = BigInteger.valueOf(2)
+    private val subgroupOrder = modulus.subtract(BigInteger.ONE).divide(BigInteger.valueOf(2))
+    private val modulusBytes = (modulus.bitLength() + 7) / 8
+    private val multiplier = hashInteger(padded(modulus), padded(generator))
+
+    fun serverState(random: SecureRandom, code: String): SrpServerEnrollment {
+        val salt = ByteArray(POKER_PAIRING_SALT_BYTES).also(random::nextBytes)
+        val privateExponent = randomExponent(random)
+        val verifier = verifier(salt, code)
+        val publicKey = generator.modPow(privateExponent, modulus)
+            .add(multiplier.multiply(verifier))
+            .mod(modulus)
+        require(publicKey.signum() != 0) { "Invalid pairing server public key" }
+        return SrpServerEnrollment(
+            salt = salt,
+            publicKey = padded(publicKey),
+            state = SrpServerState(verifier, privateExponent),
+        )
+    }
+
+    fun isValidChallenge(challenge: PokerPairingChallenge): Boolean =
+        challenge.challengeId.isNotBlank() &&
+            challenge.nonce.size == 32 &&
+            challenge.pokerPublicKey.isNotEmpty() &&
+            challenge.expiresAtMs > challenge.createdAtMs &&
+            challenge.salt.size == POKER_PAIRING_SALT_BYTES &&
+            challenge.serverEphemeralPublicKey.size == modulusBytes &&
+            runCatching { parsePublic(challenge.serverEphemeralPublicKey) }.isSuccess
+
+    fun clientSession(
+        challenge: PokerPairingChallenge,
         code: String,
+        dealerPublicKey: ByteArray,
+        random: SecureRandom,
+    ): SrpClientSession {
+        require(isValidChallenge(challenge)) { "Invalid pairing challenge" }
+        require(dealerPublicKey.isNotEmpty()) { "Dealer identity is unavailable" }
+        val serverPublicKey = parsePublic(challenge.serverEphemeralPublicKey)
+        val privateExponent = randomExponent(random)
+        val clientPublicKey = generator.modPow(privateExponent, modulus)
+        val x = verifierExponent(challenge.salt, code)
+        val u = hashInteger(padded(clientPublicKey), padded(serverPublicKey))
+        val base = serverPublicKey.subtract(
+            multiplier.multiply(generator.modPow(x, modulus)),
+        ).mod(modulus)
+        require(base.signum() != 0) { "Invalid pairing server public key" }
+        val shared = base.modPow(privateExponent.add(u.multiply(x)), modulus)
+        val sessionKey = sessionKey(shared)
+        return SrpClientSession(
+            publicKey = padded(clientPublicKey),
+            proof = clientProof(challenge, dealerPublicKey, padded(clientPublicKey), sessionKey),
+            sessionKey = sessionKey,
+        )
+    }
+
+    fun serverSessionKey(
         challenge: PokerPairingChallenge,
         dealerPublicKey: ByteArray,
+        clientPublicKey: ByteArray,
+        server: SrpServerState,
     ): ByteArray {
-        val transcript = buildList<Byte> {
-            addAll("poker-dealer/pairing/v1\u0000".toByteArray(Charsets.UTF_8).toList())
-            addAll(challenge.challengeId.toByteArray(Charsets.UTF_8).toList())
-            add(0)
-            addAll(challenge.nonce.toList())
-            addAll(challenge.pokerPublicKey.toList())
-            addAll(dealerPublicKey.toList())
-            add(if (challenge.replacement) 1 else 0)
-        }.toByteArray()
-        return Mac.getInstance("HmacSHA256").run {
-            init(SecretKeySpec(code.toByteArray(Charsets.UTF_8), algorithm))
-            doFinal(transcript)
-        }
+        require(isValidChallenge(challenge)) { "Invalid pairing challenge" }
+        require(dealerPublicKey.isNotEmpty()) { "Dealer identity is unavailable" }
+        val client = parseClientPublic(clientPublicKey)
+        val serverPublicKey = parsePublic(challenge.serverEphemeralPublicKey)
+        val u = hashInteger(padded(client), padded(serverPublicKey))
+        val shared = client.multiply(server.verifier.modPow(u, modulus))
+            .mod(modulus)
+            .modPow(server.privateExponent, modulus)
+        return sessionKey(shared)
     }
+
+    fun clientProof(
+        challenge: PokerPairingChallenge,
+        dealerPublicKey: ByteArray,
+        clientPublicKey: ByteArray,
+        sessionKey: ByteArray,
+    ): ByteArray = sha256(
+        transcript(
+            label = "client",
+            challenge = challenge,
+            dealerPublicKey = dealerPublicKey,
+            clientPublicKey = clientPublicKey,
+        ),
+        sessionKey,
+    )
+
+    fun serverProof(
+        challenge: PokerPairingChallenge,
+        dealerPublicKey: ByteArray,
+        clientPublicKey: ByteArray,
+        clientProof: ByteArray,
+        sessionKey: ByteArray,
+    ): ByteArray = sha256(
+        transcript(
+            label = "server",
+            challenge = challenge,
+            dealerPublicKey = dealerPublicKey,
+            clientPublicKey = clientPublicKey,
+            clientProof = clientProof,
+        ),
+        sessionKey,
+    )
 
     fun proofMatches(expected: ByteArray, actual: ByteArray): Boolean =
         MessageDigest.isEqual(expected, actual)
@@ -601,15 +809,18 @@ private object PairingCrypto {
         challenge: PokerPairingChallenge,
         dealerPublicKey: ByteArray,
         pokerPublicKey: ByteArray,
-    ): ByteArray = buildList<Byte> {
-        addAll("poker-dealer/pairing/confirmation/v1\u0000".toByteArray(Charsets.UTF_8).toList())
-        addAll(challenge.challengeId.toByteArray(Charsets.UTF_8).toList())
-        add(0)
-        addAll(challenge.nonce.toList())
-        addAll(dealerPublicKey.toList())
-        addAll(pokerPublicKey.toList())
-        add(if (challenge.replacement) 1 else 0)
-    }.toByteArray()
+        clientPublicKey: ByteArray,
+        clientProof: ByteArray,
+        serverProof: ByteArray,
+    ): ByteArray = transcript(
+        label = "confirmation",
+        challenge = challenge,
+        dealerPublicKey = dealerPublicKey,
+        clientPublicKey = clientPublicKey,
+        pokerPublicKey = pokerPublicKey,
+        clientProof = clientProof,
+        serverProof = serverProof,
+    )
 
     fun verifySignature(
         publicKey: ByteArray,
@@ -624,4 +835,79 @@ private object PairingCrypto {
             verify(signatureBytes)
         }
     }.getOrDefault(false)
+
+    private fun verifier(salt: ByteArray, code: String): BigInteger =
+        generator.modPow(verifierExponent(salt, code), modulus)
+
+    private fun verifierExponent(salt: ByteArray, code: String): BigInteger =
+        BigInteger(1, sha256(salt, code.toByteArray(StandardCharsets.UTF_8)))
+
+    private fun sessionKey(shared: BigInteger): ByteArray = sha256(padded(shared))
+
+    private fun randomExponent(random: SecureRandom): BigInteger =
+        BigInteger(256, random).add(BigInteger.ONE)
+
+    private fun parsePublic(encoded: ByteArray): BigInteger {
+        require(encoded.size == modulusBytes) { "Invalid pairing public key" }
+        return BigInteger(1, encoded).also {
+            require(it > BigInteger.ZERO && it < modulus) { "Invalid pairing public key" }
+        }
+    }
+
+    private fun parseClientPublic(encoded: ByteArray): BigInteger = parsePublic(encoded).also {
+        require(it.modPow(subgroupOrder, modulus) == BigInteger.ONE) {
+            "Invalid pairing client public key"
+        }
+    }
+
+    private fun padded(value: BigInteger): ByteArray {
+        require(value.signum() >= 0 && value <= modulus) { "Invalid pairing value" }
+        val source = value.toByteArray()
+        val result = ByteArray(modulusBytes)
+        val length = minOf(source.size, result.size)
+        source.copyInto(result, destinationOffset = result.size - length, startIndex = source.size - length)
+        return result
+    }
+
+    private fun hashInteger(vararg values: ByteArray): BigInteger =
+        BigInteger(1, sha256(*values))
+
+    private fun sha256(vararg values: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").run {
+            values.forEach(::update)
+            digest()
+        }
+
+    private fun transcript(
+        label: String,
+        challenge: PokerPairingChallenge,
+        dealerPublicKey: ByteArray,
+        clientPublicKey: ByteArray,
+        pokerPublicKey: ByteArray = challenge.pokerPublicKey,
+        clientProof: ByteArray = ByteArray(0),
+        serverProof: ByteArray = ByteArray(0),
+    ): ByteArray = ByteArrayOutputStream().use { bytes ->
+        DataOutputStream(bytes).use { output ->
+            fun field(value: ByteArray) {
+                output.writeInt(value.size)
+                output.write(value)
+            }
+
+            field("poker-dealer/pairing/srp/v1:$label".toByteArray(StandardCharsets.UTF_8))
+            field(challenge.challengeId.toByteArray(StandardCharsets.UTF_8))
+            field(challenge.nonce)
+            field(challenge.pokerPublicKey)
+            field(pokerPublicKey)
+            output.writeLong(challenge.createdAtMs)
+            output.writeLong(challenge.expiresAtMs)
+            output.writeBoolean(challenge.replacement)
+            field(challenge.salt)
+            field(challenge.serverEphemeralPublicKey)
+            field(dealerPublicKey)
+            field(clientPublicKey)
+            field(clientProof)
+            field(serverProof)
+        }
+        bytes.toByteArray()
+    }
 }
