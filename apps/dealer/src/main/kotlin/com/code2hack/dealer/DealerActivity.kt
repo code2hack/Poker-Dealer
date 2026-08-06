@@ -51,6 +51,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import com.code2hack.dealer.asr.DealerAsrCatalogStore
+import com.code2hack.dealer.asr.DealerAsrCatalogUiState
+import com.code2hack.dealer.asr.DealerAsrMode
 import com.code2hack.pokerdealer.domain.Card
 import com.code2hack.pokerdealer.domain.CardSource
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
@@ -84,14 +87,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 
 class DealerActivity : ComponentActivity() {
     private val uiState = MutableStateFlow(DealerUiState())
     private val setupState = MutableStateFlow(DealerSetupState())
+    private val asrCatalogState = MutableStateFlow(DealerAsrCatalogUiState())
     private var privateKey: ByteArray? = null
     private var knownHosts: ByteArray? = null
     private var service: DealerConnectionService? = null
+    private lateinit var asrCatalogStore: DealerAsrCatalogStore
     private var serviceStateJob: Job? = null
+    private var asrCatalogJob: Job? = null
     private var pendingThreadNotificationKey: String? = null
     private var bound = false
 
@@ -123,14 +130,24 @@ class DealerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         openThreadNotification(intent)
+        asrCatalogStore = DealerAsrCatalogStore(this)
+        asrCatalogJob = lifecycleScope.launch {
+            val loaded = asrCatalogStore.load()
+            asrCatalogState.value = DealerAsrCatalogUiState(
+                catalog = loaded.catalog,
+                error = loaded.error,
+            )
+        }
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val state by uiState.collectAsState()
                     val setup by setupState.collectAsState()
+                    val asrCatalog by asrCatalogState.collectAsState()
                     DealerApp(
                         state = state,
                         setup = setup,
+                        asrCatalog = asrCatalog,
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
@@ -178,6 +195,7 @@ class DealerActivity : ComponentActivity() {
                         onStopTailnet = { service?.stopEmbeddedTailnet() },
                         onResetTailnet = ::resetEmbeddedTailnet,
                         onLoginTailnet = ::openEmbeddedTailnetLogin,
+                        onRefreshAsrCatalog = ::refreshAsrCatalog,
                     )
                 }
             }
@@ -212,6 +230,7 @@ class DealerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        asrCatalogJob?.cancel()
         privateKey?.fill(0)
         knownHosts?.fill(0)
         super.onDestroy()
@@ -314,6 +333,19 @@ class DealerActivity : ComponentActivity() {
         )
     }
 
+    private fun refreshAsrCatalog() {
+        if (asrCatalogState.value.refreshing) return
+        asrCatalogJob?.cancel()
+        asrCatalogState.update { it.copy(refreshing = true, error = null) }
+        asrCatalogJob = lifecycleScope.launch {
+            val result = asrCatalogStore.refresh()
+            asrCatalogState.value = DealerAsrCatalogUiState(
+                catalog = result.catalog,
+                error = result.error,
+            )
+        }
+    }
+
     private fun openThreadNotification(intent: Intent?) {
         val key = intent?.getStringExtra(DealerConnectionService.EXTRA_THREAD_NOTIFICATION_KEY) ?: return
         pendingThreadNotificationKey = key
@@ -344,6 +376,7 @@ private data class DealerSetupState(
 private fun DealerApp(
     state: DealerUiState,
     setup: DealerSetupState,
+    asrCatalog: DealerAsrCatalogUiState,
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
@@ -381,6 +414,7 @@ private fun DealerApp(
     onStopTailnet: () -> Unit,
     onResetTailnet: () -> Unit,
     onLoginTailnet: (String) -> Unit,
+    onRefreshAsrCatalog: () -> Unit,
 ) {
     var selectedHostId by remember(state.browsedThread?.hostId, state.hostId) {
         mutableStateOf(state.browsedThread?.hostId ?: state.hostId ?: "u4090")
@@ -656,6 +690,10 @@ private fun DealerApp(
             state.threadDiscoveryErrors[selectedHostId]?.let {
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
+            DealerAsrCatalogPanel(
+                state = asrCatalog,
+                onRefresh = onRefreshAsrCatalog,
+            )
             discoveredThreads.forEach { thread ->
                 ThreadRow(
                     thread = thread,
@@ -974,6 +1012,101 @@ private fun DealerApp(
             onDismiss = onDismissThreadLifecycle,
         )
     }
+}
+
+@Composable
+private fun DealerAsrCatalogPanel(
+    state: DealerAsrCatalogUiState,
+    onRefresh: () -> Unit,
+) {
+    var search by remember { mutableStateOf("") }
+    var selectedLanguage by remember { mutableStateOf<String?>(null) }
+    var selectedMode by remember { mutableStateOf<DealerAsrMode?>(null) }
+    val languages = state.catalog.entries
+        .flatMap { it.languages }
+        .distinct()
+        .sorted()
+    val entries = state.catalog.filtered(search, selectedLanguage, selectedMode)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFFF3F5F7))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("ASR model catalog", style = MaterialTheme.typography.titleMedium)
+            OutlinedButton(onClick = onRefresh, enabled = !state.refreshing) {
+                Text(if (state.refreshing) "Updating…" else "Update")
+            }
+        }
+        OutlinedTextField(
+            value = search,
+            onValueChange = { search = it },
+            label = { Text("Search name, family, or language") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedButton(onClick = { selectedLanguage = null }) {
+                Text(if (selectedLanguage == null) "Language: all" else "Language")
+            }
+            languages.forEach { language ->
+                OutlinedButton(onClick = { selectedLanguage = language }) {
+                    Text(if (selectedLanguage == language) "Language: $language" else language)
+                }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            OutlinedButton(onClick = { selectedMode = null }) {
+                Text(if (selectedMode == null) "Mode: all" else "Mode")
+            }
+            DealerAsrMode.entries.forEach { mode ->
+                OutlinedButton(onClick = { selectedMode = mode }) {
+                    Text(if (selectedMode == mode) "Mode: ${mode.name.lowercase()}" else mode.name.lowercase())
+                }
+            }
+        }
+        entries.forEach { entry ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(entry.displayName)
+                Text(
+                    "${entry.family} | ${entry.mode.name.lowercase()} | " +
+                        entry.languages.joinToString(),
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                Text(
+                    "Size: ${entry.installedBytes.asrDisplaySize()} | " +
+                        "${entry.licenses.joinToString()} | ${entry.backend}",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                Text(
+                    "${entry.sourceRepository}@${entry.sourceRevision.take(12)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+        if (entries.isEmpty()) {
+            Text("No compatible model packs match the current filters.")
+        }
+        state.error?.let {
+            Text("Catalog update failed: $it", color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
+private fun Long.asrDisplaySize(): String = when {
+    this >= 1024L * 1024 * 1024 -> "%.1f GiB".format(Locale.ROOT, this / (1024.0 * 1024 * 1024))
+    this >= 1024L * 1024 -> "%.1f MiB".format(Locale.ROOT, this / (1024.0 * 1024))
+    else -> "$this B"
 }
 
 @Composable
