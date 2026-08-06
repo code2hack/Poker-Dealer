@@ -17,6 +17,7 @@ import com.code2hack.pokerdealer.protocol.PokerAsrProjection
 import com.code2hack.pokerdealer.protocol.PokerAsrStartOutcome
 import com.code2hack.pokerdealer.protocol.PokerAsrStartRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrStartResult
+import com.code2hack.pokerdealer.protocol.PokerAsrSource
 import com.code2hack.pokerdealer.protocol.PokerAsrTarget
 import com.code2hack.pokerdealer.protocol.PokerAsrTargetField
 import java.util.UUID
@@ -43,6 +44,7 @@ internal class PokerAsrController(
     private var pendingOperationId: String? = null
     private var pendingExitOperationId: String? = null
     private var exitWasActive = false
+    private var source = PokerAsrSource.GLASSES
 
     fun isInputCaptured(): Boolean = state != PokerAsrState.IDLE
 
@@ -78,7 +80,11 @@ internal class PokerAsrController(
     }
 
     suspend fun sendAudio(pcm16: ByteArray): Boolean {
-        if (state != PokerAsrState.ACTIVE || pcm16.isEmpty() || pcm16.size % 2 != 0) return false
+        if (source != PokerAsrSource.GLASSES ||
+            state != PokerAsrState.ACTIVE ||
+            pcm16.isEmpty() ||
+            pcm16.size % 2 != 0
+        ) return false
         if (pendingOperationId != null) return true
         if (pcm16.size > com.code2hack.pokerdealer.protocol.POKER_ASR_MAX_AUDIO_BYTES) return false
         val id = sessionId ?: return false
@@ -93,8 +99,9 @@ internal class PokerAsrController(
         when (result.outcome) {
             PokerAsrStartOutcome.READY -> {
                 target = result.target
+                source = result.source
                 state = PokerAsrState.ACTIVE
-                onCaptureRequired()
+                if (source == PokerAsrSource.GLASSES) onCaptureRequired()
             }
             PokerAsrStartOutcome.REJECTED,
             PokerAsrStartOutcome.CANCELLED,
@@ -111,7 +118,7 @@ internal class PokerAsrController(
         pendingOperationId = null
         if (result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) {
             target = result.nextTarget ?: result.target
-            onCaptureRequired()
+            if (source == PokerAsrSource.GLASSES) onCaptureRequired()
         } else {
             reset()
         }
@@ -122,14 +129,16 @@ internal class PokerAsrController(
         pendingOperationId = null
         if (result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) {
             target = result.nextTarget ?: result.target
-            onCaptureRequired()
+            if (source == PokerAsrSource.GLASSES) onCaptureRequired()
         } else {
             reset()
         }
     }
 
     fun onExitResult(result: PokerAsrExitResult) {
-        if (result.sessionId != sessionId || result.target != target || result.operationId != pendingExitOperationId) return
+        if (result.sessionId != sessionId || result.target != target) return
+        if (pendingExitOperationId != null && result.operationId != pendingExitOperationId) return
+        if (pendingExitOperationId == null && result.outcome != PokerAsrMutationOutcome.REJECTED) return
         pendingExitOperationId = null
         if (exitWasActive && result.outcome == PokerAsrMutationOutcome.ACKNOWLEDGED) onExitNotice()
         reset()
@@ -148,7 +157,8 @@ internal class PokerAsrController(
         val operation = UUID.randomUUID().toString()
         onCaptureStop()
         pendingOperationId = operation
-        if (!PokerAsrBridge.sendCommit(PokerAsrCommitRequest(current, id, nextSampleOffset, operation))) {
+        val fence = nextSampleOffset.takeIf { source == PokerAsrSource.GLASSES }
+        if (!PokerAsrBridge.sendCommit(PokerAsrCommitRequest(current, id, fence, operation))) {
             pendingOperationId = null
             reset()
         }
@@ -187,6 +197,7 @@ internal class PokerAsrController(
         pendingOperationId = null
         pendingExitOperationId = null
         exitWasActive = false
+        source = PokerAsrSource.GLASSES
     }
 
     private fun focusedTarget(): PokerAsrTarget? {

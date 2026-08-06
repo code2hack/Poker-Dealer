@@ -3,6 +3,7 @@ package com.code2hack.dealer.asr
 import com.code2hack.pokerdealer.protocol.PokerAsrAudioFrame
 import com.code2hack.pokerdealer.protocol.PokerAsrPackSelection
 import com.code2hack.pokerdealer.protocol.PokerAsrProjection
+import com.code2hack.pokerdealer.protocol.PokerAsrSource
 import com.code2hack.pokerdealer.protocol.PokerAsrTarget
 
 /** Owns one Dealer-recognized ASR session and its contiguous, uncommitted slices. */
@@ -11,6 +12,7 @@ internal class DealerAsrSliceSession(
     var target: PokerAsrTarget,
     val pack: PokerAsrPackSelection,
     private val recognizer: DealerAsrProcessSession,
+    var source: PokerAsrSource = PokerAsrSource.GLASSES,
     private val nowMs: () -> Long = System::currentTimeMillis,
 ) {
     var sliceRevision: Long = 0
