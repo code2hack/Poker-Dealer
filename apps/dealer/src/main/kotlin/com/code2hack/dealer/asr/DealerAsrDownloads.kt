@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -238,6 +239,11 @@ internal class DealerAsrDownloadManager(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : Closeable {
+    private data class ActiveTransfer(
+        val key: DealerAsrPackKey,
+        val job: Job,
+    )
+
     constructor(context: Context) : this(
         stateFile = context.noBackupFilesDir.resolve("asr-downloads/state-v1.json"),
         partialRoot = context.noBackupFilesDir.resolve("asr-downloads/partials"),
@@ -256,7 +262,7 @@ internal class DealerAsrDownloadManager(
     private var started = false
     private var managerError: String? = null
     private var worker: Job? = null
-    private var activeTransfer: Job? = null
+    private val activeTransfer = AtomicReference<ActiveTransfer?>(null)
 
     val stateFlow: StateFlow<DealerAsrDownloadUiState> = state.asStateFlow()
 
@@ -356,8 +362,7 @@ internal class DealerAsrDownloadManager(
                 publishLocked()
             }
         }
-        activeResponse.getAndSet(null)?.close()
-        activeTransfer?.cancel(CancellationException("download-paused"))
+        interruptActive(key, CancellationException("download-paused"))
         ensureWorker()
     }
 
@@ -404,8 +409,7 @@ internal class DealerAsrDownloadManager(
                 publishLocked()
             }
         }
-        activeResponse.getAndSet(null)?.close()
-        activeTransfer?.cancel(CancellationException("download-cancelled"))
+        interruptActive(key, CancellationException("download-cancelled"))
     }
 
     suspend fun setDefault(key: DealerAsrPackKey) {
@@ -425,8 +429,15 @@ internal class DealerAsrDownloadManager(
 
     override fun close() {
         activeResponse.getAndSet(null)?.close()
-        activeTransfer?.cancel(CancellationException("download-manager-closed"))
+        activeTransfer.getAndSet(null)?.job?.cancel(CancellationException("download-manager-closed"))
         scope.cancel()
+    }
+
+    private fun interruptActive(key: DealerAsrPackKey, cause: CancellationException) {
+        val active = activeTransfer.get() ?: return
+        if (active.key != key) return
+        activeResponse.getAndSet(null)?.close()
+        active.job.cancel(cause)
     }
 
     private fun ensureWorker() {
@@ -462,8 +473,10 @@ internal class DealerAsrDownloadManager(
                 }
             } ?: return
 
-            val transfer = scope.async { processPack(key) }
-            activeTransfer = transfer
+            val transfer = scope.async(start = CoroutineStart.LAZY) { processPack(key) }
+            val active = ActiveTransfer(key, transfer)
+            activeTransfer.set(active)
+            transfer.start()
             var failure: String? = null
             try {
                 transfer.await()
@@ -474,7 +487,7 @@ internal class DealerAsrDownloadManager(
             } catch (_: Throwable) {
                 failure = "download-failed"
             } finally {
-                if (activeTransfer === transfer) activeTransfer = null
+                activeTransfer.compareAndSet(active, null)
             }
 
             withContext(Dispatchers.IO) {
@@ -494,7 +507,7 @@ internal class DealerAsrDownloadManager(
                             persistLocked()
                             publishLocked()
                         }
-                        job.state == DealerAsrDownloadState.DOWNLOADING -> {
+                        job.state == DealerAsrDownloadState.DOWNLOADING && isInstalled(key) -> {
                             jobs[key] = job.copy(
                                 state = DealerAsrDownloadState.READY,
                                 currentSource = null,
@@ -502,6 +515,15 @@ internal class DealerAsrDownloadManager(
                             )
                             if (defaultPack == null) defaultPack = key
                             persistReadyMarkerLocked(jobs.getValue(key))
+                            persistLocked()
+                            publishLocked()
+                        }
+                        job.state == DealerAsrDownloadState.DOWNLOADING -> {
+                            jobs[key] = job.copy(
+                                state = DealerAsrDownloadState.FAILED,
+                                currentSource = null,
+                                error = "download-incomplete",
+                            )
                             persistLocked()
                             publishLocked()
                         }

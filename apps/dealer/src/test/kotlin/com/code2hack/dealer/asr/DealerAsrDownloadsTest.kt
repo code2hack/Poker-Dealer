@@ -108,6 +108,77 @@ class DealerAsrDownloadsTest {
     }
 
     @Test
+    fun pausingQueuedPackDoesNotInterruptActivePack() = runBlocking {
+        val fixture = fixture()
+        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
+        val manager = manager(fixture.root, transport)
+        try {
+            val first = manager.queue(fixture.entry)
+            val secondJob = manager.queue(second)
+            await {
+                manager.stateFlow.value.jobs.firstOrNull { it.key == first.key }?.state ==
+                    DealerAsrDownloadState.DOWNLOADING &&
+                    manager.stateFlow.value.jobs.firstOrNull { it.key == secondJob.key }?.state ==
+                    DealerAsrDownloadState.QUEUED
+            }
+
+            manager.pause(secondJob.key)
+            await {
+                manager.stateFlow.value.jobs.firstOrNull { it.key == secondJob.key }?.state ==
+                    DealerAsrDownloadState.PAUSED
+            }
+            delay(100)
+
+            assertEquals(
+                DealerAsrDownloadState.DOWNLOADING,
+                manager.stateFlow.value.jobs.first { it.key == first.key }.state,
+            )
+            assertFalse(
+                fixture.root.resolve("installed/${fixture.entry.id}/${fixture.entry.revision}/.ready.json").isFile,
+            )
+            manager.cancel(first.key)
+        } finally {
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cancellingQueuedPackDoesNotInterruptActivePackOrCreatePartialReadyInstall() = runBlocking {
+        val fixture = fixture()
+        val second = fixture.entry.copy(id = "second-pack", displayName = "Second")
+        val transport = BlockingFirstTransport(fixture.entry.artifacts.single().canonicalUrl, fixture.bytes)
+        val manager = manager(fixture.root, transport)
+        try {
+            val first = manager.queue(fixture.entry)
+            val secondJob = manager.queue(second)
+            await {
+                manager.stateFlow.value.jobs.firstOrNull { it.key == first.key }?.state ==
+                    DealerAsrDownloadState.DOWNLOADING &&
+                    manager.stateFlow.value.jobs.firstOrNull { it.key == secondJob.key }?.state ==
+                    DealerAsrDownloadState.QUEUED
+            }
+
+            manager.cancel(secondJob.key)
+            await { manager.stateFlow.value.jobs.none { it.key == secondJob.key } }
+            delay(100)
+
+            assertEquals(
+                DealerAsrDownloadState.DOWNLOADING,
+                manager.stateFlow.value.jobs.first { it.key == first.key }.state,
+            )
+            assertFalse(
+                fixture.root.resolve("installed/${fixture.entry.id}/${fixture.entry.revision}/.ready.json").isFile,
+            )
+            manager.cancel(first.key)
+        } finally {
+            manager.close()
+            fixture.root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun lowStorageFailsBeforeTransferAndCancellationRemovesPartials() = runBlocking {
         val fixture = fixture()
         val transport = FakeTransport(mapOf(fixture.entry.artifacts.single().canonicalUrl to fixture.bytes))
