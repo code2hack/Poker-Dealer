@@ -35,13 +35,18 @@ trap 'rm -rf "${extract_dir}"' EXIT INT TERM
 tar -xjf "${archive}" -C "${extract_dir}"
 root_dir="${extract_dir}/${SMOKE_MODEL_NAME}"
 test -d "${root_dir}"
-model_path=$(find "${root_dir}" -type f -name '*.onnx' -print | sort | head -1)
+encoder_path=$(find "${root_dir}" -type f -name 'encoder*.onnx' -print | sort | head -1)
+decoder_path=$(find "${root_dir}" -type f -name 'decoder*.onnx' -print | sort | head -1)
+joiner_path=$(find "${root_dir}" -type f -name 'joiner*.onnx' -print | sort | head -1)
 tokens_path=$(find "${root_dir}" -type f -name 'tokens.txt' -print | sort | head -1)
-bpe_path=$(find "${root_dir}" -type f -name '*.model' -print | sort | head -1)
 sample_path=$(find "${root_dir}" -type f -iname '*.wav' -print | sort | head -1)
-test -n "${model_path}"
+test -n "${encoder_path}"
+test -n "${decoder_path}"
+test -n "${joiner_path}"
 test -n "${tokens_path}"
-model_sha256=$(sha256sum "${model_path}" | cut -d ' ' -f1)
+encoder_sha256=$(sha256sum "${encoder_path}" | cut -d ' ' -f1)
+decoder_sha256=$(sha256sum "${decoder_path}" | cut -d ' ' -f1)
+joiner_sha256=$(sha256sum "${joiner_path}" | cut -d ' ' -f1)
 tokens_sha256=$(sha256sum "${tokens_path}" | cut -d ' ' -f1)
 
 if [ -z "${sample_path}" ]; then
@@ -57,21 +62,22 @@ fi
 rm -rf "${output_dir}"
 mkdir -p "${output_dir}"
 cp -R "${root_dir}" "${output_dir}/${SMOKE_MODEL_NAME}"
-model_relative=${model_path#"${extract_dir}/"}
+encoder_relative=${encoder_path#"${extract_dir}/"}
+decoder_relative=${decoder_path#"${extract_dir}/"}
+joiner_relative=${joiner_path#"${extract_dir}/"}
 tokens_relative=${tokens_path#"${extract_dir}/"}
 sample_relative=${sample_path#"${extract_dir}/"}
 {
     printf 'packId=sherpa-smoke\n'
     printf 'packRevision=%s\n' "${SMOKE_MODEL_NAME}"
-    printf 'adapter=STREAMING_CTC\n'
-    printf 'model=%s\n' "${model_relative}"
-    printf 'modelSha256=%s\n' "${model_sha256}"
+    printf 'adapter=PARAKEET_UNIFIED_STREAMING\n'
+    printf 'encoder=%s\n' "${encoder_relative}"
+    printf 'encoderSha256=%s\n' "${encoder_sha256}"
+    printf 'decoder=%s\n' "${decoder_relative}"
+    printf 'decoderSha256=%s\n' "${decoder_sha256}"
+    printf 'joiner=%s\n' "${joiner_relative}"
+    printf 'joinerSha256=%s\n' "${joiner_sha256}"
     printf 'tokens=%s\n' "${tokens_relative}"
     printf 'tokensSha256=%s\n' "${tokens_sha256}"
-    if [ -n "${bpe_path}" ]; then
-        bpe_relative=${bpe_path#"${extract_dir}/"}
-        printf 'bpe=%s\n' "${bpe_relative}"
-        printf 'bpeSha256=%s\n' "$(sha256sum "${bpe_path}" | cut -d ' ' -f1)"
-    fi
     printf 'sample=%s\n' "${sample_relative}"
 } > "${output_dir}/sherpa-smoke.properties"
