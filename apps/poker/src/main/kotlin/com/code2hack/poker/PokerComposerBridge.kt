@@ -3,6 +3,8 @@ package com.code2hack.poker
 import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.ComposerMutationRequest
 import com.code2hack.pokerdealer.protocol.ComposerMutationResult
+import com.code2hack.pokerdealer.protocol.MorseMutationRequest
+import com.code2hack.pokerdealer.protocol.MorseMutationResult
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
@@ -18,6 +20,8 @@ import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
 import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
 import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
@@ -36,6 +40,7 @@ internal object PokerComposerBridge {
         MutableStateFlow<Map<ServerRequestLocator, UserInputRequestProjection>>(emptyMap())
     private val userInputResultState =
         MutableStateFlow<Map<String, UserInputAnswerMutationResult>>(emptyMap())
+    private val morseResultState = MutableStateFlow<Map<String, MorseMutationResult>>(emptyMap())
     private val primaryResultState = MutableStateFlow<Map<String, PokerPrimaryActionResult>>(emptyMap())
     private var sender: (suspend (String, JsonObject, Boolean) -> Boolean)? = null
 
@@ -46,6 +51,7 @@ internal object PokerComposerBridge {
         userInputProjectionState
     val userInputResults: StateFlow<Map<String, UserInputAnswerMutationResult>> =
         userInputResultState
+    val morseResults: StateFlow<Map<String, MorseMutationResult>> = morseResultState
     val primaryResults: StateFlow<Map<String, PokerPrimaryActionResult>> = primaryResultState
 
     fun attach(sender: suspend (String, JsonObject, Boolean) -> Boolean) {
@@ -54,6 +60,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        morseResultState.value = emptyMap()
         primaryResultState.value = emptyMap()
     }
 
@@ -63,6 +70,7 @@ internal object PokerComposerBridge {
         resultState.value = emptyMap()
         userInputProjectionState.value = emptyMap()
         userInputResultState.value = emptyMap()
+        morseResultState.value = emptyMap()
         primaryResultState.value = emptyMap()
     }
 
@@ -108,6 +116,14 @@ internal object PokerComposerBridge {
                 userInputResultState.value = userInputResultState.value +
                     (result.target.operationId to result)
             }
+            POKER_MORSE_MUTATION_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    MorseMutationResult.serializer(),
+                    envelope.payload,
+                )
+                morseResultState.value = morseResultState.value +
+                    (result.target.operationId to result)
+            }
             POKER_PRIMARY_ACTION_RESULT_TYPE -> {
                 val result = PokerProtocolJson.decodeFromJsonElement(
                     PokerPrimaryActionResult.serializer(),
@@ -139,6 +155,15 @@ internal object PokerComposerBridge {
             request,
         ).jsonObject
         return send(POKER_USER_INPUT_MUTATION_TYPE, payload, true)
+    }
+
+    suspend fun sendMorseMutation(request: MorseMutationRequest): Boolean {
+        val send = sender ?: return false
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            MorseMutationRequest.serializer(),
+            request,
+        ).jsonObject
+        return send(POKER_MORSE_MUTATION_TYPE, payload, true)
     }
 
     suspend fun sendPrimaryAction(target: PokerPrimaryActionTarget): Boolean {

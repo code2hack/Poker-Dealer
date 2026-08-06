@@ -9,6 +9,9 @@ import kotlinx.serialization.json.JsonObject
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.MorseMutationKind
+import com.code2hack.pokerdealer.domain.MorseMutationOutcome
+import com.code2hack.pokerdealer.domain.MorseMutationTarget
 import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
@@ -44,6 +47,9 @@ const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
 const val POKER_USER_INPUT_PROJECTION_TYPE = "user-input.projection"
 const val POKER_USER_INPUT_MUTATION_TYPE = "user-input.mutation"
 const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
+const val POKER_MORSE_CAPABILITY = "morse.v1"
+const val POKER_MORSE_MUTATION_TYPE = "morse.mutation"
+const val POKER_MORSE_MUTATION_RESULT_TYPE = "morse.mutation.result"
 const val POKER_PRIMARY_ACTION_CAPABILITY = "primary-action.v1"
 const val POKER_PRIMARY_ACTION_TYPE = "primary.action"
 const val POKER_PRIMARY_ACTION_RESULT_TYPE = "primary.action.result"
@@ -187,6 +193,45 @@ data class ComposerMutationResult(
     val target: ComposerEditTarget,
     val outcome: ComposerMutationOutcome,
     val draft: ComposerDraft,
+    val reason: String? = null,
+)
+
+@Serializable
+data class MorseMutationRequest(
+    val target: MorseMutationTarget,
+    val kind: MorseMutationKind,
+    val text: String? = null,
+    @SerialName("delete_start") val deleteStart: Int? = null,
+    @SerialName("delete_end_exclusive") val deleteEndExclusive: Int? = null,
+    @SerialName("expected_text") val expectedText: String? = null,
+) {
+    init {
+        when (kind) {
+            MorseMutationKind.COMMIT_WORD -> require(!text.isNullOrBlank()) {
+                "Morse commit text must not be blank"
+            }
+            MorseMutationKind.DELETE_COMMITTED_WORD -> {
+                require(text == null) { "Morse deletion cannot include text" }
+                require(deleteStart != null && deleteEndExclusive != null) {
+                    "Morse deletion requires a range"
+                }
+                require(deleteStart >= 0 && deleteStart < deleteEndExclusive) {
+                    "Morse deletion range is invalid"
+                }
+                require(expectedText != null) { "Morse deletion requires expected text" }
+            }
+        }
+    }
+}
+
+@Serializable
+data class MorseMutationResult(
+    val target: MorseMutationTarget,
+    val outcome: MorseMutationOutcome,
+    @SerialName("composer_draft") val composerDraft: ComposerDraft? = null,
+    @SerialName("answer_buffer") val answerBuffer: UserInputAnswerBuffer? = null,
+    @SerialName("field_revision") val fieldRevision: Long? = null,
+    @SerialName("cursor_position") val cursorPosition: Int? = null,
     val reason: String? = null,
 )
 

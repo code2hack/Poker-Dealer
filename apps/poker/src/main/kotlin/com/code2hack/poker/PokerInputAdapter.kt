@@ -179,7 +179,20 @@ internal class PokerBuiltInInputAdapter(
 
         return when (event.action) {
             PokerTouchAction.DOWN -> emptyList()
-            PokerTouchAction.POINTER_DOWN,
+            PokerTouchAction.POINTER_DOWN -> if (controller.morseActive) {
+                listOfNotNull(
+                    dispatch(
+                        PokerInteraction(
+                            source = PokerInputSource.GLASSES,
+                            operation = PokerOperation.TAPTAP,
+                            phase = PokerInteractionPhase.UPDATE,
+                            eventTimeMs = event.eventTimeMs,
+                        ),
+                    ),
+                )
+            } else {
+                emptyList()
+            }
             PokerTouchAction.POINTER_UP,
             -> emptyList()
 

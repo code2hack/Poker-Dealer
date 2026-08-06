@@ -8,6 +8,10 @@ import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.MorseMutationKind
+import com.code2hack.pokerdealer.domain.MorseMutationOutcome
+import com.code2hack.pokerdealer.domain.MorseMutationTarget
+import com.code2hack.pokerdealer.domain.MorseModeTarget
 import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
@@ -177,5 +181,45 @@ class ProtocolTest {
         assertThrows(IllegalArgumentException::class.java) {
             target.copy(expectedTurnId = null)
         }
+    }
+
+    @Test
+    fun `Morse mutation carries only exact field target and authoritative result`() {
+        val locator = CodexThreadLocator("spark", "thread")
+        val target = MorseMutationTarget(
+            mode = MorseModeTarget(
+                locator = locator,
+                surface = ComposerSurface.THREAD_COMPOSER,
+                revision = 3,
+                cursorPosition = 2,
+                controlGeneration = 4,
+                connectionEpoch = 5,
+                bindingModeSession = "binding",
+                modeSession = "morse",
+            ),
+            operationId = "morse-1",
+        )
+        val request = MorseMutationRequest(
+            target = target,
+            kind = MorseMutationKind.COMMIT_WORD,
+            text = "hello ",
+        )
+        val result = MorseMutationResult(
+            target = target,
+            outcome = MorseMutationOutcome.ACKNOWLEDGED,
+            composerDraft = ComposerDraft.fromText("say hello ", revision = 4),
+            fieldRevision = 4,
+            cursorPosition = 8,
+        )
+
+        val encodedRequest = PokerProtocolJson.encodeToString(request)
+        assertTrue("dotDashBuffer" !in encodedRequest)
+        assertEquals(request, PokerProtocolJson.decodeFromString<MorseMutationRequest>(encodedRequest))
+        assertEquals(
+            result,
+            PokerProtocolJson.decodeFromString<MorseMutationResult>(
+                PokerProtocolJson.encodeToString(result),
+            ),
+        )
     }
 }

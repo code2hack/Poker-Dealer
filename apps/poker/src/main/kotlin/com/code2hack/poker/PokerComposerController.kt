@@ -5,6 +5,8 @@ import com.code2hack.pokerdealer.domain.ComposerEditorState
 import com.code2hack.pokerdealer.domain.ComposerSurface
 import com.code2hack.pokerdealer.domain.ComposerDeletionRequest
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.MorseModeTarget
+import com.code2hack.pokerdealer.domain.MorseMutationTarget
 import com.code2hack.pokerdealer.domain.PokerComposerLayout
 import com.code2hack.pokerdealer.domain.PokerNavigationReducer
 import com.code2hack.pokerdealer.domain.PokerPileLayout
@@ -132,6 +134,58 @@ internal class PokerComposerController(
     }
 
     fun isPrimaryLocked(locator: CodexThreadLocator): Boolean = pendingPrimary[locator] != null
+
+    fun morseTarget(freshModeSession: String): MorseModeTarget? {
+        val locator = navigation.metadata().focused ?: return null
+        val anchor = navigation.anchor(locator)
+            ?.takeIf { it.mode == com.code2hack.pokerdealer.domain.PokerNavigationMode.COMPOSER }
+            ?: return null
+        val layout = navigation.layout(locator)?.composer ?: return null
+        val draft = layout.draft ?: return null
+        val editor = editors[locator] ?: return null
+        if (freshModeSession.isBlank() || layout.modeSession.isBlank() ||
+            !layout.hasDealerClaim || layout.primaryActionLocked ||
+            pendingPrimary[locator] != null || editor.pendingMutation != null
+        ) return null
+        if (anchor.cursorPosition !in 0 until draft.cursorCount) return null
+        return MorseModeTarget(
+            locator = locator,
+            surface = ComposerSurface.THREAD_COMPOSER,
+            revision = draft.revision,
+            cursorPosition = anchor.cursorPosition,
+            controlGeneration = layout.controlGeneration,
+            connectionEpoch = layout.connectionEpoch,
+            bindingModeSession = layout.modeSession,
+            modeSession = freshModeSession,
+        )
+    }
+
+    fun installMorseDraft(
+        target: MorseMutationTarget,
+        draft: com.code2hack.pokerdealer.domain.ComposerDraft,
+        cursorPosition: Int,
+    ): Boolean {
+        val mode = target.mode
+        if (mode.surface != ComposerSurface.THREAD_COMPOSER) return false
+        val current = editors[mode.locator] ?: return false
+        if (current.draft.revision != mode.revision ||
+            current.controlGeneration != mode.controlGeneration ||
+            current.connectionEpoch != mode.connectionEpoch ||
+            current.modeSession != mode.bindingModeSession
+        ) return false
+        val installed = draft.normalized()
+        val next = ComposerEditorState(
+            locator = mode.locator,
+            draft = installed,
+            cursorPosition = cursorPosition.coerceIn(0, installed.cursorCount - 1),
+            controlGeneration = mode.controlGeneration,
+            connectionEpoch = mode.connectionEpoch,
+            modeSession = mode.bindingModeSession,
+        )
+        editors[mode.locator] = next
+        updateLayoutFor(mode.locator, installed, next)
+        return true
+    }
 
     fun applyResult(result: ComposerMutationResult) {
         val current = editors[result.target.locator] ?: return

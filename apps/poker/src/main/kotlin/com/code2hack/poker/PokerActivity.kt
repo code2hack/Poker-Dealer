@@ -39,6 +39,8 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshotRequestCard
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
 import com.code2hack.pokerdealer.domain.RequestResolutionState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class PokerActivity : ComponentActivity() {
@@ -46,6 +48,7 @@ class PokerActivity : ComponentActivity() {
     private lateinit var screenState: MutableState<PokerScreenState>
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
+    private lateinit var morseController: PokerMorseController
     private lateinit var primaryActionController: PokerPrimaryActionController
     private var postureSensorManager: SensorManager? = null
     private var postureSensor: Sensor? = null
@@ -93,6 +96,24 @@ class PokerActivity : ComponentActivity() {
         navigation = PokerNavigationReducer(viewportLineCount = 12)
         composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
+        morseController = PokerMorseController(
+            navigation = navigation,
+            composer = composerController,
+            userInput = userInputController,
+            wheelContext = { primaryActionController.wheelContext() },
+            scope = lifecycleScope,
+            sendMutation = PokerComposerBridge::sendMorseMutation,
+            longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
+            onNotice = { message, durationMs ->
+                screenState.value = screenState.value.copy(notice = message)
+                lifecycleScope.launch {
+                    delay(durationMs)
+                    if (screenState.value.notice == message) {
+                        screenState.value = screenState.value.copy(notice = null)
+                    }
+                }
+            },
+        )
         primaryActionController = PokerPrimaryActionController(
             navigation = navigation,
             composer = composerController,
@@ -143,6 +164,14 @@ class PokerActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
+            PokerComposerBridge.morseResults.collect { results ->
+                results.values.forEach(morseController::apply)
+                val notice = screenState.value.notice
+                screenState.value = currentScreenState(screenState.value.wheelState)
+                    .copy(notice = notice)
+            }
+        }
+        lifecycleScope.launch {
             PokerComposerBridge.primaryResults.collect { results ->
                 results.values.forEach(primaryActionController::applyResult)
                 screenState.value = currentScreenState(screenState.value.wheelState)
@@ -153,7 +182,18 @@ class PokerActivity : ComponentActivity() {
             navigation = navigation,
             wheelContext = primaryActionController::wheelContext,
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
+            morse = morseController.input,
         )
+        fun handleWheelSelection(selection: com.code2hack.pokerdealer.domain.PokerWheelSelection) {
+            lifecycleScope.launch {
+                if (selection.action == com.code2hack.pokerdealer.domain.PokerWheelAction.MORSE) {
+                    morseController.begin(selection, SystemClock.uptimeMillis())
+                } else {
+                    primaryActionController.submit(selection)
+                }
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
         val onNavigationChanged = {
             screenState.value = currentScreenState(screenState.value.wheelState)
         }
@@ -169,12 +209,10 @@ class PokerActivity : ComponentActivity() {
                 onResult = { result ->
                     screenState.value = currentScreenState(result.wheelState)
                     result.wheelSelection?.let { selection ->
-                        lifecycleScope.launch {
-                            primaryActionController.submit(selection)
-                            screenState.value = currentScreenState(screenState.value.wheelState)
-                        }
+                        handleWheelSelection(selection)
                     }
                     if (
+                        result.morseEvent == null &&
                         result.interaction.phase == com.code2hack.pokerdealer.domain.PokerInteractionPhase.RELEASE &&
                         result.interaction.operation == com.code2hack.pokerdealer.domain.PokerOperation.TAP
                     ) {
@@ -183,12 +221,13 @@ class PokerActivity : ComponentActivity() {
                             screenState.value = currentScreenState()
                         }
                     }
-                    result.composerDeletion?.let { deletion ->
+                    result.composerDeletion?.takeIf { result.morseEvent == null }?.let { deletion ->
                         lifecycleScope.launch {
                             composerController.requestDeletion(deletion)
                             screenState.value = currentScreenState()
                         }
                     }
+                    morseController.handle(result.morseEvent)
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
@@ -203,18 +242,27 @@ class PokerActivity : ComponentActivity() {
                 onResult = { result ->
                     screenState.value = currentScreenState(result.wheelState)
                     result.wheelSelection?.let { selection ->
-                        lifecycleScope.launch {
-                            primaryActionController.submit(selection)
-                            screenState.value = currentScreenState(screenState.value.wheelState)
-                        }
+                        handleWheelSelection(selection)
                     }
+                    morseController.handle(result.morseEvent)
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
                 },
             ),
         )
-        PokerBindingRuntime.attachActivity { input.onConnectionLost() }
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(50L)
+                if (morseController.input.isActive) {
+                    morseController.tick(SystemClock.uptimeMillis())
+                }
+            }
+        }
+        PokerBindingRuntime.attachActivity {
+            input.onConnectionLost()
+            morseController.abort()
+        }
         getSystemService(InputManager::class.java)
             ?.registerInputDeviceListener(inputDeviceListener, null)
         android.view.InputDevice.getDeviceIds().forEach(::rememberInputDevice)
@@ -243,7 +291,10 @@ class PokerActivity : ComponentActivity() {
         super.onWindowFocusChanged(hasFocus)
         foreground = hasFocus
         PokerBindingRuntime.setForeground(hasFocus)
-        if (!hasFocus && ::input.isInitialized) input.onFocusLost()
+        if (!hasFocus && ::input.isInitialized) {
+            input.onFocusLost()
+            morseController.abort()
+        }
     }
 
     override fun onDestroy() {
@@ -255,7 +306,10 @@ class PokerActivity : ComponentActivity() {
         inputDeviceDescriptors.clear()
         PokerBindingRuntime.detachActivity()
         PokerBindingRuntime.setForeground(false)
-        if (::input.isInitialized) input.onDisconnected()
+        if (::input.isInitialized) {
+            input.onDisconnected()
+            morseController.abort()
+        }
         super.onDestroy()
     }
 
@@ -388,6 +442,7 @@ private fun PokerCardReader(state: PokerScreenState) {
                 }
         },
         wheelState = state.wheelState,
+        notice = state.notice,
         modifier = Modifier.fillMaxSize(),
     )
 }
@@ -403,6 +458,7 @@ private data class PokerScreenState(
     val requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>>,
     val unreadCount: Int,
     val wheelState: PokerWheelState = PokerWheelState(),
+    val notice: String? = null,
 )
 
 private fun PokerNavigationReducer.snapshot(
