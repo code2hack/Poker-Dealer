@@ -17,6 +17,7 @@ import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,10 +29,12 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.unit.Density
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
@@ -53,6 +56,7 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.PokerSnapshotRequestCard
+import com.code2hack.pokerdealer.protocol.PokerTransientNotice
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.pokerUnreadRequestKey
 import com.code2hack.pokerdealer.domain.RequestResolutionState
@@ -142,13 +146,7 @@ class PokerActivity : ComponentActivity() {
             sendMutation = PokerComposerBridge::sendMorseMutation,
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             onNotice = { message, durationMs ->
-                screenState.value = screenState.value.copy(notice = message)
-                lifecycleScope.launch {
-                    delay(durationMs)
-                    if (screenState.value.notice == message) {
-                        screenState.value = screenState.value.copy(notice = null)
-                    }
-                }
+                PokerNoticeRuntime.show(PokerTransientNotice(message, durationMs))
             },
         )
         approvalController = PokerApprovalController(navigation)
@@ -255,9 +253,7 @@ class PokerActivity : ComponentActivity() {
         lifecycleScope.launch {
             PokerComposerBridge.morseResults.collect { results ->
                 results.values.forEach(morseController::apply)
-                val notice = screenState.value.notice
                 screenState.value = currentScreenState(screenState.value.wheelState)
-                    .copy(notice = notice)
             }
         }
         lifecycleScope.launch {
@@ -397,6 +393,7 @@ class PokerActivity : ComponentActivity() {
                 isForeground = { foreground },
                 onNavigationChanged = onNavigationChanged,
                 onBindingChanged = onBindingChanged,
+                onNotice = { text -> PokerNoticeRuntime.show(PokerTransientNotice(text, 500L)) },
                 onResult = { result ->
                     screenState.value = currentScreenState(result.wheelState)
                     result.wheelSelection?.let { selection ->
@@ -436,7 +433,17 @@ class PokerActivity : ComponentActivity() {
             val photoState by photoController.state.collectAsState()
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-                    PokerCardReader(screenState.value, photoState, camera)
+                    val fontScale by PokerPresentationRuntime.fontScale.collectAsState()
+                    val notice by PokerNoticeRuntime.notice.collectAsState()
+                    val density = LocalDensity.current
+                    CompositionLocalProvider(
+                        LocalDensity provides Density(
+                            density = density.density,
+                            fontScale = density.fontScale * fontScale.factor,
+                        ),
+                    ) {
+                        PokerCardReader(screenState.value, photoState, camera, notice)
+                    }
                 }
             }
         }
@@ -578,6 +585,7 @@ private fun PokerCardReader(
     state: PokerScreenState,
     photoState: PokerPhotoState,
     camera: PokerCamera2Controller,
+    notice: PokerTransientNotice?,
 ) {
     if (photoState.phase != PokerPhotoPhase.IDLE) {
         PokerPhotoSurface(photoState, camera)
@@ -630,7 +638,7 @@ private fun PokerCardReader(
                         }
                 },
                 wheelState = state.wheelState,
-                notice = state.notice,
+                notice = notice,
                 modifier = Modifier.fillMaxSize(),
             )
             photoState.notice?.let { notice ->
@@ -693,7 +701,6 @@ private data class PokerScreenState(
     val asrProjection: com.code2hack.pokerdealer.protocol.PokerAsrProjection? = null,
     val asrNoticeVisible: Boolean = false,
     val wheelState: PokerWheelState = PokerWheelState(),
-    val notice: String? = null,
 )
 
 private fun PokerNavigationReducer.snapshot(

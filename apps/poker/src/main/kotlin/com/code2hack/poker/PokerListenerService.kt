@@ -40,6 +40,17 @@ import com.code2hack.pokerdealer.protocol.pokerPairingFingerprint
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_MORSE_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_DIAGNOSTICS_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_DIAGNOSTICS_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_ACK_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_TRANSIENT_NOTICE_TYPE
+import com.code2hack.pokerdealer.protocol.PokerDiagnosticsProtocol
+import com.code2hack.pokerdealer.protocol.PokerClientDiagnostics
+import com.code2hack.pokerdealer.protocol.PokerFontScaleProtocol
+import com.code2hack.pokerdealer.protocol.PokerFontScaleInstallResult
+import com.code2hack.pokerdealer.protocol.PokerTransientNoticeProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,6 +77,7 @@ class PokerListenerService : Service() {
         val pokerScheduler = CoroutinePokerScheduler(serviceScope)
         PokerBindingRuntime.attachService { serviceScope.launch { sendBindingState() } }
         PokerSnapshotRuntime.clearForRestart()
+        PokerPresentationRuntime.initialize(this)
         PokerSnapshotRuntime.initializeUnread(
             this,
             runCatching {
@@ -76,6 +88,12 @@ class PokerListenerService : Service() {
         )
         PokerSnapshotRuntime.attachForegroundRequester {
             PokerForegroundWake.request(this)
+        }
+        PokerSnapshotRuntime.attachDiagnosticsRequester {
+            serviceScope.launch { sendClientDiagnostics() }
+        }
+        PokerPresentationRuntime.attachDiagnosticsRequester {
+            serviceScope.launch { sendClientDiagnostics() }
         }
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
             role = PokerSnapshotRole.POKER,
@@ -97,6 +115,8 @@ class PokerListenerService : Service() {
                     POKER_PHOTO_CAPABILITY,
                     POKER_MORSE_CAPABILITY,
                     com.code2hack.pokerdealer.protocol.POKER_ASR_CAPABILITY,
+                    POKER_FONT_SCALE_CAPABILITY,
+                    POKER_DIAGNOSTICS_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,
@@ -108,6 +128,7 @@ class PokerListenerService : Service() {
                 ) {
                     sendBindingState()
                 }
+                sendClientDiagnostics()
             },
             onStateChanged = { state ->
                 if (state != com.code2hack.pokerdealer.protocol.PokerConnectionState.CONNECTED) {
@@ -119,6 +140,7 @@ class PokerListenerService : Service() {
                 PokerComposerBridge.receive(envelope)
                 PokerAsrBridge.receive(envelope)
                 handleBindingEnvelope(envelope)
+                handlePresentationEnvelope(envelope)
             },
             callbacks = pokerSnapshotHandler,
         )
@@ -179,6 +201,8 @@ class PokerListenerService : Service() {
         PokerComposerBridge.detach()
         PokerAsrBridge.detach()
         PokerSnapshotRuntime.detachForegroundRequester()
+        PokerSnapshotRuntime.detachDiagnosticsRequester()
+        PokerPresentationRuntime.detachDiagnosticsRequester()
         owner.stop()
         PokerBindingRuntime.notifyConnectionLost()
         PokerBindingRuntime.detachService()
@@ -224,6 +248,21 @@ class PokerListenerService : Service() {
             if (!owner.isConnected) return@withLock
             sendBindingStateLocked()
         }
+    }
+
+    private suspend fun sendClientDiagnostics() {
+        if (!owner.isConnected) return
+        owner.send(
+            POKER_DIAGNOSTICS_TYPE,
+            PokerDiagnosticsProtocol.payload(
+                PokerClientDiagnostics(
+                    unreadCount = PokerSnapshotRuntime.unreadCount.value,
+                    wakeCapability = PokerForegroundWake.capability(this),
+                    font = PokerPresentationRuntime.fontScale.value,
+                ),
+            ),
+            requireWritable = false,
+        )
     }
 
     private suspend fun sendBindingStateLocked() {
@@ -296,6 +335,35 @@ class PokerListenerService : Service() {
                     .getOrNull() ?: return
                 controller.forgetRemote(forgotten.descriptor)
                 sendBindingState()
+            }
+
+            else -> Unit
+        }
+    }
+
+    private suspend fun handlePresentationEnvelope(
+        envelope: com.code2hack.pokerdealer.protocol.ProtocolEnvelope,
+    ) {
+        when (envelope.type) {
+            POKER_FONT_SCALE_TYPE -> {
+                val candidate = runCatching { PokerFontScaleProtocol.decodeUpdate(envelope) }
+                    .getOrNull() ?: return
+                val result = PokerPresentationRuntime.install(candidate)
+                owner.send(
+                    POKER_FONT_SCALE_ACK_TYPE,
+                    PokerFontScaleProtocol.acknowledgementPayload(
+                        PokerPresentationRuntime.fontScale.value,
+                        result,
+                    ),
+                    replyTo = envelope.messageId,
+                    requireWritable = false,
+                )
+                sendClientDiagnostics()
+            }
+
+            POKER_TRANSIENT_NOTICE_TYPE -> {
+                runCatching { PokerTransientNoticeProtocol.decode(envelope) }
+                    .onSuccess(PokerNoticeRuntime::show)
             }
 
             else -> Unit

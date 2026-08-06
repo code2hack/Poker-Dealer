@@ -21,6 +21,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -34,6 +37,7 @@ import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.PokerAsrProjection
+import com.code2hack.pokerdealer.protocol.PokerTransientNotice
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.PokerApprovalDecision
 import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
@@ -112,7 +116,7 @@ internal fun PokerPilePages(
     onCardFinalLineVisible: (CodexThreadLocator, String) -> Unit = { _, _ -> },
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
     wheelState: PokerWheelState = PokerWheelState(),
-    notice: String? = null,
+    notice: PokerTransientNotice? = null,
     asrProjection: PokerAsrProjection? = null,
     asrNoticeVisible: Boolean = false,
 ) {
@@ -128,7 +132,13 @@ internal fun PokerPilePages(
         asrProjection,
         asrNoticeVisible,
     )
-    val page = projection.visiblePage ?: return
+    val page = projection.visiblePage
+    if (page == null) {
+        Box(modifier = modifier.fillMaxSize()) {
+            PokerTransientNoticeOverlay(notice, Modifier.align(Alignment.TopCenter))
+        }
+        return
+    }
     val lines = remember(page.locator, page.cardText, page.cards) { page.renderLines() }
     val listState: LazyListState = rememberLazyListState()
     val scrollOffset = page.anchor?.scrollOffset?.coerceIn(0, lines.lastIndex.coerceAtLeast(0)) ?: 0
@@ -167,7 +177,11 @@ internal fun PokerPilePages(
                     text = if (line.text.isEmpty()) " " else line.text,
                     color = Color(0xFFE8EEF4),
                     fontFamily = FontFamily.Monospace,
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = "Card text: ${line.text}"
+                        },
                 )
             }
             }
@@ -255,15 +269,6 @@ internal fun PokerPilePages(
                 }
             }
 
-            notice?.let {
-                Text(
-                    text = it,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 4.dp),
-                    color = Color(0xFFFFD18A),
-                )
-            }
             page.approvalProjections.forEach { projection ->
                 Column(
                     modifier = Modifier
@@ -347,6 +352,28 @@ internal fun PokerPilePages(
                 wheelLabel(wheelState, PokerWheelAction.PRIMARY, "Primary")
             }
         }
+        PokerTransientNoticeOverlay(notice, Modifier.align(Alignment.TopCenter))
+    }
+}
+
+@Composable
+private fun PokerTransientNoticeOverlay(
+    notice: PokerTransientNotice?,
+    modifier: Modifier,
+) {
+    notice?.let {
+        Text(
+            text = it.text,
+            modifier = modifier
+                .background(Color(0xEE18232D))
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .semantics {
+                    contentDescription = "Transient notice: ${it.text}"
+                },
+            color = Color(0xFFFFD18A),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -398,7 +425,15 @@ private fun PokerPileFooter(page: PokerPilePage) {
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF101820))
-            .padding(12.dp),
+            .padding(12.dp)
+            .semantics {
+                contentDescription = pokerFooterText(
+                    available = page.available,
+                    unreadCount = page.unreadCount,
+                    hostLabel = page.hostLabel,
+                    threadLabel = page.threadLabel,
+                )
+            },
     ) {
         if (leading.isNotEmpty()) Text(leading, color = Color(0xFFAFC4D8))
         Text(hostLabel, color = Color(0xFFAFC4D8), maxLines = 1, overflow = TextOverflow.Clip)
@@ -461,6 +496,16 @@ private fun wheelLabel(state: PokerWheelState, action: PokerWheelAction, label: 
             state.highlightedAction == action -> Color(0xFFFFD18A)
             else -> Color(0xFFE8EEF4)
         },
-        modifier = Modifier.width(96.dp).padding(6.dp),
+        modifier = Modifier
+            .width(96.dp)
+            .padding(6.dp)
+            .semantics {
+                contentDescription = label
+                stateDescription = when {
+                    !available -> "Unavailable"
+                    state.highlightedAction == action -> "Selected"
+                    else -> "Available"
+                }
+            },
     )
 }
