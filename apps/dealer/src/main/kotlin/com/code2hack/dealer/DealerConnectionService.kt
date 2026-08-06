@@ -121,6 +121,13 @@ import com.code2hack.pokerdealer.protocol.toFileApprovalDecision
 import com.code2hack.pokerdealer.protocol.toPokerApprovalProjection
 import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
 import com.code2hack.pokerdealer.protocol.PokerConnectionEpoch
+import com.code2hack.pokerdealer.protocol.PokerDiagnosticsProtocol
+import com.code2hack.pokerdealer.protocol.FilePokerFontScaleStore
+import com.code2hack.pokerdealer.protocol.PokerFontScaleInstallResult
+import com.code2hack.pokerdealer.protocol.PokerFontScaleProtocol
+import com.code2hack.pokerdealer.protocol.PokerFontScaleState
+import com.code2hack.pokerdealer.protocol.PokerPairingController
+import com.code2hack.pokerdealer.protocol.PokerWakeCapability
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
 import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
@@ -142,6 +149,11 @@ import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_LEARNING_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_REMOTE_OBSERVED_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_REMOTE_FORGOTTEN_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_BINDINGS_SNAPSHOT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_DIAGNOSTICS_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_DIAGNOSTICS_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_ACK_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_FONT_SCALE_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PROTOCOL_MAJOR
 import com.code2hack.pokerdealer.protocol.PokerConnectionState
 import com.code2hack.pokerdealer.protocol.sendBindingSnapshot
@@ -195,9 +207,12 @@ class DealerConnectionService : Service() {
     private lateinit var pokerConnectionOwner: PokerConnectionOwner<Unit>
     private lateinit var pokerSnapshotSource: DealerPokerSnapshotSource
     private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
+    private lateinit var pokerPairing: PokerPairingController
+    private lateinit var pokerFontStore: FilePokerFontScaleStore
     private val pokerSnapshotReady = CompletableDeferred<Unit>()
     private var pokerNetworkCallback: ConnectivityManager.NetworkCallback? = null
     private val pokerBindingSendMutex = Mutex()
+    private val pokerFontSendMutex = Mutex()
     @Volatile
     private var pendingPokerRemoteForget: String? = null
     private var pokerComposerEpoch: PokerConnectionEpoch? = null
@@ -234,6 +249,7 @@ class DealerConnectionService : Service() {
     private var connectedHostIds = emptySet<String>()
     private var activityVisible = false
     private var pokerBindingPersistenceAvailable = true
+    private var pokerFontPersistenceAvailable = true
     private var pendingRequestPersistenceAvailable = true
 
     private val mutableState: MutableStateFlow<DealerUiState>
@@ -251,7 +267,13 @@ class DealerConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         val pairingIdentity = AndroidKeystorePairingIdentity()
-        val pokerPairing = pairingIdentity.pairingController(this)
+        pokerPairing = pairingIdentity.pairingController(this)
+        pokerFontStore = FilePokerFontScaleStore(
+            noBackupFilesDir.resolve("poker-font-v1.json"),
+        )
+        val restoredPokerFont = runCatching { pokerFontStore.load() }
+            .onFailure { pokerFontPersistenceAvailable = false }
+            .getOrDefault(PokerFontScaleState())
         val pokerScheduler = CoroutinePokerScheduler(scope)
         pokerSnapshotSource = DealerPokerSnapshotSource { mutableState.value }
         pokerSnapshotHandler = PokerSnapshotConnectionHandler(
@@ -275,14 +297,17 @@ class DealerConnectionService : Service() {
                     POKER_LIVE_DELTA_CAPABILITY,
                     POKER_PRIMARY_ACTION_CAPABILITY,
                     POKER_MORSE_CAPABILITY,
+                    POKER_FONT_SCALE_CAPABILITY,
+                    POKER_DIAGNOSTICS_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,
             clock = PokerClock { System.currentTimeMillis() },
             reconnect = PokerReconnectController(),
-            onConnected = { epoch, _ ->
-                onPokerConnected(epoch)
+            onConnected = { epoch, negotiation ->
+                onPokerConnected(epoch, negotiation)
                 sendCurrentPokerBindingsNow()
+                sendCurrentPokerFontNow()
             },
             onEnvelope = { epoch, envelope ->
                 onPokerEnvelope(epoch, envelope)
@@ -344,9 +369,17 @@ class DealerConnectionService : Service() {
                 projection = recovered.projection,
                 pendingRequests = recovered.pendingRequests,
                 error = restoreErrors.takeIf(List<String>::isNotEmpty)?.joinToString("; "),
-            ).copy(pokerBindings = pokerBindings.state)
+            ).copy(
+                pokerBindings = pokerBindings.state,
+                pokerFont = restoredPokerFont,
+                pokerDiagnostics = DealerPokerDiagnostics(
+                    pairing = pokerPairing.status.state,
+                    fontRevision = restoredPokerFont.revision,
+                ),
+            )
             handlePokerConnectionState(pokerConnectionOwner.connectionState)
             sendCurrentPokerBindings()
+            sendCurrentPokerFont()
             pokerComposerEpoch?.let { epoch ->
                 restoredAttachments.forEach { locator -> sendPokerProjection(epoch, locator) }
                 mutableState.value.userInputRequests.requests.values
@@ -502,6 +535,52 @@ class DealerConnectionService : Service() {
         if (pokerBindings.observeRemote(descriptor)) publishPokerBindings()
     }
 
+    fun setPokerFontScale(percent: Int) {
+        val current = mutableState.value.pokerFont
+        val next = runCatching {
+            PokerFontScaleState(current.revision + 1, percent)
+        }.getOrElse {
+            mutableState.update {
+                it.copy(pokerDiagnostics = it.pokerDiagnostics.copy(lastFailure = PokerDiagnosticFailure.FONT))
+            }
+            return
+        }
+        if (next.percent == current.percent) return
+        mutableState.update {
+            it.copy(
+                pokerFont = next,
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    fontSync = PokerFontSyncStatus.PENDING,
+                    fontRevision = next.revision,
+                    lastFailure = PokerDiagnosticFailure.NONE,
+                ),
+            )
+        }
+        if (pokerFontPersistenceAvailable) {
+            scope.launch {
+                runCatching {
+                    pokerFontSendMutex.withLock { pokerFontStore.save(next) }
+                }.onFailure {
+                    pokerFontPersistenceAvailable = false
+                    mutableState.update {
+                        it.copy(
+                            pokerDiagnostics = it.pokerDiagnostics.copy(
+                                fontSync = PokerFontSyncStatus.UNSYNCHRONIZED,
+                                lastFailure = PokerDiagnosticFailure.STORAGE,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        sendCurrentPokerFont()
+        scope.launch {
+            val snapshot = pokerSnapshotSource.current()
+            pokerSnapshotHandler.publish(snapshot)
+            recordPokerSnapshotRevision(snapshot)
+        }
+    }
+
     /** Called after the complete map has been acknowledged by Poker. */
     fun acknowledgePokerBindings(revision: Long) {
         if (pokerBindings.acknowledge(revision)) publishPokerBindings(sendSnapshot = false)
@@ -512,7 +591,12 @@ class DealerConnectionService : Service() {
 
     private fun publishPokerBindings(sendSnapshot: Boolean = true) {
         val state = pokerBindings.state
-        mutableState.update { it.copy(pokerBindings = state) }
+        mutableState.update {
+            it.copy(
+                pokerBindings = state,
+                pokerDiagnostics = it.pokerDiagnostics.copy(bindingSync = state.syncStatus),
+            )
+        }
         if (pokerBindingPersistenceAvailable) {
             scope.launch {
                 runCatching {
@@ -560,6 +644,31 @@ class DealerConnectionService : Service() {
         }
     }
 
+    private fun sendCurrentPokerFont() {
+        if (!pokerConnectionOwner.isConnected) return
+        scope.launch { sendCurrentPokerFontNow() }
+    }
+
+    private suspend fun sendCurrentPokerFontNow() = pokerFontSendMutex.withLock {
+        if (!pokerConnectionOwner.isConnected) return@withLock
+        val state = mutableState.value.pokerFont
+        val sent = pokerConnectionOwner.send(
+            POKER_FONT_SCALE_TYPE,
+            PokerFontScaleProtocol.updatePayload(state),
+            requireWritable = false,
+        )
+        if (!sent) {
+            mutableState.update {
+                it.copy(
+                    pokerDiagnostics = it.pokerDiagnostics.copy(
+                        fontSync = PokerFontSyncStatus.UNSYNCHRONIZED,
+                        lastFailure = PokerDiagnosticFailure.PROTOCOL,
+                    ),
+                )
+            }
+        }
+    }
+
     private suspend fun sendPokerBindingMessage(
         type: String,
         payload: JsonObject,
@@ -569,7 +678,50 @@ class DealerConnectionService : Service() {
     }
 
     private fun handlePokerConnectionState(state: PokerConnectionState) {
-        mutableState.update { it.copy(pokerConnected = state == PokerConnectionState.CONNECTED) }
+        mutableState.update {
+            it.copy(
+                pokerConnected = state == PokerConnectionState.CONNECTED,
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    pairing = pokerPairing.status.state,
+                    connection = state,
+                    connectionEpoch = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerDiagnostics.connectionEpoch
+                    } else {
+                        null
+                    },
+                    capabilities = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerDiagnostics.capabilities
+                    } else {
+                        emptySet()
+                    },
+                    fontSync = if (state == PokerConnectionState.CONNECTED) {
+                        PokerFontSyncStatus.PENDING
+                    } else {
+                        PokerFontSyncStatus.UNSYNCHRONIZED
+                    },
+                    acknowledgedFontRevision = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerDiagnostics.acknowledgedFontRevision
+                    } else {
+                        null
+                    },
+                    bindingSync = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerBindings.syncStatus
+                    } else {
+                        com.code2hack.pokerdealer.domain.PokerBindingSyncStatus.UNSYNCHRONIZED
+                    },
+                    unreadCount = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerDiagnostics.unreadCount
+                    } else {
+                        null
+                    },
+                    wakeCapability = if (state == PokerConnectionState.CONNECTED) {
+                        it.pokerDiagnostics.wakeCapability
+                    } else {
+                        PokerWakeCapability.UNKNOWN
+                    },
+                ),
+            )
+        }
         if (state != PokerConnectionState.CONNECTED) {
             pokerBindings.connectionLost()
             publishPokerBindings(sendSnapshot = false)
@@ -993,14 +1145,19 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch?.let { epoch ->
             scope.launch {
                 sendPokerProjection(epoch, locator)
-                pokerSnapshotHandler.publish(pokerSnapshotSource.current())
+                val snapshot = pokerSnapshotSource.current()
+                pokerSnapshotHandler.publish(snapshot)
+                recordPokerSnapshotRevision(snapshot)
             }
         }
         refreshPokerUserInputProjection(locator)
         refreshPokerApprovalProjection(locator)
     }
 
-    private suspend fun onPokerConnected(epoch: PokerConnectionEpoch) {
+    private suspend fun onPokerConnected(
+        epoch: PokerConnectionEpoch,
+        negotiation: com.code2hack.pokerdealer.protocol.PokerProtocolNegotiation,
+    ) {
         pokerComposerEpoch = epoch
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
@@ -1009,6 +1166,26 @@ class DealerConnectionService : Service() {
         pokerUserInputResults.clear()
         pokerMorseResults.clear()
         pokerApprovalBindings.clear()
+        val snapshot = pokerSnapshotSource.current()
+        mutableState.update {
+            it.copy(
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    pairing = pokerPairing.status.state,
+                    connection = PokerConnectionState.CONNECTED,
+                    connectionEpoch = epoch.value,
+                    capabilities = negotiation.capabilities,
+                    snapshotRevision = snapshot.revision,
+                    deltaRevision = null,
+                    bindingSync = it.pokerBindings.syncStatus,
+                    fontSync = PokerFontSyncStatus.PENDING,
+                    fontRevision = it.pokerFont.revision,
+                    acknowledgedFontRevision = null,
+                    unreadCount = null,
+                    wakeCapability = PokerWakeCapability.UNKNOWN,
+                    lastFailure = PokerDiagnosticFailure.NONE,
+                ),
+            )
+        }
         mutableState.value.threadAttachments.attached
             .toList()
             .forEach { locator -> sendPokerProjection(epoch, locator) }
@@ -1023,8 +1200,72 @@ class DealerConnectionService : Service() {
             .forEach { request -> sendPokerApprovalProjection(epoch, request.locator) }
     }
 
+    private fun handlePokerFontAcknowledgement(envelope: ProtocolEnvelope) {
+        val acknowledgement = runCatching {
+            PokerFontScaleProtocol.decodeAcknowledgement(envelope)
+        }.getOrNull() ?: return
+        val state = mutableState.value
+        val current = state.pokerFont
+        if (acknowledgement.state.revision < current.revision ||
+            acknowledgement.state.revision <
+            (state.pokerDiagnostics.acknowledgedFontRevision ?: Long.MIN_VALUE)
+        ) {
+            return
+        }
+        val synchronized = acknowledgement.state == current && acknowledgement.result in setOf(
+            PokerFontScaleInstallResult.INSTALLED,
+            PokerFontScaleInstallResult.DUPLICATE,
+        )
+        mutableState.update {
+            it.copy(
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    fontSync = if (synchronized) {
+                        PokerFontSyncStatus.SYNCHRONIZED
+                    } else {
+                        PokerFontSyncStatus.UNSYNCHRONIZED
+                    },
+                    acknowledgedFontRevision = acknowledgement.state.revision.takeIf { synchronized },
+                    lastFailure = if (synchronized) {
+                        PokerDiagnosticFailure.NONE
+                    } else {
+                        PokerDiagnosticFailure.FONT
+                    },
+                ),
+            )
+        }
+    }
+
+    private fun handlePokerClientDiagnostics(envelope: ProtocolEnvelope) {
+        val diagnostics = runCatching { PokerDiagnosticsProtocol.decode(envelope) }.getOrNull() ?: return
+        val state = mutableState.value
+        val current = state.pokerFont
+        val acknowledged = when {
+            diagnostics.font == current -> diagnostics.font.revision
+            diagnostics.font.revision <
+                (state.pokerDiagnostics.acknowledgedFontRevision ?: Long.MIN_VALUE) ->
+                state.pokerDiagnostics.acknowledgedFontRevision
+            else -> null
+        }
+        mutableState.update {
+            it.copy(
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    unreadCount = diagnostics.unreadCount,
+                    wakeCapability = diagnostics.wakeCapability,
+                    acknowledgedFontRevision = acknowledged,
+                    fontSync = when {
+                        diagnostics.font == current -> PokerFontSyncStatus.SYNCHRONIZED
+                        diagnostics.font.revision < current.revision -> PokerFontSyncStatus.PENDING
+                        else -> PokerFontSyncStatus.UNSYNCHRONIZED
+                    },
+                ),
+            )
+        }
+    }
+
     private suspend fun onPokerEnvelope(epoch: PokerConnectionEpoch, envelope: ProtocolEnvelope) {
         when (envelope.type) {
+            POKER_FONT_SCALE_ACK_TYPE -> handlePokerFontAcknowledgement(envelope)
+            POKER_DIAGNOSTICS_TYPE -> handlePokerClientDiagnostics(envelope)
             POKER_COMPOSER_MUTATION_TYPE -> {
                 val request = runCatching {
                     PokerProtocolJson.decodeFromJsonElement(
@@ -4212,7 +4453,9 @@ class DealerConnectionService : Service() {
 
     private fun recordThreadTransition(locator: CodexThreadLocator) {
         scope.launch {
-            pokerSnapshotHandler.publish(pokerSnapshotSource.current())
+            val snapshot = pokerSnapshotSource.current()
+            pokerSnapshotHandler.publish(snapshot)
+            recordPokerSnapshotRevision(snapshot)
         }
         val state = mutableState.value
         val thread = state.threads[locator] ?: return
@@ -4230,6 +4473,17 @@ class DealerConnectionService : Service() {
         }
         threadNotificationTargets[alert.key] = alert.target.thread
         postThreadNotification(alert)
+    }
+
+    private fun recordPokerSnapshotRevision(snapshot: com.code2hack.pokerdealer.protocol.PokerSnapshot) {
+        mutableState.update {
+            it.copy(
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    snapshotRevision = snapshot.revision,
+                    deltaRevision = snapshot.revision,
+                ),
+            )
+        }
     }
 
     private fun postThreadNotification(alert: ThreadTransitionNotification) {
@@ -4586,6 +4840,8 @@ data class DealerUiState(
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),
     val pokerBindings: PokerBindingState = PokerBindingState(),
     val pokerConnected: Boolean = false,
+    val pokerFont: PokerFontScaleState = PokerFontScaleState(),
+    val pokerDiagnostics: DealerPokerDiagnostics = DealerPokerDiagnostics(),
     val hostSessions: Map<String, HostSessionState> = emptyMap(),
     val threads: Map<CodexThreadLocator, DiscoveredThread> = emptyMap(),
     val refreshingThreadHosts: Set<String> = emptySet(),

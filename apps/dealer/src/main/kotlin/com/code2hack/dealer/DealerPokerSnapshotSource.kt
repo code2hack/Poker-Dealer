@@ -84,6 +84,7 @@ internal class DealerPokerSnapshotSource(
                 .filter { it.workState == null },
             hudVisible = false,
             focused = null,
+            fontScale = dealerState.pokerFont,
         )
         val content = PokerSnapshot(
             revision = 0L,

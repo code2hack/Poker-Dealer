@@ -15,6 +15,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -49,7 +50,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.dealer.asr.DealerAsrCatalogStore
@@ -92,6 +95,7 @@ import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
+import com.code2hack.pokerdealer.protocol.PokerFontScaleState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -114,9 +118,12 @@ class DealerActivity : ComponentActivity() {
     private lateinit var asrDownloadManager: DealerAsrDownloadManager
     private lateinit var asrRuntime: DealerAsrRuntime
     private lateinit var asrDownloadLifecycle: DealerAsrDownloadLifecycle
+    private lateinit var presentationSettings: DealerPresentationSettings
+    private val dealerFontScale = MutableStateFlow(PokerFontScaleState())
     private var serviceStateJob: Job? = null
     private var asrCatalogJob: Job? = null
     private var asrDownloadJob: Job? = null
+    private var presentationScaleJob: Job? = null
     private var pendingThreadNotificationKey: String? = null
     private var bound = false
 
@@ -148,6 +155,10 @@ class DealerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         openThreadNotification(intent)
+        presentationSettings = DealerPresentationSettings(this)
+        presentationScaleJob = lifecycleScope.launch {
+            presentationSettings.dealerFontScale.collect { dealerFontScale.value = it }
+        }
         asrCatalogStore = DealerAsrCatalogStore(this)
         asrDownloadLifecycle = DealerAsrDownloadLifecycle({ asrDownloadManager })
         asrRuntime = DealerAsrRuntime(this, asrDownloadLifecycle)
@@ -175,11 +186,22 @@ class DealerActivity : ComponentActivity() {
                     val setup by setupState.collectAsState()
                     val asrCatalog by asrCatalogState.collectAsState()
                     val asrDownloads by asrDownloadState.collectAsState()
-                    DealerApp(
+                    val dealerFontState by dealerFontScale.collectAsState()
+                    val density = LocalDensity.current
+                    CompositionLocalProvider(
+                        LocalDensity provides Density(
+                            density = density.density,
+                            fontScale = density.fontScale * dealerFontState.factor,
+                        ),
+                    ) {
+                        DealerApp(
                         state = state,
                         setup = setup,
                         asrCatalog = asrCatalog,
                         asrDownloads = asrDownloads,
+                        dealerFontScale = dealerFontState,
+                        onDealerFontScale = ::setDealerFontScale,
+                        onPokerFontScale = { service?.setPokerFontScale(it) },
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
@@ -274,6 +296,7 @@ class DealerActivity : ComponentActivity() {
                             }
                         },
                     )
+                    }
                 }
             }
         }
@@ -433,6 +456,14 @@ class DealerActivity : ComponentActivity() {
             if (it.openThreadNotification(key)) pendingThreadNotificationKey = null
         }
     }
+
+    private fun setDealerFontScale(percent: Int) {
+        val scale = runCatching { PokerFontScaleState(percent = percent) }.getOrNull() ?: return
+        dealerFontScale.value = scale
+        lifecycleScope.launch {
+            presentationSettings.saveDealerFontScale(scale.percent)
+        }
+    }
 }
 
 internal const val DEALER_RECOVERY_LOSS_BOUNDARY =
@@ -458,6 +489,9 @@ private fun DealerApp(
     setup: DealerSetupState,
     asrCatalog: DealerAsrCatalogUiState,
     asrDownloads: DealerAsrDownloadUiState,
+    dealerFontScale: PokerFontScaleState,
+    onDealerFontScale: (Int) -> Unit,
+    onPokerFontScale: (Int) -> Unit,
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
@@ -742,6 +776,13 @@ private fun DealerApp(
                 onResetGlassesDefaults = onResetPokerGlassesDefaults,
                 onClearRemote = onClearPokerRemote,
             )
+            DealerPresentationPanel(
+                dealerScale = dealerFontScale,
+                pokerScale = state.pokerFont,
+                onDealerScale = onDealerFontScale,
+                onPokerScale = onPokerFontScale,
+            )
+            PokerDiagnosticsPanel(state.pokerDiagnostics)
             if (hostSession?.enabled == true) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(

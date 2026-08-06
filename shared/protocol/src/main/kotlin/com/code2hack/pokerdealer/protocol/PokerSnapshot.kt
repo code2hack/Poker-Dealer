@@ -43,6 +43,7 @@ data class PokerSnapshotProjection(
     val unknownWorkState: List<PokerSnapshotPileMetadata> = emptyList(),
     val hudVisible: Boolean = false,
     val focused: CodexThreadLocator? = null,
+    val fontScale: PokerFontScaleState = PokerFontScaleState(),
 )
 
 @Serializable

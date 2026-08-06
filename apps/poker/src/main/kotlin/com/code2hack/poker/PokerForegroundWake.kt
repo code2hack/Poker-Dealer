@@ -6,15 +6,23 @@ import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import com.code2hack.pokerdealer.protocol.PokerWakeCapability
 
 internal object PokerForegroundWake {
+    fun capability(context: Context): PokerWakeCapability {
+        val keyguard = context.getSystemService(KeyguardManager::class.java)
+        if (keyguard?.isKeyguardLocked == true && keyguard.isKeyguardSecure) {
+            return PokerWakeCapability.KEYGUARD_BLOCKED
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
+            return PokerWakeCapability.OVERLAY_PERMISSION_REQUIRED
+        }
+        return PokerWakeCapability.AVAILABLE
+    }
+
     fun request(context: Context) {
         if (PokerBindingRuntime.isForeground) return
-        val keyguard = context.getSystemService(KeyguardManager::class.java)
-        if (keyguard?.isKeyguardLocked == true && keyguard.isKeyguardSecure) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(context)) {
-            return
-        }
+        if (capability(context) != PokerWakeCapability.AVAILABLE) return
 
         val wakeLock = context.getSystemService(PowerManager::class.java)
             ?.newWakeLock(

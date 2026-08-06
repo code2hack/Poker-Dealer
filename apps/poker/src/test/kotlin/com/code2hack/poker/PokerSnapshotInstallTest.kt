@@ -16,13 +16,14 @@ import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.PokerSnapshotProjection
+import com.code2hack.pokerdealer.protocol.PokerFontScaleState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PokerSnapshotInstallTest {
     @Test
-    fun `replacement preserves local presentation while Dealer metadata reorders piles`() {
+    fun `font scale and metadata replacement preserve local presentation`() {
         val focused = CodexThreadLocator("spark", "focused")
         val other = CodexThreadLocator("u4090", "other")
         val navigation = PokerNavigationReducer(viewportLineCount = 2)
@@ -55,6 +56,7 @@ class PokerSnapshotInstallTest {
                     "focused update\nwith more text\nline three\nline four\nline five\nline six\nline seven",
                     order = 1,
                 ),
+                fontScale = PokerFontScaleState(1, 150),
             ),
         )
 
@@ -100,9 +102,15 @@ class PokerSnapshotInstallTest {
 
     private fun oneCard(id: String) = PokerPileLayout(listOf(PokerCardLayout(id, 1)))
 
-    private fun snapshot(vararg piles: PokerSnapshotPile) = PokerSnapshot(
+    private fun snapshot(
+        vararg piles: PokerSnapshotPile,
+        fontScale: PokerFontScaleState = PokerFontScaleState(),
+    ) = PokerSnapshot(
         revision = 1,
-        projection = PokerSnapshotProjection(orderedPiles = piles.map(PokerSnapshotPile::metadata)),
+        projection = PokerSnapshotProjection(
+            orderedPiles = piles.map(PokerSnapshotPile::metadata),
+            fontScale = fontScale,
+        ),
         piles = piles.toList(),
     )
 
