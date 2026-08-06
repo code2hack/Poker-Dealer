@@ -105,6 +105,7 @@ internal fun PokerPilePages(
     onCardFinalLineVisible: (CodexThreadLocator, String) -> Unit = { _, _ -> },
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
     wheelState: PokerWheelState = PokerWheelState(),
+    notice: String? = null,
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
@@ -227,6 +228,15 @@ internal fun PokerPilePages(
                 }
             }
 
+            notice?.let {
+                Text(
+                    text = it,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 4.dp),
+                    color = Color(0xFFFFD18A),
+                )
+            }
             page.approvalProjections.forEach { projection ->
                 Column(
                     modifier = Modifier

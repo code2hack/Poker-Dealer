@@ -28,6 +28,8 @@ import com.code2hack.pokerdealer.domain.ComposerEditorState
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
+import com.code2hack.pokerdealer.domain.MorseMutationOutcome
+import com.code2hack.pokerdealer.domain.MorseMutationKind
 import com.code2hack.pokerdealer.domain.ControlSurface
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.DiscoveredThread
@@ -102,6 +104,7 @@ import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_APPROVAL_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_CAPABILITY
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_CAPABILITY
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PRIMARY_ACTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_PHOTO_CAPABILITY
@@ -145,6 +148,10 @@ import com.code2hack.pokerdealer.protocol.ProtocolEnvelope
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
+import com.code2hack.pokerdealer.protocol.MorseMutationRequest
+import com.code2hack.pokerdealer.protocol.MorseMutationResult
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
 import com.code2hack.pokerdealer.protocol.PokerProtocolOffer
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
@@ -226,6 +233,7 @@ class DealerConnectionService : Service() {
     private val photoTransfers = mutableMapOf<String, DealerPhotoTransfer>()
     private val photoResults = mutableMapOf<String, PhotoCaptureResult>()
     private val photoDeleteResults = mutableMapOf<String, PhotoDeleteResult>()
+    private val pokerMorseResults = mutableMapOf<String, MorseMutationResult>()
     private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
@@ -294,6 +302,7 @@ class DealerConnectionService : Service() {
                     POKER_LIVE_DELTA_CAPABILITY,
                     POKER_PRIMARY_ACTION_CAPABILITY,
                     POKER_PHOTO_CAPABILITY,
+                    POKER_MORSE_CAPABILITY,
                 ),
             ),
             scheduler = pokerScheduler,
@@ -1032,6 +1041,7 @@ class DealerConnectionService : Service() {
         pokerPrimaryResults.clear()
         pokerUserInputBindings.clear()
         pokerUserInputResults.clear()
+        pokerMorseResults.clear()
         pokerApprovalBindings.clear()
         mutableState.value.threadAttachments.attached
             .toList()
@@ -1066,6 +1076,15 @@ class DealerConnectionService : Service() {
                     )
                 }.getOrNull() ?: return
                 handlePokerUserInputMutation(epoch, envelope, request)
+            }
+            POKER_MORSE_MUTATION_TYPE -> {
+                val request = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        MorseMutationRequest.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerMorseMutation(epoch, envelope, request)
             }
             POKER_PRIMARY_ACTION_TYPE -> {
                 val target = runCatching {
@@ -1730,6 +1749,263 @@ class DealerConnectionService : Service() {
         ).jsonObject
         pokerConnectionOwner.send(
             type = POKER_USER_INPUT_MUTATION_RESULT_TYPE,
+            payload = payload,
+            replyTo = envelope.messageId,
+        )
+    }
+
+    private suspend fun handlePokerMorseMutation(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        request: MorseMutationRequest,
+    ) {
+        val target = request.target
+        val mode = target.mode
+        val state = mutableState.value
+        val currentDraft = state.threadActions.composerDraft(mode.locator)
+        val requestLocator = mode.requestLocator
+        val pendingRequest = requestLocator?.let { state.userInputRequests.requests[it] }
+        val currentBuffer = requestLocator?.let { state.userInputAnswers.buffer(it) }
+            ?: UserInputAnswerBuffer()
+        val question = pendingRequest?.questions?.firstOrNull { it.id == mode.questionId }
+        val currentField = question?.let {
+            ComposerDraft.fromText(currentBuffer.activeValue(it), currentBuffer.revision)
+        }
+
+        fun authoritativeCursor(): Int = when (mode.surface) {
+            ComposerSurface.THREAD_COMPOSER -> currentDraft.cursorCount - 1
+            ComposerSurface.REQUEST_PANEL -> currentField?.cursorCount?.minus(1) ?: 0
+        }
+
+        fun result(
+            outcome: MorseMutationOutcome,
+            draft: ComposerDraft = currentDraft,
+            buffer: UserInputAnswerBuffer = currentBuffer,
+            revision: Long = if (mode.surface == ComposerSurface.THREAD_COMPOSER) {
+                draft.revision
+            } else {
+                buffer.revision
+            },
+            cursor: Int = authoritativeCursor(),
+            reason: String? = null,
+        ) = MorseMutationResult(
+            target = target,
+            outcome = outcome,
+            composerDraft = draft.takeIf { mode.surface == ComposerSurface.THREAD_COMPOSER },
+            answerBuffer = buffer.takeIf { mode.surface == ComposerSurface.REQUEST_PANEL },
+            fieldRevision = revision,
+            cursorPosition = cursor,
+            reason = reason,
+        )
+
+        pokerMorseResults[target.operationId]?.let { cached ->
+            if (cached.target == target) {
+                sendPokerMorseMutationResult(envelope, cached)
+            } else {
+                sendPokerMorseMutationResult(
+                    envelope,
+                    result(
+                        MorseMutationOutcome.REJECTED,
+                        reason = "Morse operation ID was reused for another target",
+                    ),
+                )
+            }
+            return
+        }
+
+        val binding = when (mode.surface) {
+            ComposerSurface.THREAD_COMPOSER -> pokerComposerBindings[mode.locator]
+            ComposerSurface.REQUEST_PANEL -> requestLocator?.let(pokerUserInputBindings::get)
+        }
+        val rejection = when {
+            mode.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse connection epoch is stale")
+            mode.surface == ComposerSurface.THREAD_COMPOSER &&
+                (requestLocator != null || mode.questionId != null || mode.requestFingerprint != null) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse composer target is malformed")
+            mode.surface == ComposerSurface.REQUEST_PANEL &&
+                (requestLocator == null || mode.questionId.isNullOrBlank() ||
+                    mode.requestFingerprint.isNullOrBlank()) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse request target is malformed")
+            mode.locator !in state.threadAttachments.attached ||
+                !state.threadAttachments.hasDealerClaim(mode.locator) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Dealer control is unavailable")
+            mode.surface == ComposerSurface.THREAD_COMPOSER &&
+                (binding !is PokerComposerBinding || binding.epoch != epoch.value ||
+                    binding.controlGeneration != mode.controlGeneration ||
+                    binding.modeSession != mode.bindingModeSession) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse binding target is stale")
+            mode.surface == ComposerSurface.REQUEST_PANEL &&
+                (binding !is PokerUserInputBinding || binding.epoch != epoch.value ||
+                    binding.controlGeneration != mode.controlGeneration ||
+                    binding.modeSession != mode.bindingModeSession) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse binding target is stale")
+            mode.surface == ComposerSurface.THREAD_COMPOSER &&
+                (mode.revision != currentDraft.revision ||
+                    mode.cursorPosition !in 0 until currentDraft.cursorCount) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse composer revision is stale")
+            mode.surface == ComposerSurface.REQUEST_PANEL &&
+                (pendingRequest == null || pendingRequest.resolution != RequestResolutionState.PENDING) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse request is no longer editable")
+            mode.surface == ComposerSurface.REQUEST_PANEL &&
+                (pendingRequest?.thread != mode.locator ||
+                    pendingRequest?.fingerprint != mode.requestFingerprint ||
+                    question == null ||
+                    !(question.options == null ||
+                        (question.isOther && currentBuffer.answer(question.id).selectedOption == null)) ||
+                    currentBuffer.revision != mode.revision ||
+                    mode.cursorPosition !in 0 until (currentField?.cursorCount ?: 0)) ->
+                result(MorseMutationOutcome.REJECTED, reason = "Morse request target is stale")
+            else -> null
+        }
+        if (rejection != null) {
+            pokerMorseResults[target.operationId] = rejection
+            sendPokerMorseMutationResult(envelope, rejection)
+            if (mode.surface == ComposerSurface.THREAD_COMPOSER) {
+                sendPokerProjection(epoch, mode.locator)
+            } else {
+                requestLocator?.let { sendPokerUserInputProjection(epoch, it) }
+            }
+            return
+        }
+
+        val operation = try {
+            when (request.kind) {
+                MorseMutationKind.COMMIT_WORD -> {
+                    val text = request.text ?: error("Morse commit text is missing")
+                    require(text.endsWith(" ") && text.dropLast(1).isNotBlank()) {
+                        "Morse commit text is malformed"
+                    }
+                    val next = when (mode.surface) {
+                        ComposerSurface.THREAD_COMPOSER -> currentDraft
+                            .insertText(mode.cursorPosition, text)
+                            .withRevision(currentDraft.revision + 1)
+                        ComposerSurface.REQUEST_PANEL -> {
+                            val field = checkNotNull(currentField)
+                            val nextText = field.insertText(mode.cursorPosition, text).displayText
+                            checkNotNull(pendingRequest).let {
+                                currentBuffer.edit(
+                                    it,
+                                    checkNotNull(mode.questionId),
+                                    UserInputAnswerEdit.SetText(nextText),
+                                )
+                            }
+                        }
+                    }
+                    next
+                }
+                MorseMutationKind.DELETE_COMMITTED_WORD -> {
+                    val start = request.deleteStart ?: error("Morse deletion start is missing")
+                    val end = request.deleteEndExclusive ?: error("Morse deletion end is missing")
+                    val expected = request.expectedText ?: error("Morse deletion text is missing")
+                    require(end == mode.cursorPosition) { "Morse deletion must end at the Morse cursor" }
+                    when (mode.surface) {
+                        ComposerSurface.THREAD_COMPOSER -> {
+                            val units = currentDraft.visibleUnits()
+                            require(start in 0 until end && end <= units.size)
+                            require(units.subList(start, end).all { !it.isPhoto }) {
+                                "Morse deletion cannot cross a photo"
+                            }
+                            require(units.subList(start, end).joinToString("") { it.text.orEmpty() } == expected) {
+                                "Morse deletion text is stale"
+                            }
+                            currentDraft.replaceUnits(start, end)
+                                .withRevision(currentDraft.revision + 1)
+                        }
+                        ComposerSurface.REQUEST_PANEL -> {
+                            val field = checkNotNull(currentField)
+                            val units = field.visibleUnits()
+                            require(start in 0 until end && end <= units.size)
+                            require(units.subList(start, end).all { !it.isPhoto })
+                            require(units.subList(start, end).joinToString("") { it.text.orEmpty() } == expected) {
+                                "Morse deletion text is stale"
+                            }
+                            val nextText = field.replaceUnits(start, end).displayText
+                            checkNotNull(pendingRequest).let {
+                                currentBuffer.edit(
+                                    it,
+                                    checkNotNull(mode.questionId),
+                                    UserInputAnswerEdit.SetText(nextText),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (failure: Throwable) {
+            result(
+                MorseMutationOutcome.REJECTED,
+                reason = failure.message ?: "Morse mutation is stale",
+            ).also { response ->
+                pokerMorseResults[target.operationId] = response
+                sendPokerMorseMutationResult(envelope, response)
+            }
+            return
+        }
+
+        val response = when (mode.surface) {
+            ComposerSurface.THREAD_COMPOSER -> {
+                val nextDraft = operation as ComposerDraft
+                val persistenceFailure = runCatching {
+                    draftMutex.withLock { threadAttachmentStore.writeDraft(mode.locator, nextDraft) }
+                }.exceptionOrNull()
+                if (persistenceFailure != null) {
+                    result(
+                        MorseMutationOutcome.UNCERTAIN,
+                        reason = "Composer durability is uncertain: ${persistenceFailure.message}",
+                    )
+                } else {
+                    mutableState.update {
+                        it.copy(threadActions = it.threadActions.editComposerDraft(mode.locator, nextDraft))
+                    }
+                    result(
+                        MorseMutationOutcome.ACKNOWLEDGED,
+                        draft = nextDraft,
+                        revision = nextDraft.revision,
+                        cursor = mode.cursorPosition + (nextDraft.cursorCount - currentDraft.cursorCount),
+                    )
+                }
+            }
+            ComposerSurface.REQUEST_PANEL -> {
+                val nextBuffer = operation as UserInputAnswerBuffer
+                mutableState.update {
+                    it.copy(
+                        userInputAnswers = it.userInputAnswers.copy(
+                            buffers = it.userInputAnswers.buffers + (checkNotNull(requestLocator) to nextBuffer),
+                        ),
+                    )
+                }
+                result(
+                    MorseMutationOutcome.ACKNOWLEDGED,
+                    buffer = nextBuffer,
+                    revision = nextBuffer.revision,
+                    cursor = mode.cursorPosition +
+                        (ComposerDraft.fromText(nextBuffer.activeValue(checkNotNull(question))).cursorCount -
+                            currentField!!.cursorCount),
+                )
+            }
+        }
+        pokerMorseResults[target.operationId] = response
+        sendPokerMorseMutationResult(envelope, response)
+        if (response.outcome == MorseMutationOutcome.ACKNOWLEDGED) {
+            if (mode.surface == ComposerSurface.THREAD_COMPOSER) {
+                sendPokerProjection(epoch, mode.locator)
+            } else {
+                sendPokerUserInputProjection(epoch, checkNotNull(requestLocator))
+            }
+        }
+    }
+
+    private suspend fun sendPokerMorseMutationResult(
+        envelope: ProtocolEnvelope,
+        result: MorseMutationResult,
+    ) {
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            MorseMutationResult.serializer(),
+            result,
+        ).jsonObject
+        pokerConnectionOwner.send(
+            type = POKER_MORSE_MUTATION_RESULT_TYPE,
             payload = payload,
             replyTo = envelope.messageId,
         )
@@ -4416,6 +4692,7 @@ class DealerConnectionService : Service() {
         photoSessions.clear()
         photoResults.clear()
         photoDeleteResults.clear()
+        pokerMorseResults.clear()
         pokerApprovalBindings.clear()
         pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }

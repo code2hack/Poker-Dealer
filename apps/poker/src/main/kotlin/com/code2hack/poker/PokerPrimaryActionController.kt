@@ -105,21 +105,28 @@ internal class PokerPrimaryActionController(
                     ),
                 )
             }
-            val projection = userInput.focusedSubmission() ?: return null
+            val projection = userInput.focusedProjection() ?: return null
             if (projection.modeSession.isBlank()) return null
             if (!projection.hasDealerClaim) return null
             val requestLocator = projection.request.locator
-            if (userInput.isPrimaryLocked(requestLocator)) return null
+            val morseAvailable = userInput.morseTarget("wheel-preview") != null
+            val primary = projection.takeIf {
+                !userInput.isPrimaryLocked(requestLocator) &&
+                    projection.request.resolution == com.code2hack.pokerdealer.domain.RequestResolutionState.PENDING &&
+                    projection.buffer.isComplete(projection.request)
+            }?.let { PokerPrimaryAction.REQUEST }
             val targetId = listOf(
                 locator,
                 "request",
                 requestLocator,
                 projection.request.fingerprint,
+                anchor.cursorPosition,
                 projection.buffer.revision,
                 projection.controlGeneration,
                 projection.connectionEpoch,
                 projection.modeSession,
                 projection.hasDealerClaim,
+                morseAvailable,
             ).joinToString("|")
             return Candidate(
                 locator = locator,
@@ -129,18 +136,18 @@ internal class PokerPrimaryActionController(
                     controlGeneration = projection.controlGeneration,
                     connectionEpoch = projection.connectionEpoch,
                     modeSession = projection.modeSession,
-                    primaryAction = PokerPrimaryAction.REQUEST,
+                    primaryAction = primary,
+                    morseAvailable = morseAvailable,
                 ),
             )
         }
 
         if (anchor.mode != PokerNavigationMode.COMPOSER) return null
-        if (composer.isPrimaryLocked(locator)) return null
         val composerLayout = layout.composer ?: return null
         if (composerLayout.modeSession.isBlank()) return null
         if (!composerLayout.hasDealerClaim) return null
         val draft = composerLayout.draft ?: return null
-        if (pile.workState !in setOf(ThreadWorkState.READY, ThreadWorkState.BUSY)) return null
+        val morseAvailable = composer.morseTarget("wheel-preview") != null
         val primary = when (pile.workState) {
             ThreadWorkState.READY -> PokerPrimaryAction.SEND.takeIf { draft.isSubmittable }
             ThreadWorkState.BUSY -> when {
@@ -150,7 +157,9 @@ internal class PokerPrimaryActionController(
             }
             ThreadWorkState.ATTENTION_REQUIRED -> null
             null -> null
-        } ?: return null
+        }
+        if (primary == null && !morseAvailable) return null
+        if (composer.isPrimaryLocked(locator) && !morseAvailable) return null
         val targetId = listOf(
             locator,
             "composer",
@@ -162,6 +171,7 @@ internal class PokerPrimaryActionController(
             composerLayout.activeTurnId.orEmpty(),
             composerLayout.hasDealerClaim,
             primary,
+            morseAvailable,
         ).joinToString("|")
         return Candidate(
             locator = locator,
@@ -172,6 +182,7 @@ internal class PokerPrimaryActionController(
                 modeSession = composerLayout.modeSession,
                 photoAvailable = true,
                 primaryAction = primary,
+                morseAvailable = morseAvailable,
             ),
         )
     }

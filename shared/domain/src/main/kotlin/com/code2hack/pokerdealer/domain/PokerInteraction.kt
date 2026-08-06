@@ -734,6 +734,7 @@ class PokerInputController(
     private val interactions: PokerInteractionReducer = PokerInteractionReducer(),
     private val wheelContext: () -> PokerWheelContext = { PokerWheelContext() },
     private val longPressTimeoutMs: Long = PokerActionWheel.DEFAULT_LONG_PRESS_TIMEOUT_MS,
+    private val morse: MorseInputController? = null,
 ) {
     data class Result(
         val interaction: PokerInteraction,
@@ -741,13 +742,24 @@ class PokerInputController(
         val composerDeletion: ComposerDeletionRequest? = null,
         val wheelState: PokerWheelState = PokerWheelState(),
         val wheelSelection: PokerWheelSelection? = null,
+        val morseEvent: MorseInputEvent? = null,
     )
 
     private val wheel = PokerActionWheel(longPressTimeoutMs = longPressTimeoutMs)
     private var lastPosture: PokerPostureSample? = null
 
+    val morseActive: Boolean
+        get() = morse?.isActive == true
+
     fun reduce(interaction: PokerInteraction): Result? {
         val accepted = interactions.reduce(interaction) ?: return null
+        if (morse?.isActive == true) {
+            return Result(
+                interaction = accepted,
+                navigationEffect = PokerNavigationEffect.NONE,
+                morseEvent = morse.reduce(accepted),
+            )
+        }
         val context = wheelContext()
         var wheelState = PokerWheelState()
         val selection = when {
@@ -798,6 +810,19 @@ class PokerInputController(
 
     fun cancel(reason: PokerCancellationReason, eventTimeMs: Long? = null): Result? =
         interactions.cancelActive(reason, eventTimeMs)?.let {
+            if (morse?.isActive == true) {
+                return@let Result(
+                    interaction = it,
+                    navigationEffect = PokerNavigationEffect.NONE,
+                    morseEvent = if (reason == PokerCancellationReason.FOCUS_LOST ||
+                        reason == PokerCancellationReason.DISCONNECTED
+                    ) {
+                        morse.abort()
+                    } else {
+                        morse.reduce(it)
+                    },
+                )
+            }
             val wheelState = if (it.operation == PokerOperation.FN) {
                 wheel.cancel()
             } else {

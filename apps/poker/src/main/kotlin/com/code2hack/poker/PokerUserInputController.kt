@@ -8,6 +8,10 @@ import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
 import com.code2hack.pokerdealer.domain.PokerPrimaryAction
+import com.code2hack.pokerdealer.domain.ComposerDraft
+import com.code2hack.pokerdealer.domain.ComposerSurface
+import com.code2hack.pokerdealer.domain.MorseModeTarget
+import com.code2hack.pokerdealer.domain.MorseMutationTarget
 import com.code2hack.pokerdealer.domain.toPokerRequestPanelLayout
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationKind
 import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
@@ -83,6 +87,10 @@ internal class PokerUserInputController(
     }
 
     fun focusedSubmission(): UserInputRequestProjection? {
+        return focusedProjection()?.takeIf { it.buffer.isComplete(it.request) }
+    }
+
+    fun focusedProjection(): UserInputRequestProjection? {
         val thread = navigation.metadata().focused ?: return null
         val anchor = navigation.anchor(thread)
             ?.takeIf { it.mode == PokerNavigationMode.REQUEST_PANEL }
@@ -96,8 +104,7 @@ internal class PokerUserInputController(
                 it.request.thread == thread &&
                 it.request.panelId == panel.id &&
                 it.hasDealerClaim &&
-                it.request.resolution == RequestResolutionState.PENDING &&
-                it.buffer.isComplete(it.request)
+                it.request.resolution == RequestResolutionState.PENDING
         }
     }
 
@@ -210,6 +217,67 @@ internal class PokerUserInputController(
     }
 
     fun projection(locator: ServerRequestLocator): UserInputRequestProjection? = projections[locator]
+
+    fun morseTarget(freshModeSession: String): MorseModeTarget? {
+        val thread = navigation.metadata().focused ?: return null
+        val anchor = navigation.anchor(thread)
+            ?.takeIf { it.mode == PokerNavigationMode.REQUEST_PANEL }
+            ?: return null
+        val panel = navigation.layout(thread)?.cards
+            ?.firstOrNull { it.id == anchor.cardId }
+            ?.requestPanel
+            ?.takeIf { it.id == anchor.inputId }
+            ?: return null
+        val projection = projections.values.firstOrNull {
+            it.request.thread == thread &&
+                it.request.panelId == panel.id &&
+                it.request.resolution == RequestResolutionState.PENDING
+        } ?: return null
+        if (freshModeSession.isBlank() || projection.modeSession.isBlank() ||
+            !projection.hasDealerClaim || pending[projection.request.locator] != null ||
+            pendingPrimary[projection.request.locator] != null
+        ) return null
+        val control = panel.controlAt(anchor.cursorPosition) ?: return null
+        val question = projection.request.questions.firstOrNull { it.id == control.questionId } ?: return null
+        val answer = projection.buffer.answer(question.id)
+        val editable = question.options == null || (question.isOther && answer.selectedOption == null)
+        if (!editable) return null
+        val cursorPosition = ComposerDraft.fromText(projection.buffer.activeValue(question)).cursorCount - 1
+        return MorseModeTarget(
+            locator = thread,
+            surface = ComposerSurface.REQUEST_PANEL,
+            requestLocator = projection.request.locator,
+            questionId = question.id,
+            requestFingerprint = projection.request.fingerprint,
+            revision = projection.buffer.revision,
+            cursorPosition = cursorPosition,
+            controlGeneration = projection.controlGeneration,
+            connectionEpoch = projection.connectionEpoch,
+            bindingModeSession = projection.modeSession,
+            modeSession = freshModeSession,
+        )
+    }
+
+    fun installMorseBuffer(
+        target: MorseMutationTarget,
+        buffer: com.code2hack.pokerdealer.domain.UserInputAnswerBuffer,
+    ): Boolean {
+        val mode = target.mode
+        if (mode.surface != ComposerSurface.REQUEST_PANEL) return false
+        val locator = mode.requestLocator ?: return false
+        val projection = projections[locator] ?: return false
+        if (projection.request.thread != mode.locator ||
+            projection.request.fingerprint != mode.requestFingerprint ||
+            projection.request.resolution != RequestResolutionState.PENDING ||
+            projection.buffer.revision != mode.revision ||
+            projection.controlGeneration != mode.controlGeneration ||
+            projection.connectionEpoch != mode.connectionEpoch ||
+            projection.modeSession != mode.bindingModeSession
+        ) return false
+        projections[locator] = projection.copy(buffer = buffer)
+        updateLayout(projections.getValue(locator))
+        return true
+    }
 
     private fun updateLayout(projection: UserInputRequestProjection) {
         val locator = projection.request.thread
