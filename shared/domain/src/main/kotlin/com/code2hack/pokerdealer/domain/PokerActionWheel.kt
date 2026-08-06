@@ -92,6 +92,7 @@ class PokerActionWheel(
         val baseline: PokerPostureSample,
         var lastPosture: PokerPostureSample,
         var context: PokerWheelContext,
+        val initialPrimaryAction: PokerPrimaryAction?,
         var opened: Boolean = false,
         var candidate: PokerWheelPosture = PokerWheelPosture.NONE,
         var candidateSinceMs: Long = 0L,
@@ -121,6 +122,7 @@ class PokerActionWheel(
             baseline = baseline,
             lastPosture = baseline,
             context = context,
+            initialPrimaryAction = context.primaryAction,
             candidateSinceMs = atMs,
         )
         active = current
@@ -132,7 +134,10 @@ class PokerActionWheel(
         context: PokerWheelContext = active?.context ?: PokerWheelContext(),
     ): PokerWheelState {
         val current = active ?: return PokerWheelState()
-        if (!sameTarget(current.context, context) || sample.eventTimeMs < current.lastPosture.eventTimeMs) {
+        if (!sameTarget(current.context, context) ||
+            current.initialPrimaryAction != context.primaryAction ||
+            sample.eventTimeMs < current.lastPosture.eventTimeMs
+        ) {
             return cancelState()
         }
         current.context = context
@@ -181,7 +186,8 @@ class PokerActionWheel(
             atMs < current.lastPosture.eventTimeMs ||
             atMs - current.lastPosture.eventTimeMs > stalePostureMs ||
             !current.opened ||
-            !current.stable
+            !current.stable ||
+            context.primaryAction != current.initialPrimaryAction
         ) {
             return null
         }
@@ -230,8 +236,6 @@ class PokerActionWheel(
     private fun classify(pitch: Float, roll: Float, previous: PokerWheelPosture): PokerWheelPosture {
         val pitchAbs = abs(pitch)
         val rollAbs = abs(roll)
-        if (maxOf(pitchAbs, rollAbs) <= centralDeadzoneDegrees) return PokerWheelPosture.NONE
-
         val previousAxis = when (previous) {
             PokerWheelPosture.UP, PokerWheelPosture.DOWN -> pitchAbs
             PokerWheelPosture.LEFT, PokerWheelPosture.RIGHT -> rollAbs
@@ -249,6 +253,7 @@ class PokerActionWheel(
         ) {
             return previous
         }
+        if (maxOf(pitchAbs, rollAbs) <= centralDeadzoneDegrees) return PokerWheelPosture.NONE
         if (abs(pitchAbs - rollAbs) <= diagonalRejectionDegrees) {
             return PokerWheelPosture.NONE
         }

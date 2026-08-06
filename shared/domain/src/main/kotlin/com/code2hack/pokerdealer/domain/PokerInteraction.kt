@@ -738,6 +738,7 @@ class PokerInputController(
     fun reduce(interaction: PokerInteraction): Result? {
         val accepted = interactions.reduce(interaction) ?: return null
         val context = wheelContext()
+        var wheelState = PokerWheelState()
         val selection = when {
             accepted.phase == PokerInteractionPhase.BEGIN &&
                 accepted.operation == PokerOperation.FN &&
@@ -755,13 +756,15 @@ class PokerInputController(
             else -> null
         }
         if (accepted.phase == PokerInteractionPhase.CANCEL && accepted.operation == PokerOperation.FN) {
-            wheel.cancel()
+            wheelState = wheel.cancel()
         } else if (
             accepted.phase == PokerInteractionPhase.RELEASE &&
             accepted.operation == PokerOperation.FN &&
             accepted.durationMs < longPressTimeoutMs
         ) {
-            wheel.cancel()
+            wheelState = wheel.cancel()
+        } else {
+            wheelState = wheel.state()
         }
         val deletion = if (
             accepted.phase == PokerInteractionPhase.RELEASE &&
@@ -779,7 +782,7 @@ class PokerInputController(
         } else {
             PokerNavigationEffect.NONE
         }
-        return Result(accepted, effect, deletion, wheel.state(), selection)
+        return Result(accepted, effect, deletion, wheelState, selection)
     }
 
     fun cancel(reason: PokerCancellationReason, eventTimeMs: Long? = null): Result? =
