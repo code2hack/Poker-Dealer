@@ -539,7 +539,7 @@ private class FilePackSource(private val installedPacksRoot: File) : PackSource 
 
 private data class PackArtifact(val path: String, val sha256: String)
 
-private fun DealerAsrDownloadJob.runtimeManifest(): DealerAsrPackManifest? {
+internal fun DealerAsrDownloadJob.runtimeManifest(): DealerAsrPackManifest? {
     if (artifacts.isEmpty()) return null
     if (adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
         return DealerAsrPackManifest(
@@ -599,10 +599,11 @@ private class PackRejected(val reason: String) : Exception()
 
 class DealerAsrSession internal constructor(
     private val recognizer: OnlineRecognizer,
-    private val stream: OnlineStream,
+    stream: OnlineStream,
     internal val profile: DealerAsrProfile? = null,
     private val onClosed: () -> Unit = {},
 ) : Closeable {
+    private var stream = stream
     private var closed = false
     private var finished = false
 
@@ -636,6 +637,17 @@ class DealerAsrSession internal constructor(
         return provisionalText()
     }
 
+    internal fun commitSlice(): String {
+        val text = finish()
+        resetStream()
+        return text
+    }
+
+    internal fun discardSlice() {
+        check(!closed) { "ASR session is closed" }
+        resetStream()
+    }
+
     override fun close() {
         if (closed) return
         closed = true
@@ -652,5 +664,11 @@ class DealerAsrSession internal constructor(
 
     private fun decodeAvailable() {
         while (recognizer.isReady(stream)) recognizer.decode(stream)
+    }
+
+    private fun resetStream() {
+        stream.release()
+        stream = recognizer.createStream()
+        finished = false
     }
 }

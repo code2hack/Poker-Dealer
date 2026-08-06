@@ -500,21 +500,28 @@ internal class DealerAsrDownloadManager(
 
     suspend fun cancel(key: DealerAsrPackKey) {
         start()
-        withContext(Dispatchers.IO) {
+        val cancellation = withContext(Dispatchers.IO) {
             lock.withLock {
-                val job = jobs[key] ?: return@withLock
+                val job = jobs[key] ?: return@withLock false to null
                 if (job.state in setOf(
                         DealerAsrDownloadState.READY,
                         DealerAsrDownloadState.REPAIR_NEEDED,
                     )
-                ) return@withLock
+                ) return@withLock false to null
                 jobs.remove(key)
-                deletePartialRoot(key)
                 persistLocked()
                 publishLocked()
+                true to activeTransfer.get()?.takeIf { it.key == key }
             }
         }
-        interruptActive(key, CancellationException("download-cancelled"))
+        if (!cancellation.first) return
+        cancellation.second?.let { active ->
+            interruptActive(key, CancellationException("download-cancelled"))
+            active.job.join()
+        }
+        withContext(Dispatchers.IO) {
+            lock.withLock { deletePartialRoot(key) }
+        }
     }
 
     suspend fun setDefault(key: DealerAsrPackKey) {

@@ -733,6 +733,7 @@ class PokerInputController(
     private val navigation: PokerNavigationReducer,
     private val interactions: PokerInteractionReducer = PokerInteractionReducer(),
     private val wheelContext: () -> PokerWheelContext = { PokerWheelContext() },
+    private val asrActive: () -> Boolean = { false },
     private val longPressTimeoutMs: Long = PokerActionWheel.DEFAULT_LONG_PRESS_TIMEOUT_MS,
     private val morse: MorseInputController? = null,
 ) {
@@ -760,6 +761,7 @@ class PokerInputController(
                 morseEvent = morse.reduce(accepted),
             )
         }
+        if (asrActive()) return Result(accepted, PokerNavigationEffect.NONE)
         val context = wheelContext()
         var wheelState = PokerWheelState()
         val selection = when {

@@ -21,6 +21,8 @@ import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
+import com.code2hack.pokerdealer.protocol.PokerAsrTarget
+import com.code2hack.pokerdealer.protocol.PokerAsrTargetField
 import java.util.UUID
 
 /** Keeps request-panel focus local while Dealer remains authoritative for answer content. */
@@ -277,6 +279,41 @@ internal class PokerUserInputController(
         projections[locator] = projection.copy(buffer = buffer)
         updateLayout(projections.getValue(locator))
         return true
+    }
+
+    fun focusedAsrTarget(): PokerAsrTarget? {
+        val thread = navigation.metadata().focused ?: return null
+        val anchor = navigation.anchor(thread)
+            ?.takeIf { it.mode == PokerNavigationMode.REQUEST_PANEL }
+            ?: return null
+        val layout = navigation.layout(thread) ?: return null
+        val panel = layout.cards.firstOrNull { it.id == anchor.cardId }
+            ?.requestPanel
+            ?.takeIf { it.id == anchor.inputId } ?: return null
+        val control = panel.controlAt(anchor.cursorPosition)
+        val projection = projections.values.firstOrNull {
+            it.request.thread == thread &&
+                it.request.resolution == RequestResolutionState.PENDING &&
+                it.request.panelId == panel.id
+        } ?: return null
+        val question = projection.request.questions.firstOrNull { it.id == control?.questionId }
+            ?: return null
+        val answer = projection.buffer.answer(question.id)
+        val textField = question.options == null || (question.isOther && answer.selectedOption == null)
+        if (!projection.hasDealerClaim || !textField || control == null) return null
+        return PokerAsrTarget(
+            locator = thread,
+            field = PokerAsrTargetField.REQUEST_TEXT,
+            requestLocator = projection.request.locator,
+            questionId = question.id,
+            targetRevision = projection.buffer.revision,
+            cursorPosition = com.code2hack.pokerdealer.domain.ComposerDraft.fromText(
+                projection.buffer.activeValue(question),
+            ).cursorCount - 1,
+            controlGeneration = projection.controlGeneration,
+            connectionEpoch = projection.connectionEpoch,
+            modeSession = projection.modeSession,
+        )
     }
 
     private fun updateLayout(projection: UserInputRequestProjection) {

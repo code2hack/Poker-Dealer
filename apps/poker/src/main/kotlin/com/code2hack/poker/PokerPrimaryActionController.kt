@@ -18,6 +18,7 @@ internal class PokerPrimaryActionController(
     private val userInput: PokerUserInputController,
     private val approvals: PokerApprovalController,
     private val sendAction: suspend (PokerPrimaryActionTarget) -> Boolean,
+    private val asrAvailable: () -> Boolean = { false },
 ) {
     private var consumedWheelSession: String? = null
     private data class Candidate(
@@ -27,7 +28,8 @@ internal class PokerPrimaryActionController(
         val approval: PokerApprovalSubmission? = null,
     )
 
-    fun wheelContext(): PokerWheelContext = candidate()?.context ?: PokerWheelContext()
+    fun wheelContext(): PokerWheelContext = candidate()?.context?.copy(asrAvailable = asrAvailable())
+        ?: PokerWheelContext(asrAvailable = asrAvailable())
 
     suspend fun submit(selection: PokerWheelSelection): Boolean {
         if (selection.action != com.code2hack.pokerdealer.domain.PokerWheelAction.PRIMARY) return false

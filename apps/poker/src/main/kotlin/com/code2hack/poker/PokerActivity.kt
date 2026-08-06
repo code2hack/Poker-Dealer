@@ -3,6 +3,7 @@ package com.code2hack.poker
 import android.Manifest
 import android.annotation.SuppressLint
 import android.graphics.BitmapFactory
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -73,6 +74,8 @@ class PokerActivity : ComponentActivity() {
     private lateinit var photoController: PokerPhotoController
     private lateinit var camera: PokerCamera2Controller
     private lateinit var approvalController: PokerApprovalController
+    private lateinit var asrController: PokerAsrController
+    private lateinit var asrCapture: PokerAsrCapture
     private var postureSensorManager: SensorManager? = null
     private var postureSensor: Sensor? = null
     private val postureRotation = FloatArray(9)
@@ -100,6 +103,7 @@ class PokerActivity : ComponentActivity() {
     private var metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap()
     private var requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>> = emptyMap()
     private var foreground = false
+    private var asrNoticeVisible = false
     private val inputDeviceDescriptors = mutableMapOf<Int, String>()
     private val inputDeviceListener = object : InputManager.InputDeviceListener {
         override fun onInputDeviceAdded(deviceId: Int) = rememberInputDevice(deviceId)
@@ -117,6 +121,15 @@ class PokerActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) camera.open() else photoController.onPermissionDenied()
+    }
+    private val audioPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted && asrController.isActive()) {
+            asrCapture.start()
+        } else {
+            lifecycleScope.launch { asrController.cancel() }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -151,6 +164,28 @@ class PokerActivity : ComponentActivity() {
             userInput = userInputController,
             approvals = approvalController,
             sendAction = PokerComposerBridge::sendPrimaryAction,
+            asrAvailable = { PokerAsrBridge.availability.value.available },
+        )
+        asrController = PokerAsrController(
+            navigation = navigation,
+            userInput = userInputController,
+            onCaptureRequired = ::requestAsrCapture,
+            onCaptureStop = { asrCapture.stop() },
+            onExitNotice = {
+                asrNoticeVisible = true
+                screenState.value = currentScreenState(screenState.value.wheelState)
+                lifecycleScope.launch {
+                    delay(500)
+                    asrNoticeVisible = false
+                    screenState.value = currentScreenState(screenState.value.wheelState)
+                }
+            },
+        )
+        asrCapture = PokerAsrCapture(
+            context = this,
+            scope = lifecycleScope,
+            send = asrController::sendAudio,
+            onFailure = { lifecycleScope.launch { asrController.cancel() } },
         )
         camera = PokerCamera2Controller(
             activity = this,
@@ -273,10 +308,47 @@ class PokerActivity : ComponentActivity() {
                 screenState.value = currentScreenState(screenState.value.wheelState)
             }
         }
+        lifecycleScope.launch {
+            PokerAsrBridge.startResults.collect { results ->
+                results.values.forEach(asrController::onStartResult)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerAsrBridge.projection.collect { projection ->
+                asrController.onProjection(projection)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerAsrBridge.commitResults.collect { results ->
+                results.values.forEach(asrController::onCommitResult)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerAsrBridge.discardResults.collect { results ->
+                results.values.forEach(asrController::onDiscardResult)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerAsrBridge.exitResults.collect { results ->
+                results.values.forEach(asrController::onExitResult)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerAsrBridge.connectionLosses.collect {
+                if (::asrController.isInitialized) asrController.onConnectionLost()
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
         val bindings = PokerBindingRuntime.controller
         val controller = PokerInputController(
             navigation = navigation,
             wheelContext = primaryActionController::wheelContext,
+            asrActive = asrController::isInputCaptured,
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             morse = morseController.input,
         )
@@ -287,6 +359,8 @@ class PokerActivity : ComponentActivity() {
                         morseController.begin(selection, SystemClock.uptimeMillis())
                     com.code2hack.pokerdealer.domain.PokerWheelAction.PHOTO ->
                         photoController.start(selection)
+                    com.code2hack.pokerdealer.domain.PokerWheelAction.ASR ->
+                        asrController.start()
                     else -> primaryActionController.submit(selection)
                 }
                 screenState.value = currentScreenState(screenState.value.wheelState)
@@ -309,6 +383,7 @@ class PokerActivity : ComponentActivity() {
                     result.wheelSelection?.let { selection ->
                         handleWheelSelection(selection)
                     }
+                    lifecycleScope.launch { asrController.handleInteraction(result.interaction) }
                     if (
                         result.morseEvent == null &&
                         result.interaction.phase == com.code2hack.pokerdealer.domain.PokerInteractionPhase.RELEASE &&
@@ -347,6 +422,7 @@ class PokerActivity : ComponentActivity() {
                     }
                     morseController.handle(result.morseEvent)
                     screenState.value = currentScreenState(result.wheelState)
+                    lifecycleScope.launch { asrController.handleInteraction(result.interaction) }
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
@@ -429,6 +505,8 @@ class PokerActivity : ComponentActivity() {
             if (::photoController.isInitialized) photoController.onPresentationLost()
             if (::input.isInitialized) input.onFocusLost()
             if (::morseController.isInitialized) morseController.abort()
+            if (::asrCapture.isInitialized) asrCapture.stop()
+            if (::asrController.isInitialized) lifecycleScope.launch { asrController.cancel() }
         }
     }
 
@@ -439,6 +517,8 @@ class PokerActivity : ComponentActivity() {
         postureSensorManager = null
         postureSensor = null
         inputDeviceDescriptors.clear()
+        if (::asrCapture.isInitialized) asrCapture.stop()
+        if (::asrController.isInitialized) asrController.onConnectionLost()
         PokerBindingRuntime.detachActivity()
         PokerBindingRuntime.setForeground(false)
         if (::input.isInitialized) input.onDisconnected()
@@ -469,9 +549,19 @@ class PokerActivity : ComponentActivity() {
         requestCardsByLocator = requestCardsByLocator,
         unreadCount = PokerSnapshotRuntime.unreadCount.value,
         wheelState = wheelState,
+        asrProjection = PokerAsrBridge.projection.value,
+        asrNoticeVisible = asrNoticeVisible,
         morseWord = morseController.input.state().word.takeIf { morseController.input.isActive },
         morseSuffix = morseController.input.state().completion?.suffix,
     )
+
+    private fun requestAsrCapture() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            asrCapture.start()
+        } else {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
 }
 
@@ -559,6 +649,8 @@ private fun PokerCardReader(
                 cardsByLocator = state.cardsByLocator,
                 metadataByLocator = state.metadataByLocator,
                 unreadCount = state.unreadCount,
+                asrProjection = state.asrProjection,
+                asrNoticeVisible = state.asrNoticeVisible,
                 onCardFinalLineVisible = { locator, cardId ->
                     PokerSnapshotRuntime.markCardRead(
                         locator,
@@ -657,6 +749,8 @@ private data class PokerScreenState(
     val requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>>,
     val unreadCount: Int,
     val approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>>,
+    val asrProjection: com.code2hack.pokerdealer.protocol.PokerAsrProjection? = null,
+    val asrNoticeVisible: Boolean = false,
     val wheelState: PokerWheelState = PokerWheelState(),
 )
 
@@ -669,6 +763,8 @@ private fun PokerNavigationReducer.snapshot(
     unreadCount: Int = PokerSnapshotRuntime.unreadCount.value,
     wheelState: PokerWheelState = PokerWheelState(),
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>> = currentApprovalProjections(),
+    asrProjection: com.code2hack.pokerdealer.protocol.PokerAsrProjection? = null,
+    asrNoticeVisible: Boolean = false,
     morseWord: String? = null,
     morseSuffix: String? = null,
 ): PokerScreenState {
@@ -686,6 +782,8 @@ private fun PokerNavigationReducer.snapshot(
         requestCardsByLocator = requestCardsByLocator,
         unreadCount = unreadCount,
         approvalProjectionsByLocator = approvalProjectionsByLocator,
+        asrProjection = asrProjection,
+        asrNoticeVisible = asrNoticeVisible,
         wheelState = wheelState,
         morseWord = morseWord,
         morseSuffix = morseSuffix,
