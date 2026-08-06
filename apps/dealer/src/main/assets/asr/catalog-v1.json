@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "backend": "cpu",
+    "engine": "onnxruntime",
+    "adapters": ["PARAKEET_UNIFIED_STREAMING", "MOONSHINE_V2_OFFLINE"]
+  },
+  "entries": [
+    {
+      "id": "parakeet-unified-en-0.6b-int8-streaming-560ms",
+      "revision": "7551fd26fc810cc1e4e043e608db4d13b59be31e",
+      "displayName": "Parakeet Unified INT8 · 560 ms",
+      "family": "Parakeet Unified",
+      "adapter": "PARAKEET_UNIFIED_STREAMING",
+      "source": {
+        "repository": "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-560ms",
+        "revision": "7551fd26fc810cc1e4e043e608db4d13b59be31e"
+      },
+      "artifacts": [
+        {
+          "path": "encoder.int8.onnx",
+          "bytes": 654046389,
+          "sha256": "e566c3f014598a41724f2df028779a2d4cf7943cbefa324964f6a72e8ee255fb"
+        },
+        {
+          "path": "decoder.int8.onnx",
+          "bytes": 7257777,
+          "sha256": "34fea72425d2506600772ba191a6d3f99c0710abdb68d9a3dc89fa8cb2aa473a"
+        },
+        {
+          "path": "joiner.int8.onnx",
+          "bytes": 1735860,
+          "sha256": "869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a"
+        },
+        {
+          "path": "tokens.txt",
+          "bytes": 8952,
+          "sha256": "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"
+        }
+      ],
+      "downloadBytes": 663048978,
+      "temporaryBytes": 663048978,
+      "installedBytes": 663048978,
+      "languages": ["en"],
+      "licenses": ["NVIDIA Open Model License"],
+      "backend": "cpu",
+      "mode": "STREAMING",
+      "defaultProfile": {
+        "packId": "parakeet-unified-en-0.6b-int8-streaming-560ms",
+        "revision": "7551fd26fc810cc1e4e043e608db4d13b59be31e",
+        "schemaVersion": 1,
+        "settings": {"warmRetentionSeconds": 300}
+      },
+      "profileSchema": {
+        "packId": "parakeet-unified-en-0.6b-int8-streaming-560ms",
+        "revision": "7551fd26fc810cc1e4e043e608db4d13b59be31e",
+        "schemaVersion": 1,
+        "fields": [
+          {
+            "name": "warmRetentionSeconds",
+            "type": "integer",
+            "default": 300,
+            "minimum": 0,
+            "maximum": 3600
+          }
+        ]
+      }
+    },
+    {
+      "id": "moonshine-v2-tiny-en-quantized",
+      "revision": "d1e6c30921780b8508d04b492dfb3ce8a51605d4",
+      "displayName": "Moonshine v2 Tiny · quantized",
+      "family": "Moonshine v2",
+      "adapter": "MOONSHINE_V2_OFFLINE",
+      "source": {
+        "repository": "csukuangfj2/sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27",
+        "revision": "d1e6c30921780b8508d04b492dfb3ce8a51605d4"
+      },
+      "artifacts": [
+        {
+          "path": "encoder_model.ort",
+          "bytes": 13281600,
+          "sha256": "94e90a4654fc45cdfedb77c4c08e1739f48862998e58fada384b25118134f221"
+        },
+        {
+          "path": "decoder_model_merged.ort",
+          "bytes": 30412256,
+          "sha256": "cf524c4862d36e9e5ab032eddc73637efd822d70e868ac575cf1a46e1e4708a0"
+        },
+        {
+          "path": "tokens.txt",
+          "bytes": 549350,
+          "sha256": "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"
+        },
+        {
+          "path": "LICENSE",
+          "bytes": 13344,
+          "sha256": "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"
+        }
+      ],
+      "downloadBytes": 44256550,
+      "temporaryBytes": 44256550,
+      "installedBytes": 44256550,
+      "languages": ["en"],
+      "licenses": ["MIT", "Moonshine Community License"],
+      "backend": "cpu",
+      "mode": "OFFLINE",
+      "defaultProfile": {
+        "packId": "moonshine-v2-tiny-en-quantized",
+        "revision": "d1e6c30921780b8508d04b492dfb3ce8a51605d4",
+        "schemaVersion": 1,
+        "settings": {"warmRetentionSeconds": 300}
+      },
+      "profileSchema": {
+        "packId": "moonshine-v2-tiny-en-quantized",
+        "revision": "d1e6c30921780b8508d04b492dfb3ce8a51605d4",
+        "schemaVersion": 1,
+        "fields": [
+          {
+            "name": "warmRetentionSeconds",
+            "type": "integer",
+            "default": 300,
+            "minimum": 0,
+            "maximum": 3600
+          }
+        ]
+      }
+    }
+  ]
+}
