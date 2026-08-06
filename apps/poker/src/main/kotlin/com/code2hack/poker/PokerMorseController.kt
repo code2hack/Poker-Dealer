@@ -2,6 +2,7 @@ package com.code2hack.poker
 
 import com.code2hack.pokerdealer.domain.MorseInputController
 import com.code2hack.pokerdealer.domain.MorseInputEvent
+import com.code2hack.pokerdealer.domain.MorseCompletionEngine
 import com.code2hack.pokerdealer.domain.MorseMutationOutcome
 import com.code2hack.pokerdealer.domain.PokerNavigationReducer
 import com.code2hack.pokerdealer.domain.PokerWheelContext
@@ -9,6 +10,8 @@ import com.code2hack.pokerdealer.domain.PokerWheelAction
 import com.code2hack.pokerdealer.domain.PokerWheelSelection
 import com.code2hack.pokerdealer.protocol.MorseMutationRequest
 import com.code2hack.pokerdealer.protocol.MorseMutationResult
+import com.code2hack.pokerdealer.protocol.MorseCompletionRequest
+import com.code2hack.pokerdealer.protocol.MorseCompletionProjection
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -22,6 +25,7 @@ internal class PokerMorseController(
     private val wheelContext: () -> PokerWheelContext,
     private val scope: CoroutineScope,
     private val sendMutation: suspend (MorseMutationRequest) -> Boolean,
+    private val sendCompletion: suspend (MorseCompletionRequest) -> Boolean,
     longPressTimeoutMs: Long,
     private val onNotice: (String, Long) -> Unit = { _, _ -> },
 ) {
@@ -55,6 +59,9 @@ internal class PokerMorseController(
     fun handle(event: MorseInputEvent?) {
         when (event) {
             is MorseInputEvent.MutationRequested -> send(event)
+            is MorseInputEvent.CharacterFinished,
+            MorseInputEvent.CharacterDeleted,
+            -> requestCompletion()
             is MorseInputEvent.Exited -> if (!event.forced) onNotice("Morse exited", 500L)
             MorseInputEvent.Interrupted -> onNotice("Morse interrupted", 1_000L)
             else -> Unit
@@ -74,6 +81,10 @@ internal class PokerMorseController(
         }
         val outcome = if (installed) result.outcome else MorseMutationOutcome.UNCERTAIN
         handle(input.applyMutation(target, outcome, result.fieldRevision, result.cursorPosition))
+    }
+
+    fun applyCompletion(projection: MorseCompletionProjection) {
+        input.applyCompletion(projection.target, projection.prefix, projection.suffix)
     }
 
     fun tick(atMs: Long) {
@@ -116,6 +127,22 @@ internal class PokerMorseController(
                         outcome = MorseMutationOutcome.UNCERTAIN,
                         fieldRevision = null,
                         cursorPosition = null,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun requestCompletion() {
+        val state = input.state()
+        val target = state.target ?: return
+        if (!MorseCompletionEngine.isEligiblePrefix(state.word)) return
+        scope.launch {
+            runCatching {
+                sendCompletion(
+                    MorseCompletionRequest(
+                        target = target,
+                        prefix = state.word,
                     ),
                 )
             }

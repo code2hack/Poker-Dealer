@@ -14,6 +14,7 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.MorseMutationKind
 import com.code2hack.pokerdealer.domain.MorseMutationOutcome
 import com.code2hack.pokerdealer.domain.MorseMutationTarget
+import com.code2hack.pokerdealer.domain.MorseModeTarget
 import com.code2hack.pokerdealer.domain.FileApprovalDecision
 import com.code2hack.pokerdealer.domain.FileApprovalRequest
 import com.code2hack.pokerdealer.domain.FileChangeContent
@@ -56,6 +57,8 @@ const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
 const val POKER_MORSE_CAPABILITY = "morse.v1"
 const val POKER_MORSE_MUTATION_TYPE = "morse.mutation"
 const val POKER_MORSE_MUTATION_RESULT_TYPE = "morse.mutation.result"
+const val POKER_MORSE_COMPLETION_REQUEST_TYPE = "morse.completion.request"
+const val POKER_MORSE_COMPLETION_PROJECTION_TYPE = "morse.completion.projection"
 const val POKER_APPROVAL_PROJECTION_TYPE = "approval.projection"
 const val POKER_PRIMARY_ACTION_CAPABILITY = "primary-action.v1"
 const val POKER_PRIMARY_ACTION_TYPE = "primary.action"
@@ -414,6 +417,29 @@ data class MorseMutationResult(
     @SerialName("cursor_position") val cursorPosition: Int? = null,
     val reason: String? = null,
 )
+
+@Serializable
+data class MorseCompletionRequest(
+    val target: MorseModeTarget,
+    val prefix: String,
+)
+
+@Serializable
+data class MorseCompletionProjection(
+    val target: MorseModeTarget,
+    val prefix: String,
+    val suffix: String? = null,
+) {
+    init {
+        require(prefix.length >= 2) { "Morse completion prefix is too short" }
+        require(prefix.all { it in 'a'..'z' || it in 'A'..'Z' }) {
+            "Morse completion prefix must be Latin letters"
+        }
+        require(suffix == null || suffix.isNotEmpty() && suffix.all { it in 'a'..'z' || it in 'A'..'Z' }) {
+            "Morse completion suffix must be Latin letters"
+        }
+    }
+}
 
 @Serializable
 data class UserInputRequestProjection(

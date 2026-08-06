@@ -3,6 +3,7 @@ package com.code2hack.pokerdealer.domain
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
@@ -42,6 +43,84 @@ class MorseTest {
         listOf("...-.", "........", ".-...", "...-.-", "-.-.-").forEach { sequence ->
             assertNull(MorseCode.decode(sequence), sequence)
         }
+    }
+
+    @Test
+    fun `completion ranks commonness then shorter suffix then alphabetically`() {
+        val dictionary = listOf(
+            MorseDictionaryEntry("cater", 10),
+            MorseDictionaryEntry("cat", 10),
+            MorseDictionaryEntry("cab", 20),
+            MorseDictionaryEntry("can", 20),
+            MorseDictionaryEntry("cabin", 20),
+        )
+
+        assertEquals("cat", MorseCompletionEngine.suggest("ca", dictionary)?.word)
+        assertEquals("t", MorseCompletionEngine.suggest("ca", dictionary)?.suffix)
+        assertEquals("cabin", MorseCompletionEngine.suggest("cab", dictionary)?.word)
+        assertEquals(
+            "cab",
+            MorseCompletionEngine.suggest(
+                "ca",
+                listOf(MorseDictionaryEntry("can", 10), MorseDictionaryEntry("cab", 10)),
+            )?.word,
+        )
+        assertNull(MorseCompletionEngine.suggest("ca1", dictionary))
+        assertNull(MorseCompletionEngine.suggest("c.", dictionary))
+        assertNull(MorseCompletionEngine.suggest("c", dictionary))
+    }
+
+    @Test
+    fun `completion preserves dictionary suffix casing and parser keeps best commonness`() {
+        assertEquals(
+            "ple",
+            MorseCompletionEngine.suggest(
+                "AP",
+                listOf(MorseDictionaryEntry("Apple", 10)),
+            )?.suffix,
+        )
+        val parsed = MorseCompletionDictionary.parse(
+            sequenceOf(
+                "# pinned dictionary",
+                "20\tcat",
+                "10\tcat",
+                "10\tcab",
+            ),
+        )
+        assertEquals(listOf(MorseDictionaryEntry("cab", 10), MorseDictionaryEntry("cat", 10)), parsed)
+    }
+
+    @Test
+    fun `down commits displayed completion while up ignores it`() {
+        val down = controllerWithCa()
+        assertTrue(down.applyCompletion(target, "ca", "t"))
+        down.reduce(interaction(PokerOperation.DOWN, PokerInteractionPhase.BEGIN, 3_500))
+        val downCommit = down.reduce(
+            interaction(PokerOperation.DOWN, PokerInteractionPhase.RELEASE, 3_600, 100),
+        ) as MorseInputEvent.MutationRequested
+        assertEquals("cat ", downCommit.intent.text)
+
+        val up = controllerWithCa()
+        assertTrue(up.applyCompletion(target, "ca", "t"))
+        up.reduce(interaction(PokerOperation.UP, PokerInteractionPhase.BEGIN, 3_500))
+        val upCommit = up.reduce(
+            interaction(PokerOperation.UP, PokerInteractionPhase.RELEASE, 3_600, 100),
+        ) as MorseInputEvent.MutationRequested
+        assertEquals("ca ", upCommit.intent.text)
+    }
+
+    @Test
+    fun `deletion and target changes fence an asynchronous completion`() {
+        val controller = controllerWithCa()
+        assertTrue(controller.applyCompletion(target, "ca", "t"))
+        controller.reduce(interaction(PokerOperation.TAPTAP, PokerInteractionPhase.BEGIN, 3_500))
+        assertEquals(
+            MorseInputEvent.CharacterDeleted,
+            controller.reduce(interaction(PokerOperation.TAPTAP, PokerInteractionPhase.RELEASE, 3_600, 100)),
+        )
+        assertNull(controller.state().completion)
+        assertFalse(controller.applyCompletion(target, "ca", "t"))
+        assertFalse(controller.applyCompletion(target.copy(revision = 1), "c", "at"))
     }
 
     @Test
@@ -249,6 +328,21 @@ class MorseTest {
     private fun tap(controller: MorseInputController, atMs: Long, durationMs: Long) {
         controller.reduce(interaction(PokerOperation.TAP, PokerInteractionPhase.BEGIN, atMs))
         controller.reduce(interaction(PokerOperation.TAP, PokerInteractionPhase.RELEASE, atMs + durationMs, durationMs))
+    }
+
+    private fun controllerWithCa(): MorseInputController {
+        val controller = MorseInputController(sessionId = { "operation" })
+        controller.begin(target)
+        tap(controller, 100, 500)
+        tap(controller, 600, 100)
+        tap(controller, 700, 500)
+        tap(controller, 1_200, 100)
+        assertNotNull(controller.advance(2_000))
+        tap(controller, 2_100, 100)
+        tap(controller, 2_200, 500)
+        assertNotNull(controller.advance(3_400))
+        assertEquals("ca", controller.state().word)
+        return controller
     }
 
     private fun interaction(

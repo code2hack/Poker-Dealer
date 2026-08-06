@@ -48,6 +48,8 @@ internal data class PokerPilePage(
     val cardText: String,
     val anchor: PokerPileAnchor? = null,
     val composerText: String? = null,
+    val morseWord: String? = null,
+    val morseSuffix: String? = null,
     val requestProjections: List<UserInputRequestProjection> = emptyList(),
     val cards: List<Card> = emptyList(),
     val available: Boolean = true,
@@ -78,6 +80,8 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
     asrProjection: PokerAsrProjection? = null,
     asrNoticeVisible: Boolean = false,
+    morseWord: String? = null,
+    morseSuffix: String? = null,
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -87,6 +91,8 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 cardText = cardTextByLocator[pile.locator].orEmpty(),
                 anchor = anchorByLocator[pile.locator],
                 composerText = composerTextByLocator[pile.locator],
+                morseWord = morseWord.takeIf { pile.locator == focused },
+                morseSuffix = morseSuffix.takeIf { pile.locator == focused },
                 requestProjections = requestProjectionsByLocator[pile.locator].orEmpty(),
                 cards = cardsByLocator[pile.locator].orEmpty(),
                 available = metadataByLocator[pile.locator]?.available ?: true,
@@ -119,6 +125,8 @@ internal fun PokerPilePages(
     notice: PokerTransientNotice? = null,
     asrProjection: PokerAsrProjection? = null,
     asrNoticeVisible: Boolean = false,
+    morseWord: String? = null,
+    morseSuffix: String? = null,
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
@@ -131,6 +139,8 @@ internal fun PokerPilePages(
         approvalProjectionsByLocator,
         asrProjection,
         asrNoticeVisible,
+        morseWord,
+        morseSuffix,
     )
     val page = projection.visiblePage
     if (page == null) {
@@ -210,6 +220,19 @@ internal fun PokerPilePages(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp),
                     color = Color(0xFFFFD18A),
                 )
+            }
+
+            page.morseWord?.let { word ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 4.dp),
+                ) {
+                    Text("Morse: $word", color = Color(0xFFB7E3C0))
+                    page.morseSuffix?.let { suffix ->
+                        Text(suffix, color = Color(0xFF6D7F8F))
+                    }
+                }
             }
 
             page.requestProjections.forEach { projection ->

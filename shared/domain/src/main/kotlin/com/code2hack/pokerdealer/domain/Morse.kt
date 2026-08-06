@@ -1,6 +1,7 @@
 package com.code2hack.pokerdealer.domain
 
 import kotlinx.serialization.Serializable
+import java.util.Locale
 import java.util.UUID
 
 const val DEFAULT_MORSE_QUIET_INTERVAL_MS = 700L
@@ -44,6 +45,88 @@ data class MorseModeTarget(
                 }
             }
         }
+    }
+}
+
+data class MorseDictionaryEntry(
+    val word: String,
+    val commonness: Int,
+) {
+    init {
+        require(word.isNotBlank() && word.all(Char::isAsciiLatinLetter)) {
+            "Morse dictionary words must be Latin words"
+        }
+        require(commonness > 0) { "Morse dictionary commonness must be positive" }
+    }
+}
+
+data class MorseCompletionCandidate(
+    val word: String,
+    val suffix: String,
+)
+
+data class MorseCompletionHint(
+    val target: MorseModeTarget,
+    val prefix: String,
+    val suffix: String,
+) {
+    init {
+        require(prefix.length >= 2) { "Morse completion prefixes need two letters" }
+        require(prefix.all(Char::isAsciiLatinLetter)) {
+            "Morse completion prefixes must be Latin letters"
+        }
+        require(suffix.isNotEmpty()) { "Morse completion suffixes must not be empty" }
+        require(suffix.all(Char::isAsciiLatinLetter)) {
+            "Morse completion suffixes must be Latin letters"
+        }
+    }
+}
+
+object MorseCompletionEngine {
+    fun isEligiblePrefix(prefix: String): Boolean =
+        prefix.length >= 2 && prefix.all(Char::isAsciiLatinLetter)
+
+    fun suggest(
+        prefix: String,
+        dictionary: Iterable<MorseDictionaryEntry>,
+    ): MorseCompletionCandidate? {
+        if (!isEligiblePrefix(prefix)) return null
+        val normalizedPrefix = prefix.lowercase(Locale.ROOT)
+        return dictionary.asSequence()
+            .filter {
+                it.word.length > prefix.length &&
+                    it.word.lowercase(Locale.ROOT).startsWith(normalizedPrefix)
+            }
+            .map { it to it.word.substring(prefix.length) }
+            .minWithOrNull(
+                compareBy<Pair<MorseDictionaryEntry, String>> { it.first.commonness }
+                    .thenBy { it.second.length }
+                    .thenBy { it.first.word.lowercase(Locale.ROOT) }
+                    .thenBy { it.first.word },
+            )
+            ?.let { (entry, suffix) -> MorseCompletionCandidate(entry.word, suffix) }
+    }
+}
+
+object MorseCompletionDictionary {
+    fun parse(lines: Sequence<String>): List<MorseDictionaryEntry> {
+        val commonnessByWord = mutableMapOf<String, Int>()
+        lines.forEach { rawLine ->
+            val line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith('#')) return@forEach
+            val fields = line.split('\t', limit = 2)
+            require(fields.size == 2) { "Malformed Morse dictionary entry" }
+            val commonness = fields[0].toIntOrNull()
+                ?: error("Malformed Morse dictionary commonness")
+            val word = fields[1]
+            require(word.isNotBlank() && word.all { it in 'a'..'z' }) {
+                "Malformed Morse dictionary word"
+            }
+            commonnessByWord[word] = minOf(commonnessByWord[word] ?: Int.MAX_VALUE, commonness)
+        }
+        return commonnessByWord
+            .map { (word, commonness) -> MorseDictionaryEntry(word, commonness) }
+            .sortedBy(MorseDictionaryEntry::word)
     }
 }
 
@@ -104,6 +187,7 @@ data class MorseModeState(
     val deadlineAtMs: Long? = null,
     val held: Boolean = false,
     val pendingMutation: MorseMutationTarget? = null,
+    val completion: MorseCompletionHint? = null,
 )
 
 sealed interface MorseInputEvent {
@@ -191,6 +275,7 @@ class MorseInputController(
             dotDashBuffer = "",
             word = mode.word + character?.lowercaseChar()?.toString().orEmpty(),
             deadlineAtMs = null,
+            completion = null,
         )
         return MorseInputEvent.CharacterFinished(character)
     }
@@ -266,6 +351,23 @@ class MorseInputController(
         return MorseInputEvent.MutationAcknowledged
     }
 
+    fun applyCompletion(
+        target: MorseModeTarget,
+        prefix: String,
+        suffix: String?,
+    ): Boolean {
+        val currentTarget = mode.target ?: return false
+        if (target != currentTarget || prefix != mode.word || mode.dotDashBuffer.isNotEmpty()) {
+            return false
+        }
+        mode = mode.copy(
+            completion = suffix?.takeIf(String::isNotEmpty)?.let {
+                MorseCompletionHint(target, prefix, it)
+            },
+        )
+        return true
+    }
+
     private fun beginInteraction(interaction: PokerInteraction): MorseInputEvent? {
         if (held != null) return MorseInputEvent.Ignored
         val remaining = mode.deadlineAtMs?.let { deadline ->
@@ -312,7 +414,7 @@ class MorseInputController(
         return when (operation) {
             PokerOperation.TAP -> releaseTap(interaction.durationMs, interaction.eventTimeMs)
             PokerOperation.TAPTAP -> deleteCharacterOrIgnore()
-            PokerOperation.DOWN -> MorseInputEvent.Ignored
+            PokerOperation.DOWN -> commitWord(useCompletion = true)
             PokerOperation.UP -> commitWord()
             PokerOperation.FN -> releaseFunction(interaction.durationMs)
             PokerOperation.LEFT,
@@ -329,6 +431,7 @@ class MorseInputController(
             dotDashBuffer = mode.dotDashBuffer + symbol,
             deadlineAtMs = safeAdd(atMs, quietIntervalMs),
             held = false,
+            completion = null,
         )
         return MorseInputEvent.Ignored
     }
@@ -336,7 +439,7 @@ class MorseInputController(
     private fun deleteCharacterOrIgnore(): MorseInputEvent {
         if (mode.dotDashBuffer.isNotEmpty()) return MorseInputEvent.Ignored
         if (mode.word.isEmpty()) return MorseInputEvent.Ignored
-        mode = mode.copy(word = mode.word.dropLast(1))
+        mode = mode.copy(word = mode.word.dropLast(1), completion = null)
         return MorseInputEvent.CharacterDeleted
     }
 
@@ -347,15 +450,21 @@ class MorseInputController(
             return MorseInputEvent.Exited()
         }
         if (mode.word.isNotEmpty()) {
-            mode = mode.copy(word = "")
+            mode = mode.copy(word = "", completion = null)
             return MorseInputEvent.WordCleared
         }
         val committed = mode.committedWords.lastOrNull() ?: return MorseInputEvent.Ignored
         return deleteCommittedWord(committed)
     }
 
-    private fun commitWord(): MorseInputEvent {
+    private fun commitWord(useCompletion: Boolean = false): MorseInputEvent {
         if (mode.word.isEmpty() || pendingIntent != null) return MorseInputEvent.Ignored
+        val completion = mode.completion?.takeIf {
+            useCompletion &&
+                it.target == mode.target &&
+                it.prefix == mode.word &&
+                mode.dotDashBuffer.isEmpty()
+        }
         val target = MorseMutationTarget(
             mode = checkNotNull(mode.target),
             operationId = sessionId().also { require(it.isNotBlank()) },
@@ -363,10 +472,10 @@ class MorseInputController(
         val intent = MorseMutationIntent(
             target = target,
             kind = MorseMutationKind.COMMIT_WORD,
-            text = mode.word + " ",
+            text = mode.word + completion?.suffix.orEmpty() + " ",
         )
         pendingIntent = intent
-        mode = mode.copy(pendingMutation = target)
+        mode = mode.copy(pendingMutation = target, completion = null)
         return MorseInputEvent.MutationRequested(intent)
     }
 
@@ -401,6 +510,8 @@ class MorseInputController(
     private fun safeAdd(first: Long, second: Long): Long =
         if (first > Long.MAX_VALUE - second) Long.MAX_VALUE else first + second
 }
+
+private fun Char.isAsciiLatinLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
 
 /** The written-character table from ITU-R M.1677-1; procedural signals are intentionally absent. */
 object MorseCode {

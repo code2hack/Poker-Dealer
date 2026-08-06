@@ -188,6 +188,107 @@ class PokerPhotoControllerTest {
     }
 
     @Test
+    fun `preview deletion freezes the exact latest copy and reports success`() = runTest {
+        val harness = harness(this)
+        harness.start()
+        runCurrent()
+        harness.acceptStart()
+        val bytes = byteArrayOf(7, 6, 5, 4)
+        harness.controller.onCaptureRequested()
+        harness.controller.onCaptured(bytes)
+        runCurrent()
+        val captureTarget = harness.completes.single().target
+        val capturedDraft = ComposerDraft(
+            revision = 1,
+            elements = listOf(ComposerElement.Photo(captureTarget.assetId)),
+        )
+        harness.controller.onCaptureResult(
+            PhotoCaptureResult(captureTarget, PhotoCaptureOutcome.ACKNOWLEDGED, capturedDraft),
+        )
+        runCurrent()
+
+        harness.controller.requestDelete()
+        runCurrent()
+        assertEquals(PokerPhotoPhase.DELETING, harness.controller.state.value.phase)
+        assertArrayEquals(bytes, harness.controller.state.value.frozenBytes)
+        val deleteTarget = harness.deletes.single()
+
+        val deletedDraft = ComposerDraft(revision = 2)
+        harness.controller.onDeleteResult(
+            PhotoDeleteResult(deleteTarget, PhotoCaptureOutcome.ACKNOWLEDGED, deletedDraft),
+        )
+        runCurrent()
+
+        assertEquals(PokerPhotoPhase.PREVIEW, harness.controller.state.value.phase)
+        assertEquals("Photo deleted", harness.controller.state.value.notice)
+        assertEquals(deletedDraft, harness.navigation.layout(harness.locator)?.composer?.draft)
+        advanceTimeBy(499)
+        runCurrent()
+        assertEquals("Photo deleted", harness.controller.state.value.notice)
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals(null, harness.controller.state.value.notice)
+    }
+
+    @Test
+    fun `deliberate exit is fenced while photo deletion is pending`() = runTest {
+        val harness = harness(this)
+        harness.start()
+        runCurrent()
+        harness.acceptStart()
+        harness.controller.onCaptureRequested()
+        harness.controller.onCaptured(byteArrayOf(1, 2, 3))
+        runCurrent()
+        val captureTarget = harness.completes.single().target
+        harness.controller.onCaptureResult(
+            PhotoCaptureResult(
+                captureTarget,
+                PhotoCaptureOutcome.ACKNOWLEDGED,
+                ComposerDraft(1, listOf(ComposerElement.Photo(captureTarget.assetId))),
+            ),
+        )
+        runCurrent()
+
+        harness.controller.requestDelete()
+        runCurrent()
+        harness.controller.exit()
+        assertEquals(PokerPhotoPhase.DELETING, harness.controller.state.value.phase)
+        assertEquals(0, harness.counters.cancels)
+
+        advanceTimeBy(POKER_PHOTO_DELETE_TIMEOUT_MS)
+        runCurrent()
+        assertEquals(PokerPhotoPhase.PREVIEW, harness.controller.state.value.phase)
+        assertEquals("Photo not deleted", harness.controller.state.value.notice)
+    }
+
+    @Test
+    fun `target loss forces exit without changing the committed draft`() = runTest {
+        val harness = harness(this)
+        harness.start()
+        runCurrent()
+        harness.acceptStart()
+
+        harness.controller.onProjection(
+            ComposerDraftProjection(
+                locator = harness.locator,
+                draft = ComposerDraft.fromText("x"),
+                controlGeneration = 9,
+                connectionEpoch = 3,
+                modeSession = "mode",
+                hasDealerClaim = true,
+            ),
+        )
+        runCurrent()
+
+        assertEquals(PokerPhotoPhase.IDLE, harness.controller.state.value.phase)
+        assertEquals(1, harness.counters.cameraCloses)
+        assertEquals(
+            ComposerDraft.fromText("x"),
+            harness.navigation.layout(harness.locator)?.composer?.draft,
+        )
+    }
+
+    @Test
     fun `camera failure exits photo without reopening and reconnect loss cancels`() = runTest {
         val harness = harness(this)
         harness.start()

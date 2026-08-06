@@ -33,6 +33,7 @@ import com.code2hack.pokerdealer.domain.ComposerEditorState
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
+import com.code2hack.pokerdealer.domain.MorseCompletionEngine
 import com.code2hack.pokerdealer.domain.MorseMutationOutcome
 import com.code2hack.pokerdealer.domain.MorseMutationKind
 import com.code2hack.pokerdealer.domain.ControlSurface
@@ -190,8 +191,12 @@ import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
 import com.code2hack.pokerdealer.protocol.MorseMutationRequest
 import com.code2hack.pokerdealer.protocol.MorseMutationResult
+import com.code2hack.pokerdealer.protocol.MorseCompletionProjection
+import com.code2hack.pokerdealer.protocol.MorseCompletionRequest
 import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_MORSE_MUTATION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_COMPLETION_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_MORSE_COMPLETION_REQUEST_TYPE
 import com.code2hack.pokerdealer.protocol.CoroutinePokerScheduler
 import com.code2hack.pokerdealer.protocol.PokerProtocolOffer
 import com.code2hack.pokerdealer.protocol.PokerReconnectController
@@ -283,6 +288,7 @@ class DealerConnectionService : Service() {
     private val photoResults = mutableMapOf<String, PhotoCaptureResult>()
     private val photoDeleteResults = mutableMapOf<String, PhotoDeleteResult>()
     private val pokerMorseResults = mutableMapOf<String, MorseMutationResult>()
+    private val morseCompletionDictionary by lazy { DealerMorseCompletionDictionary.load(assets) }
     private val pokerApprovalBindings = mutableMapOf<ServerRequestLocator, PokerApprovalBinding>()
     private val pokerAsrResults = mutableMapOf<String, Any>()
     private lateinit var asrProcess: DealerAsrProcess
@@ -448,6 +454,17 @@ class DealerConnectionService : Service() {
                     fontRevision = restoredPokerFont.revision,
                 ),
             )
+            runCatching { purgeUnusedPhotoAssets() }
+                .onFailure { failure ->
+                    mutableState.update { current ->
+                        current.copy(
+                            error = listOfNotNull(
+                                current.error,
+                                "Unable to purge abandoned photo assets: ${failure.message}",
+                            ).joinToString("; "),
+                        )
+                    }
+                }
             handlePokerConnectionState(pokerConnectionOwner.connectionState)
             sendCurrentPokerBindings()
             sendCurrentPokerFont()
@@ -1373,6 +1390,15 @@ class DealerConnectionService : Service() {
                 }.getOrNull() ?: return
                 handlePokerMorseMutation(epoch, envelope, request)
             }
+            POKER_MORSE_COMPLETION_REQUEST_TYPE -> {
+                val request = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        MorseCompletionRequest.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerMorseCompletion(epoch, envelope, request)
+            }
             POKER_PRIMARY_ACTION_TYPE -> {
                 val target = runCatching {
                     PokerProtocolJson.decodeFromJsonElement(
@@ -2173,12 +2199,18 @@ class DealerConnectionService : Service() {
         val rejection = when {
             target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch ->
                 "Photo connection epoch is stale"
-            session == null || session.target.modeSession != target.modeSession ->
+            session == null ||
+                session.target.locator != target.locator ||
+                session.target.controlGeneration != target.controlGeneration ||
+                session.target.connectionEpoch != target.connectionEpoch ||
+                session.target.modeSession != target.modeSession ->
                 "Photo session is no longer active"
             target.draftRevision != current.revision ||
                 target.cursorPosition !in 0 until current.cursorCount ->
                 "Photo draft target is stale"
             unit?.photoAssetId != target.assetId -> "Photo token is no longer present"
+            target.assetId !in session.committedAssetIds ->
+                "Photo was not captured in this session"
             else -> null
         }
         if (rejection != null) {
@@ -2187,18 +2219,24 @@ class DealerConnectionService : Service() {
             sendPokerPhotoDeleteResult(envelope, result)
             return
         }
+        val activeSession = checkNotNull(session)
         val next = current
             .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
             .withRevision(current.revision + 1)
         val result = try {
-            draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
-            mutableState.update {
-                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+            val deleted = photoAssets.deleteAfter(target.assetId) {
+                draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
+                mutableState.update {
+                    it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                }
             }
-            photoAssets.delete(target.assetId)
-            session?.committedAssetIds?.remove(target.assetId)
-            session?.cursorPosition = target.cursorPosition
-            PhotoDeleteResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+            if (!deleted) {
+                PhotoDeleteResult(target, PhotoCaptureOutcome.REJECTED, current, "Photo asset is unavailable")
+            } else {
+                activeSession.committedAssetIds.remove(target.assetId)
+                activeSession.cursorPosition = target.cursorPosition
+                PhotoDeleteResult(target, PhotoCaptureOutcome.ACKNOWLEDGED, next)
+            }
         } catch (failure: Throwable) {
             PhotoDeleteResult(
                 target,
@@ -2756,6 +2794,80 @@ class DealerConnectionService : Service() {
         }
     }
 
+    private suspend fun handlePokerMorseCompletion(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        request: MorseCompletionRequest,
+    ) {
+        if (!MorseCompletionEngine.isEligiblePrefix(request.prefix)) return
+
+        val target = request.target
+        val state = mutableState.value
+        val binding = when (target.surface) {
+            ComposerSurface.THREAD_COMPOSER -> pokerComposerBindings[target.locator]
+            ComposerSurface.REQUEST_PANEL -> target.requestLocator?.let(pokerUserInputBindings::get)
+        }
+        val currentDraft = state.threadActions.composerDraft(target.locator)
+        val requestLocator = target.requestLocator
+        val pendingRequest = requestLocator?.let { state.userInputRequests.requests[it] }
+        val currentBuffer = requestLocator?.let { state.userInputAnswers.buffer(it) }
+            ?: UserInputAnswerBuffer()
+        val question = pendingRequest?.questions?.firstOrNull { it.id == target.questionId }
+        val currentField = question?.let {
+            ComposerDraft.fromText(currentBuffer.activeValue(it), currentBuffer.revision)
+        }
+        val targetIsCurrent = when {
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch -> false
+            target.locator !in state.threadAttachments.attached ||
+                !state.threadAttachments.hasDealerClaim(target.locator) -> false
+            target.surface == ComposerSurface.THREAD_COMPOSER ->
+                binding is PokerComposerBinding &&
+                    binding.epoch == epoch.value &&
+                    binding.controlGeneration == target.controlGeneration &&
+                    binding.modeSession == target.bindingModeSession &&
+                    target.revision == currentDraft.revision &&
+                    target.cursorPosition in 0 until currentDraft.cursorCount
+            target.surface == ComposerSurface.REQUEST_PANEL ->
+                binding is PokerUserInputBinding &&
+                    binding.epoch == epoch.value &&
+                    binding.controlGeneration == target.controlGeneration &&
+                    binding.modeSession == target.bindingModeSession &&
+                    pendingRequest != null &&
+                    pendingRequest.thread == target.locator &&
+                    pendingRequest.resolution == RequestResolutionState.PENDING &&
+                    pendingRequest.fingerprint == target.requestFingerprint &&
+                    question != null &&
+                    (question.options == null ||
+                        (question.isOther && currentBuffer.answer(question.id).selectedOption == null)) &&
+                    currentBuffer.revision == target.revision &&
+                    target.cursorPosition in 0 until (currentField?.cursorCount ?: 0)
+            else -> false
+        }
+        val suffix = if (targetIsCurrent) {
+            runCatching {
+                DealerMorseCompletionDictionary
+                    .suggest(request.prefix, morseCompletionDictionary)
+                    ?.suffix
+            }.getOrNull()
+        } else {
+            null
+        }
+        val projection = MorseCompletionProjection(
+            target = target,
+            prefix = request.prefix,
+            suffix = suffix,
+        )
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            MorseCompletionProjection.serializer(),
+            projection,
+        ).jsonObject
+        pokerConnectionOwner.send(
+            type = POKER_MORSE_COMPLETION_PROJECTION_TYPE,
+            payload = payload,
+            replyTo = envelope.messageId,
+        )
+    }
+
     private suspend fun sendPokerMorseMutationResult(
         envelope: ProtocolEnvelope,
         result: MorseMutationResult,
@@ -3060,14 +3172,22 @@ class DealerConnectionService : Service() {
                         .replaceUnits(target.cursorPosition, target.cursorPosition + 1)
                         .withRevision(current.revision + 1)
                     runCatching {
-                        draftMutex.withLock {
-                            threadAttachmentStore.writeDraft(target.locator, next)
+                        val deleted = photoAssets.deleteAfter(assetId) {
+                            draftMutex.withLock {
+                                threadAttachmentStore.writeDraft(target.locator, next)
+                            }
+                            mutableState.update {
+                                it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                            }
                         }
-                        mutableState.update {
-                            it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                        if (deleted) {
+                            result(ComposerMutationOutcome.ACKNOWLEDGED, next)
+                        } else {
+                            result(
+                                ComposerMutationOutcome.REJECTED,
+                                reason = "Photo asset is unavailable",
+                            )
                         }
-                        photoAssets.delete(assetId)
-                        result(ComposerMutationOutcome.ACKNOWLEDGED, next)
                     }.getOrElse { failure ->
                         result(
                             ComposerMutationOutcome.UNCERTAIN,

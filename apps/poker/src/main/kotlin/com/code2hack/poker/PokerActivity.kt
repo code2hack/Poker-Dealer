@@ -135,7 +135,14 @@ class PokerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         navigation = PokerNavigationReducer(viewportLineCount = 12)
-        composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
+        composerController = PokerComposerController(
+            navigation = navigation,
+            sendMutation = PokerComposerBridge::sendMutation,
+            scope = lifecycleScope,
+            onNotice = { message, durationMs ->
+                PokerNoticeRuntime.show(PokerTransientNotice(message, durationMs))
+            },
+        )
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
         morseController = PokerMorseController(
             navigation = navigation,
@@ -144,6 +151,7 @@ class PokerActivity : ComponentActivity() {
             wheelContext = { primaryActionController.wheelContext() },
             scope = lifecycleScope,
             sendMutation = PokerComposerBridge::sendMorseMutation,
+            sendCompletion = PokerComposerBridge::sendMorseCompletion,
             longPressTimeoutMs = ViewConfiguration.getLongPressTimeout().toLong(),
             onNotice = { message, durationMs ->
                 PokerNoticeRuntime.show(PokerTransientNotice(message, durationMs))
@@ -215,7 +223,10 @@ class PokerActivity : ComponentActivity() {
                 requestCardsByLocator = snapshot?.piles.orEmpty()
                     .associate { it.metadata.locator to it.requestCards }
                 cardTextByLocator = navigation.installPokerSnapshot(snapshot)
-                PokerComposerBridge.projections.value.values.forEach(composerController::applyProjection)
+                PokerComposerBridge.projections.value.values.forEach { projection ->
+                    photoController.onProjection(projection)
+                    composerController.applyProjection(projection)
+                }
                 PokerComposerBridge.userInputProjections.value.values.forEach(userInputController::applyProjection)
                 PokerComposerBridge.approvalProjections.value.values.forEach(approvalController::applyProjection)
                 screenState.value = currentScreenState()
@@ -228,7 +239,10 @@ class PokerActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             PokerComposerBridge.projections.collect { projections ->
-                projections.values.forEach(composerController::applyProjection)
+                projections.values.forEach { projection ->
+                    photoController.onProjection(projection)
+                    composerController.applyProjection(projection)
+                }
                 screenState.value = currentScreenState()
             }
         }
@@ -253,6 +267,12 @@ class PokerActivity : ComponentActivity() {
         lifecycleScope.launch {
             PokerComposerBridge.morseResults.collect { results ->
                 results.values.forEach(morseController::apply)
+                screenState.value = currentScreenState(screenState.value.wheelState)
+            }
+        }
+        lifecycleScope.launch {
+            PokerComposerBridge.morseCompletion.collect { projection ->
+                projection?.let(morseController::applyCompletion)
                 screenState.value = currentScreenState(screenState.value.wheelState)
             }
         }
@@ -381,6 +401,7 @@ class PokerActivity : ComponentActivity() {
                         }
                     }
                     morseController.handle(result.morseEvent)
+                    screenState.value = currentScreenState(result.wheelState)
                 },
                 onWheelChanged = { wheelState ->
                     screenState.value = currentScreenState(wheelState)
@@ -400,6 +421,7 @@ class PokerActivity : ComponentActivity() {
                         handleWheelSelection(selection)
                     }
                     morseController.handle(result.morseEvent)
+                    screenState.value = currentScreenState(result.wheelState)
                     lifecycleScope.launch { asrController.handleInteraction(result.interaction) }
                 },
                 onWheelChanged = { wheelState ->
@@ -413,6 +435,7 @@ class PokerActivity : ComponentActivity() {
                 delay(50L)
                 if (morseController.input.isActive) {
                     morseController.tick(SystemClock.uptimeMillis())
+                    screenState.value = currentScreenState(screenState.value.wheelState)
                 }
             }
         }
@@ -461,7 +484,7 @@ class PokerActivity : ComponentActivity() {
         foreground = hasFocus
         PokerBindingRuntime.setForeground(hasFocus)
         if (!hasFocus) {
-            if (::photoController.isInitialized) photoController.exit()
+            if (::photoController.isInitialized) photoController.onPresentationLost()
             if (::input.isInitialized) input.onFocusLost()
             if (::morseController.isInitialized) morseController.abort()
             if (::asrCapture.isInitialized) asrCapture.stop()
@@ -510,6 +533,8 @@ class PokerActivity : ComponentActivity() {
         wheelState = wheelState,
         asrProjection = PokerAsrBridge.projection.value,
         asrNoticeVisible = asrNoticeVisible,
+        morseWord = morseController.input.state().word.takeIf { morseController.input.isActive },
+        morseSuffix = morseController.input.state().completion?.suffix,
     )
 
     private fun requestAsrCapture() {
@@ -596,6 +621,8 @@ private fun PokerCardReader(
                 cardTextByLocator = state.cardTextByLocator,
                 anchorByLocator = state.anchors,
                 composerTextByLocator = state.composerTextByLocator,
+                morseWord = state.morseWord,
+                morseSuffix = state.morseSuffix,
                 requestProjectionsByLocator = state.requestProjectionsByLocator,
                 approvalProjectionsByLocator = state.approvalProjectionsByLocator,
                 cardsByLocator = state.cardsByLocator,
@@ -692,6 +719,8 @@ private data class PokerScreenState(
     val anchors: Map<CodexThreadLocator, com.code2hack.pokerdealer.domain.PokerPileAnchor>,
     val cardTextByLocator: Map<CodexThreadLocator, String>,
     val composerTextByLocator: Map<CodexThreadLocator, String>,
+    val morseWord: String? = null,
+    val morseSuffix: String? = null,
     val requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>>,
     val cardsByLocator: Map<CodexThreadLocator, List<Card>>,
     val metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata>,
@@ -714,6 +743,8 @@ private fun PokerNavigationReducer.snapshot(
     approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>> = currentApprovalProjections(),
     asrProjection: com.code2hack.pokerdealer.protocol.PokerAsrProjection? = null,
     asrNoticeVisible: Boolean = false,
+    morseWord: String? = null,
+    morseSuffix: String? = null,
 ): PokerScreenState {
     val metadata = metadata()
     return PokerScreenState(
@@ -732,6 +763,8 @@ private fun PokerNavigationReducer.snapshot(
         asrProjection = asrProjection,
         asrNoticeVisible = asrNoticeVisible,
         wheelState = wheelState,
+        morseWord = morseWord,
+        morseSuffix = morseSuffix,
     )
 }
 

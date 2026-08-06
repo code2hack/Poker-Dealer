@@ -6,6 +6,7 @@ import android.graphics.Movie
 import android.os.StatFs
 import android.os.storage.StorageManager
 import java.io.File
+import java.io.IOException
 import java.io.RandomAccessFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -17,9 +18,16 @@ internal data class DealerPhotoImage(
 )
 
 /** Exact, backup-excluded photo bytes. The database stores only draft asset IDs. */
-internal class DealerPhotoAssetStore(context: Context) {
-    private val root = context.noBackupFilesDir.resolve("photo-assets")
-    private val storageManager = context.getSystemService(StorageManager::class.java)
+internal class DealerPhotoAssetStore private constructor(
+    private val root: File,
+    private val storageManager: StorageManager?,
+) {
+    constructor(context: Context) : this(
+        context.noBackupFilesDir.resolve("photo-assets"),
+        context.getSystemService(StorageManager::class.java),
+    )
+
+    internal constructor(root: File) : this(root, null)
 
     init {
         require(root.isDirectory || root.mkdirs()) { "Unable to create Dealer photo storage" }
@@ -82,10 +90,60 @@ internal class DealerPhotoAssetStore(context: Context) {
         staged(assetId).delete()
     }
 
+    /** Removes an asset only after the matching draft update commits, restoring it on failure. */
+    suspend fun deleteAfter(assetId: String, updateDraft: suspend () -> Unit): Boolean =
+        withContext(Dispatchers.IO) {
+            recoverDeletionResiduesInPlace()
+            val source = stored(assetId)
+            if (!source.isFile) return@withContext false
+            val deleting = root.resolve("${safeName(assetId)}.deleting")
+            if (deleting.exists() && !deleting.delete()) return@withContext false
+            if (!source.renameTo(deleting)) return@withContext false
+            try {
+                updateDraft()
+                deleting.delete()
+                true
+            } catch (failure: Throwable) {
+                if (!deleting.renameTo(source)) {
+                    throw IllegalStateException("Unable to restore photo asset $assetId", failure)
+                }
+                throw failure
+            }
+        }
+
     suspend fun purgeExcept(assetIds: Set<String>) = withContext(Dispatchers.IO) {
+        recoverDeletionResiduesInPlace()
         root.listFiles().orEmpty().filter { file ->
-            file.nameWithoutExtension !in assetIds
+            assetIdFor(file) !in assetIds
         }.forEach(File::delete)
+    }
+
+    private fun recoverDeletionResiduesInPlace() {
+        root.listFiles().orEmpty()
+            .filter { it.name.endsWith(DELETING_SUFFIX) }
+            .forEach { residue ->
+                val assetId = residue.name.removeSuffix(DELETING_SUFFIX)
+                if (!assetId.matches(ASSET_ID)) {
+                    if (!residue.delete()) {
+                        throw IOException("Unable to remove invalid photo deletion residue ${residue.name}")
+                    }
+                    return@forEach
+                }
+                val source = stored(assetId)
+                if (source.exists()) {
+                    if (!residue.delete()) {
+                        throw IOException("Unable to remove duplicate photo deletion residue ${residue.name}")
+                    }
+                } else if (!residue.renameTo(source)) {
+                    throw IOException("Unable to restore photo asset $assetId from deletion residue")
+                }
+            }
+    }
+
+    private fun assetIdFor(file: File): String = when {
+        file.name.endsWith(STAGING_SUFFIX) -> file.name.removeSuffix(STAGING_SUFFIX)
+        file.name.endsWith(DELETING_SUFFIX) -> file.name.removeSuffix(DELETING_SUFFIX)
+        else -> file.name
     }
 
     private fun hasSpace(bytes: Long): Boolean {
@@ -109,6 +167,8 @@ internal class DealerPhotoAssetStore(context: Context) {
 
     private companion object {
         val ASSET_ID = Regex("[A-Za-z0-9._-]{1,128}")
+        const val STAGING_SUFFIX = ".staging"
+        const val DELETING_SUFFIX = ".deleting"
     }
 }
 

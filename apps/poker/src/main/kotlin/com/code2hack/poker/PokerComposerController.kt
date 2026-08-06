@@ -18,15 +18,22 @@ import com.code2hack.pokerdealer.domain.PokerPrimaryAction
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionOutcome
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionResult
 import com.code2hack.pokerdealer.protocol.PokerPrimaryActionTarget
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Applies Dealer projections locally and serializes one exact optimistic edit at a time. */
 internal class PokerComposerController(
     private val navigation: PokerNavigationReducer,
+    private val scope: CoroutineScope? = null,
+    private val onNotice: (String, Long) -> Unit = { _, _ -> },
     private val sendMutation: suspend (ComposerMutationRequest) -> Boolean,
 ) {
     private val editors = mutableMapOf<CodexThreadLocator, ComposerEditorState>()
     private val pendingPrimary = mutableMapOf<CodexThreadLocator, PokerPrimaryActionTarget>()
     private val pendingPhotoDeletion = mutableMapOf<CodexThreadLocator, com.code2hack.pokerdealer.domain.ComposerEditTarget>()
+    private val photoDeletionTimeouts = mutableMapOf<String, Job>()
 
     fun applyProjection(projection: ComposerDraftProjection) {
         pendingPrimary[projection.locator]?.let { target ->
@@ -75,7 +82,7 @@ internal class PokerComposerController(
             PokerPrimaryAction.SEND,
             PokerPrimaryAction.STEER,
         )) return false
-        if (pendingPhotoDeletion[target.locator] != null) return false
+        if (hasPendingDraftMutation(target.locator)) return false
         val current = editors[target.locator] ?: return false
         val edit = try {
             current.copy(cursorPosition = target.cursorPosition).beginTextDeletion(target)
@@ -84,6 +91,20 @@ internal class PokerComposerController(
         }
         if (edit is ComposerEditResult.PhotoTokenBoundary && request.photoAssetId != null) {
             pendingPhotoDeletion[target.locator] = target
+            updateLayoutFor(target.locator, current.draft, current)
+            scope?.let { timeoutScope ->
+                photoDeletionTimeouts[target.operationId] = timeoutScope.launch {
+                    delay(POKER_PHOTO_DELETE_TIMEOUT_MS)
+                    if (pendingPhotoDeletion[target.locator] == target) {
+                        pendingPhotoDeletion.remove(target.locator)
+                        onNotice("Photo not deleted", 1_000L)
+                        editors[target.locator]?.let { editor ->
+                            updateLayoutFor(target.locator, editor.draft, editor)
+                        }
+                    }
+                    photoDeletionTimeouts.remove(target.operationId)
+                }
+            }
             val sent = sendMutation(
                 ComposerMutationRequest(
                     target = target,
@@ -91,7 +112,10 @@ internal class PokerComposerController(
                     assetId = request.photoAssetId,
                 ),
             )
-            if (!sent) pendingPhotoDeletion.remove(target.locator)
+            if (!sent) {
+                clearPendingPhotoDeletion(target)
+                onNotice("Photo not deleted", 1_000L)
+            }
             return sent
         }
         if (edit !is ComposerEditResult.Started) return false
@@ -108,6 +132,7 @@ internal class PokerComposerController(
     fun beginPrimary(target: PokerPrimaryActionTarget): Boolean {
         if (target.action == PokerPrimaryAction.REQUEST) return false
         if (pendingPrimary[target.locator] != null) return false
+        if (pendingPhotoDeletion[target.locator] != null) return false
         val current = editors[target.locator] ?: return false
         if (navigation.layout(target.locator)?.composer?.hasDealerClaim != true) return false
         if (current.controlGeneration != target.controlGeneration ||
@@ -149,6 +174,12 @@ internal class PokerComposerController(
 
     fun isPrimaryLocked(locator: CodexThreadLocator): Boolean = pendingPrimary[locator] != null
 
+    fun hasPendingDraftMutation(locator: CodexThreadLocator): Boolean =
+        pendingPhotoDeletion[locator] != null || editors[locator]?.pendingMutation != null
+
+    fun photoAvailable(locator: CodexThreadLocator): Boolean =
+        !hasPendingDraftMutation(locator) && !isPrimaryLocked(locator)
+
     fun applyPhotoDraft(locator: CodexThreadLocator, draft: com.code2hack.pokerdealer.domain.ComposerDraft, cursor: Int) {
         val current = editors[locator] ?: return
         val next = current.installAuthoritative(draft).copy(
@@ -168,7 +199,7 @@ internal class PokerComposerController(
         val editor = editors[locator] ?: return null
         if (freshModeSession.isBlank() || layout.modeSession.isBlank() ||
             !layout.hasDealerClaim || layout.primaryActionLocked ||
-            pendingPrimary[locator] != null || editor.pendingMutation != null
+            pendingPrimary[locator] != null || hasPendingDraftMutation(locator)
         ) return null
         if (anchor.cursorPosition !in 0 until draft.cursorCount) return null
         return MorseModeTarget(
@@ -190,6 +221,7 @@ internal class PokerComposerController(
     ): Boolean {
         val mode = target.mode
         if (mode.surface != ComposerSurface.THREAD_COMPOSER) return false
+        if (hasPendingDraftMutation(mode.locator)) return false
         val current = editors[mode.locator] ?: return false
         if (current.draft.revision != mode.revision ||
             current.controlGeneration != mode.controlGeneration ||
@@ -213,7 +245,10 @@ internal class PokerComposerController(
     fun applyResult(result: ComposerMutationResult) {
         pendingPhotoDeletion[result.target.locator]?.let { target ->
             if (target != result.target) return
-            pendingPhotoDeletion.remove(result.target.locator)
+            clearPendingPhotoDeletion(target)
+            if (result.outcome != ComposerMutationOutcome.ACKNOWLEDGED) {
+                onNotice("Photo not deleted", 1_000L)
+            }
             val current = editors[result.target.locator] ?: return
             val next = current.installAuthoritative(result.draft).copy(
                 cursorPosition = result.target.cursorPosition.coerceIn(0, result.draft.cursorCount - 1),
@@ -271,7 +306,7 @@ internal class PokerComposerController(
             primaryActionLocked = pendingPrimary[locator]?.action in setOf(
                 PokerPrimaryAction.SEND,
                 PokerPrimaryAction.STEER,
-            ),
+            ) || hasPendingDraftMutation(locator),
             hasDealerClaim = projection?.hasDealerClaim ?: oldComposer?.hasDealerClaim ?: true,
         )
         navigation.setLayout(locator, PokerPileLayout(existing.cards, composer))
@@ -285,5 +320,15 @@ internal class PokerComposerController(
             locator,
             PokerPileLayout(existing.cards, composer.copy(primaryActionLocked = locked)),
         )
+    }
+
+    private fun clearPendingPhotoDeletion(target: com.code2hack.pokerdealer.domain.ComposerEditTarget) {
+        if (pendingPhotoDeletion[target.locator] == target) {
+            pendingPhotoDeletion.remove(target.locator)
+            editors[target.locator]?.let { editor ->
+                updateLayoutFor(target.locator, editor.draft, editor)
+            }
+        }
+        photoDeletionTimeouts.remove(target.operationId)?.cancel()
     }
 }
