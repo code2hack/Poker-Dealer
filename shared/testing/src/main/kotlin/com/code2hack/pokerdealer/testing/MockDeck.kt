@@ -17,6 +17,9 @@ import com.code2hack.pokerdealer.domain.HostAvailabilityClass
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.HostConnectionState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.PokerPileMetadata
+import com.code2hack.pokerdealer.domain.ThreadPileReducer
+import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 
 object MockDeck {
     val sparkHost = CodexHost(
@@ -73,6 +76,26 @@ object MockDeck {
         lastSequence = 1,
         unreadCount = 1,
     )
+
+    val pileMetadata: PokerPileMetadata = ThreadPileReducer().run {
+        attach(
+            CodexThreadLocator("spark", "thr_mock_spark_busy"),
+            ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 0),
+            atMs = 1,
+        )
+        attach(
+            conversation.locator,
+            ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 1),
+            atMs = 2,
+        )
+        attach(
+            CodexThreadLocator("fold6-termux", "thr_mock_termux_ready"),
+            ThreadWorkEvidence(activeTurn = false, unresolvedRequestCount = 0),
+            atMs = 3,
+        )
+        view(conversation.locator)
+        metadata()
+    }
 
     val longCard = Card(
         id = "mock-card-1",

@@ -6,7 +6,6 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -45,6 +44,7 @@ private fun PokerMockCardReader() {
     val transport = remember { LoopbackPokerTransport() }
     val transportState by transport.state.collectAsState()
     val card = MockDeck.longCard
+    val pileMetadata = remember { MockDeck.pileMetadata }
     val lines = remember(card.id, card.revision) { card.fullText.split('\n') }
 
     LaunchedEffect(transport) { transport.connect() }
@@ -57,13 +57,8 @@ private fun PokerMockCardReader() {
                 .padding(horizontal = 18.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(MockDeck.conversation.alias, color = Color.White)
-                Text("1 / 1", color = Color(0xFFAFC4D8))
-            }
+            PokerPileLine(pileMetadata)
+            Text(MockDeck.conversation.alias, color = Color.White)
             Text(
                 "${MockDeck.host.displayName} · ${MockDeck.conversation.locator.threadId}",
                 color = Color(0xFFAFC4D8),
