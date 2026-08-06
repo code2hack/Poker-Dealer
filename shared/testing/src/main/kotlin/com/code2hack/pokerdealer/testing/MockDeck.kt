@@ -17,6 +17,9 @@ import com.code2hack.pokerdealer.domain.HostAvailabilityClass
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
 import com.code2hack.pokerdealer.domain.HostConnectionState
 import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.PokerPileMetadata
+import com.code2hack.pokerdealer.domain.ThreadPileReducer
+import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 
 object MockDeck {
     val sparkHost = CodexHost(
@@ -60,6 +63,8 @@ object MockDeck {
 
     val hosts = listOf(sparkHost, u4090Host, termuxHost)
     val host = u4090Host
+    val sparkPileLocator = CodexThreadLocator("spark", "thr_mock_spark_busy")
+    val termuxPileLocator = CodexThreadLocator("fold6-termux", "thr_mock_termux_ready")
 
     val conversation = Conversation(
         id = "mock-conversation",
@@ -74,6 +79,26 @@ object MockDeck {
         unreadCount = 1,
     )
 
+    val pileMetadata: PokerPileMetadata = ThreadPileReducer().run {
+        attach(
+            sparkPileLocator,
+            ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 0),
+            atMs = 1,
+        )
+        attach(
+            conversation.locator,
+            ThreadWorkEvidence(activeTurn = true, unresolvedRequestCount = 1),
+            atMs = 2,
+        )
+        attach(
+            termuxPileLocator,
+            ThreadWorkEvidence(activeTurn = false, unresolvedRequestCount = 0),
+            atMs = 3,
+        )
+        view(conversation.locator)
+        metadata()
+    }
+
     val longCard = Card(
         id = "mock-card-1",
         conversationId = conversation.id,
@@ -86,6 +111,12 @@ object MockDeck {
         createdAtMs = 1_784_600_000_000,
         updatedAtMs = 1_784_600_000_000,
         source = CardSource.CODEX_AGENT_MESSAGE,
+    )
+
+    val cardTextByLocator: Map<CodexThreadLocator, String> = mapOf(
+        sparkPileLocator to "DGX Spark busy pile\n\nThe focused card remains keyed by the Spark locator.",
+        conversation.locator to longCard.fullText,
+        termuxPileLocator to "Fold6 Termux ready pile\n\nThe focused card remains keyed by the Termux locator.",
     )
 
     private fun longCardText(): String = buildString {

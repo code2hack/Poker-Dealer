@@ -6,6 +6,11 @@ enum class ThreadWorkState {
     READY,
 }
 
+enum class PileDirection {
+    LEFT,
+    RIGHT,
+}
+
 @kotlinx.serialization.Serializable
 enum class TurnOutcome {
     COMPLETED,
@@ -44,7 +49,9 @@ data class PokerPileMetadata(
 
 class ThreadPileReducer {
     private val piles = linkedMapOf<CodexThreadLocator, ThreadPile>()
+    private val busyActivityOrder = mutableMapOf<CodexThreadLocator, Long>()
     private var nextAttachmentOrder = 0L
+    private var nextBusyActivityOrder = 0L
     private var hudVisible = false
     private var focused: CodexThreadLocator? = null
     private var lastViewed: CodexThreadLocator? = null
@@ -56,20 +63,26 @@ class ThreadPileReducer {
         available: Boolean = true,
     ) {
         if (locator in piles) return
+        val workState = evidence.workState()
         piles[locator] = ThreadPile(
             locator = locator,
             attachmentOrder = nextAttachmentOrder++,
-            workState = evidence.workState(),
+            workState = workState,
             stateChangedAtMs = atMs,
             available = available,
         )
+        if (workState == ThreadWorkState.BUSY) {
+            busyActivityOrder[locator] = nextBusyActivityOrder++
+        }
     }
 
     fun detach(locator: CodexThreadLocator) {
+        val oldIndex = knownPiles().indexOfFirst { it.locator == locator }
+        val wasFocused = focused == locator
         piles.remove(locator)
-        if (focused == locator) {
-            focused = null
-            hudVisible = false
+        busyActivityOrder.remove(locator)
+        if (wasFocused) {
+            focusNearest(oldIndex)
         }
         if (lastViewed == locator) lastViewed = null
     }
@@ -100,11 +113,15 @@ class ThreadPileReducer {
     }
 
     fun acceptedPromptOrSteer(locator: CodexThreadLocator, atMs: Long) {
-        update(locator, ThreadWorkState.BUSY, atMs, available = null, outcome = null, wake = false)
-        if (focused != locator) return
-        focused = automaticFocus()
-        hudVisible = focused != null
-        focused?.let { lastViewed = it }
+        update(
+            locator,
+            ThreadWorkState.BUSY,
+            atMs,
+            available = null,
+            outcome = null,
+            wake = false,
+            refreshBusyActivity = true,
+        )
     }
 
     fun setAvailable(locator: CodexThreadLocator, available: Boolean) {
@@ -118,12 +135,9 @@ class ThreadPileReducer {
     }
 
     fun manualWake() {
-        val target = automaticFocus()
-            ?: lastViewed?.takeIf { piles[it]?.let { pile -> pile.available && pile.workState == ThreadWorkState.BUSY } == true }
-            ?: knownPiles().firstOrNull { it.available && it.workState == ThreadWorkState.BUSY }?.locator
+        val target = restoreLastViewed()
         focused = target
         hudVisible = target != null
-        target?.let { lastViewed = it }
     }
 
     fun view(locator: CodexThreadLocator) {
@@ -131,6 +145,22 @@ class ThreadPileReducer {
         focused = locator
         lastViewed = locator
         hudVisible = true
+    }
+
+    fun moveFocus(direction: PileDirection): Boolean {
+        val current = focused ?: return false
+        val known = knownPiles()
+        val index = known.indexOfFirst { it.locator == current }
+        if (index < 0) return false
+
+        val targetIndex = when (direction) {
+            PileDirection.LEFT -> index - 1
+            PileDirection.RIGHT -> index + 1
+        }
+        val target = known.getOrNull(targetIndex)?.locator ?: return false
+        focused = target
+        lastViewed = target
+        return true
     }
 
     fun readyGatedActionAllowed(locator: CodexThreadLocator): Boolean =
@@ -153,20 +183,33 @@ class ThreadPileReducer {
         available: Boolean?,
         outcome: TurnOutcome?,
         wake: Boolean,
+        refreshBusyActivity: Boolean = false,
     ) {
         val current = piles[locator] ?: return
+        val oldIndex = if (focused == locator) {
+            knownPiles().indexOfFirst { it.locator == locator }
+        } else {
+            -1
+        }
         val changed = current.workState != workState ||
             outcome in PROMINENT_OUTCOMES && outcome != current.outcome
+        if (workState == ThreadWorkState.BUSY && (current.workState != workState || refreshBusyActivity)) {
+            busyActivityOrder[locator] = nextBusyActivityOrder++
+        } else if (workState != ThreadWorkState.BUSY) {
+            busyActivityOrder.remove(locator)
+        }
         piles[locator] = current.copy(
             workState = workState,
-            stateChangedAtMs = if (changed) atMs else current.stateChangedAtMs,
+            stateChangedAtMs = if (changed || refreshBusyActivity) atMs else current.stateChangedAtMs,
             available = available ?: current.available,
             outcome = outcome ?: current.outcome.takeUnless { workState == ThreadWorkState.BUSY },
         )
-        if (wake && changed && !hudVisible && workState in ELIGIBLE_STATES) {
-            focused = automaticFocus()
+        if (focused == locator && current.workState != null && workState == null) {
+            focusNearest(oldIndex)
+        }
+        if (wake && changed && !hudVisible) {
+            focused = restoreLastViewed()
             hudVisible = focused != null
-            focused?.let { lastViewed = it }
         }
     }
 
@@ -174,17 +217,27 @@ class ThreadPileReducer {
         .filter { it.workState != null }
         .sortedWith(
             compareBy<ThreadPile> { STATE_ORDER.getValue(it.workState!!) }
-                .thenBy { if (it.workState == ThreadWorkState.BUSY) it.attachmentOrder else it.stateChangedAtMs }
+                .thenBy(ThreadPile::stateChangedAtMs)
+                .thenBy { if (it.workState == ThreadWorkState.BUSY) busyActivityOrder[it.locator] else null }
                 .thenBy(ThreadPile::attachmentOrder),
         )
 
-    private fun automaticFocus(): CodexThreadLocator? = knownPiles()
-        .firstOrNull { it.available && it.workState == ThreadWorkState.ATTENTION_REQUIRED }
-        ?.locator
-        ?: knownPiles().firstOrNull { it.available && it.workState == ThreadWorkState.READY }?.locator
+    private fun focusNearest(oldIndex: Int) {
+        val known = knownPiles()
+        val replacement = known.getOrNull(oldIndex)?.locator
+            ?: known.getOrNull(oldIndex - 1)?.locator
+        focused = replacement
+        if (replacement == null) {
+            lastViewed = null
+            hudVisible = false
+        } else {
+            lastViewed = replacement
+        }
+    }
+
+    private fun restoreLastViewed(): CodexThreadLocator? = lastViewed?.takeIf { it in piles }
 
     private companion object {
-        val ELIGIBLE_STATES = setOf(ThreadWorkState.ATTENTION_REQUIRED, ThreadWorkState.READY)
         val PROMINENT_OUTCOMES = setOf(TurnOutcome.FAILED, TurnOutcome.INTERRUPTED)
         val STATE_ORDER = mapOf(
             ThreadWorkState.BUSY to 0,
