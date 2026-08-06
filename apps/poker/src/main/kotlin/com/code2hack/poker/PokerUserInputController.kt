@@ -49,6 +49,7 @@ internal class PokerUserInputController(
             .forEach { oldLocator ->
                 projections.remove(oldLocator)?.let(::clearLayout)
                 pending.remove(oldLocator)
+                pendingPrimary.remove(oldLocator)
             }
         if (existing != null && existing != projection) {
             val primary = pendingPrimary[projection.request.locator]
@@ -65,7 +66,9 @@ internal class PokerUserInputController(
             }
         }
         projections[projection.request.locator] = projection
-        if (projection.request.resolution == RequestResolutionState.RESOLVED) {
+        if (projection.request.resolution == RequestResolutionState.RESOLVED ||
+            projection.request.resolution == RequestResolutionState.UNKNOWN
+        ) {
             pendingPrimary.remove(projection.request.locator)
         }
         updateLayout(projection)

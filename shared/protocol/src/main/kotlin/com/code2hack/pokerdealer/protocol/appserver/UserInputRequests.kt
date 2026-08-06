@@ -122,8 +122,8 @@ object UserInputProtocol {
             }
             request.questions.forEach { question ->
                 val values = answers.getValue(question.id)
-                require(values.isNotEmpty() && values.all(String::isNotBlank)) {
-                    "Answer for ${question.id} is empty"
+                require(values.size == 1 && values.single().isNotBlank()) {
+                    "Answer for ${question.id} must contain exactly one non-blank value"
                 }
                 val labels = question.options?.mapTo(mutableSetOf(), UserInputOption::label)
                 require(labels == null || values.all { it in labels } || question.isOther) {

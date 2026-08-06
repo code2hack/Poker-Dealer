@@ -159,6 +159,22 @@ class PokerPrimaryActionControllerTest {
         assertTrue(userInput.isPrimaryLocked(request.locator))
         assertFalse(primary.submit(selection))
         assertEquals(1, sent.size)
+
+        userInput.applyProjection(
+            UserInputRequestProjection(
+                request = request.copy(resolution = com.code2hack.pokerdealer.domain.RequestResolutionState.UNKNOWN),
+                buffer = buffer,
+                cardId = "card",
+                controlGeneration = 1,
+                connectionEpoch = 2,
+                modeSession = "mode",
+            ),
+        )
+        assertFalse(userInput.isPrimaryLocked(request.locator))
+        assertEquals(
+            com.code2hack.pokerdealer.domain.PokerNavigationMode.NAVIGATION,
+            navigation.anchor(thread)?.mode,
+        )
     }
 
     @Test

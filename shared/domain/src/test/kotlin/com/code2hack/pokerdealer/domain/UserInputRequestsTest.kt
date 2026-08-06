@@ -51,6 +51,25 @@ class UserInputRequestsTest {
     }
 
     @Test
+    fun `qualified reissue preserves the earliest auto-resolution deadline`() {
+        val old = request().copy(receivedAtMs = 10)
+        val current = old.copy(
+            locator = old.locator.copy(appServerGeneration = 2),
+            receivedAtMs = 20,
+        )
+
+        val rebound = UserInputRequestState()
+            .receive(old, sameIdReissueQualified = false)
+            .connectionLost("spark", 1)
+            .receive(current, sameIdReissueQualified = true)
+            .requests
+            .getValue(current.locator)
+
+        assertEquals(10L, rebound.receivedAtMs)
+        assertEquals(110L, rebound.deadlineAtMs)
+    }
+
+    @Test
     fun `answer buffer preserves Other text while switching named option`() {
         val request = requestWithOptions()
         val buffer = UserInputAnswerBuffer()

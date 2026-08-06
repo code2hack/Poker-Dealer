@@ -91,6 +91,20 @@ class UserInputRequestsTest {
     }
 
     @Test
+    fun `structured response accepts exactly one value per question`() {
+        val request = accepted("user-input-0.146.0-multiple-request.json")
+        val answers = mapOf(
+            "target" to listOf("Spark", "Fold6"),
+            "note" to listOf("Keep it narrow"),
+            "token" to listOf("secret-value"),
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            UserInputProtocol.response(request, answers)
+        }
+    }
+
+    @Test
     fun `secret answer never enters request state or fingerprint`() {
         val request = accepted("user-input-0.146.0-multiple-request.json")
         UserInputProtocol.response(
