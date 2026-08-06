@@ -168,7 +168,7 @@ Dealer selects Spark, u4090, or Fold6 Termux and accepts only the routes valid f
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-The next implementation slice is M3: long-lived simultaneous host sessions, configured-host thread discovery, manual attachments and control, Dealer-only thread lifecycle actions, deterministic work-state projection, command/file presentation, the three accepted server-request families, steering/interruption, settings, notifications, and recovery without duplicate actions. Poker networking begins in M4; Morse/ASR and Poker actions begin in M5.
+M3 is complete. The next implementation slice is the expanded M4: secure Dealer↔Poker synchronization, horizontal card-pile navigation, canonical controls and HID bindings, reviewed composer/request input, fixed-wheel Photo/Morse/ASR/Send/Steer/Interrupt, and integrated real-hardware acceptance. The former M5 milestone is retired; see `SPEC.md` sections 16–17 for the normative contract and issue order.
 
 ## Build and test
 

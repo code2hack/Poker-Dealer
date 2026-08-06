@@ -73,7 +73,7 @@ The same LAN app-server slice passes against daemon-backed local-TUI threads on 
 
 M2T qualifies the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and bounded recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-M3 is now the active slice. It adds long-lived simultaneous host sessions, configured-host thread discovery, manual Dealer attachments and control, Dealer-only lifecycle actions, deterministic `BUSY | ATTENTION_REQUIRED | READY` projection metadata, phone notifications, complete command/file cards, command/file approvals, structured questions, steering/interruption, and monotonic recovery without starting Poker networking.
+M3 is complete. The active slice is the expanded M4: Dealer↔Poker pairing and synchronization, horizontal card-pile navigation, canonical controls and bindings, reviewed composer and request input, Photo, Morse, and Dealer-local ASR. The former M5 milestone has been merged into M4 and retired.
 
 ## Core identity
 
@@ -106,12 +106,12 @@ The execution host does not change. Cross-host continuation requires repository 
 ## Authority
 
 - Codex app-server owns threads, turns, items, approvals, command/file-change state, and persisted Codex history.
-- Dealer owns configured hosts, route priority, embedded-tailnet lifecycle, distribution-specific daemon behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, durable composer drafts and photo assets, and Poker synchronization.
-- Poker owns only its process-local viewport, unacknowledged composition/capture state, and the user's direct semantic action before Dealer accepts it. Only its pairing identity persists.
+- Dealer owns configured hosts, route priority, embedded-tailnet lifecycle, distribution-specific daemon behavior, mobile presentation, recent projection/cache, unread state, control-surface intent, durable composer drafts and photo assets, Dealer-local ASR inference and provisional transcripts, and Poker synchronization.
+- Poker owns its viewport, unacknowledged composition/capture state, ephemeral microphone audio before Dealer consumes it, and the user's direct semantic action before Dealer accepts it. It persists trust and only the minimal content-free state needed for boot listening, unread continuity, and last-acknowledged Dealer-owned settings; synchronized card content remains process-local.
 
 ## Control rule
 
-Several clients may observe one thread. Only one human-control surface should actively submit turns, steer, interrupt, or resolve an approval at a time.
+Several clients may observe one thread. Only one human-control surface should actively submit turns, steer, interrupt, or resolve a server request at a time.
 
 ## Host distinctions
 
@@ -149,17 +149,20 @@ Termux installation and update behavior is distribution-specific. Dealer must ca
 - **Poker pairing:** The one-to-one trust relationship between one Dealer installation and one Poker installation, independent of either installation's current network endpoint. Authenticated reconnection reuses that relationship; trusting a different Dealer requires explicit replacement.
 - **Poker synchronization snapshot:** Dealer's authoritative retained projection sent to establish or rebuild Poker's synchronized state before live updates continue.
 - **Poker operation:** A source-neutral HUD action emitted by either the Rokid's built-in controls or a paired Bluetooth controller. The canonical operations are `DOWN`, `UP`, `RIGHT`, `LEFT`, `FN`, `TAP`, and `TAPTAP`.
-- **Poker action-wheel layout:** Dealer's stable mapping from noncentral relative-head-posture sectors to the available Poker actions. Runtime availability disables a sector without moving the others; the origin dead zone has no action.
-- **Poker Primary action:** The action wheel's state-sensitive draft action: Send for a nonempty Ready composer, Steer for a nonempty Busy composer, or semantic Interrupt when the Busy composer is empty.
+- **Poker action wheel:** The fixed posture selector opened by holding `FN`: up is Photo, down is Primary, left is Morse, and right is ASR. Runtime availability disables a sector without moving the others; the origin dead zone has no action.
+- **Poker Primary action:** The action wheel's context-sensitive action: Send for a nonempty Ready composer, Steer for a nonempty Busy composer, semantic Interrupt when the Busy composer is empty, or submit the current valid response from a request panel Poker may safely resolve.
 - **Poker navigation mode:** The HUD mode in which `DOWN` and `UP` scroll within or jump among cards in the focused pile.
 - **Poker request panel:** The text-input or decision surface owned by one unresolved server-request card.
 - **Poker input mode:** The HUD mode in which focus has moved from a card into that card's request panel or into the thread composer below the newest card.
 - **Poker composer input:** The ordinary thread-composer form of Poker input mode. Draft editing, photo capture, and turn submission apply only here, never in a request panel.
 - **Draft photo token:** An atomic photo element in an ordered composer draft, rendered on Poker as `📷`. It retains the identity of its underlying unsent image and is distinct from an ordinary typed emoji.
 - **Poker word motion:** Unicode-aware movement among user-visible words and atomic photo tokens in composer input. It borrows Vim's `w`, `b`, and `dw` behavior without emulating terminal keys.
-- **Poker HUD visibility:** Poker's local visible or hidden presentation state, including its focused and last-viewed pile. Dealer supplies synchronized thread facts but does not command the viewport; hiding the HUD does not detach a thread, unsubscribe Dealer, or disconnect a host.
+- **Dealer-local ASR:** The M4 dictation path in which Poker normally captures ephemeral microphone audio and Dealer recognizes it locally on the Fold6 with an installed model pack and its Dealer-owned profile. Neither Rokid speech services nor a Codex execution host receives that audio.
+- **Poker HUD visibility:** Poker's local visible or hidden presentation state, including its focused and last-viewed pile. Dealer supplies synchronized thread facts and may request foregrounding for new readable cards, but foregrounding never changes focus or input state; hiding the HUD does not detach a thread, unsubscribe Dealer, or disconnect a host.
 - **Poker scroll anchor:** Poker's process-local card and reading position within one attached pile. Each pile retains its own anchor and interaction mode so live growth and pile switching do not displace the text being read.
-- **Poker unread state:** A per-pile indication that synchronized content exists beyond its scroll anchor. It clears only while the pile is focused at its newest content and never changes focus by itself.
+- **Poker unread state:** A pairing-specific count of newly created nonhuman cards not yet read on Poker. A finalized card becomes read only when its final line is visible while focused; Dealer reading and existing-card updates do not clear or increment the count.
+- **ASR model pack:** One immutable, digest-verified set of `sherpa-onnx` artifacts, adapter metadata, supported languages, size, and editable-profile schema at a pinned revision.
+- **ASR profile:** Dealer's versioned, model-specific runtime configuration for one installed ASR model pack. It cannot change artifacts, transport, or Poker's interaction contract.
 
 ## Explicitly abandoned terminology
 

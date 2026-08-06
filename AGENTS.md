@@ -165,9 +165,9 @@ The M2 workstation slice proves Spark and u4090 through the same daemon-backed a
 
 M2T now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-The current slice is M3: multi-host long-lived Dealer sessions, configured-host thread discovery, manual attachments and soft control, Dealer-only thread lifecycle actions, deterministic `BUSY | ATTENTION_REQUIRED | READY` projection metadata, complete command/file cards, the three accepted server-request families, steering/interruption, settings, phone notifications, recovery, and duplicate prevention.
+M3 is complete. The current slice is the expanded M4: Dealer↔Poker pairing and synchronization, horizontal `BUSY | ATTENTION_REQUIRED | READY` card piles without an attached-thread list, canonical operations and HID bindings, reviewed composer/request input, the fixed action wheel, Photo, Morse, and Dealer-local ASR/model management. The former M5 milestone is retired. Follow `SPEC.md` section 17's narrow issue order before implementation.
 
-Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, or start Poker networking/HUD rendering, Morse, ASR, Poker actions, a terminal, generic slash-command parsing, per-thread provider proxying, or broad experimental app-server APIs during M3.
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, add an attached-thread list or configurable wheel, revive M5, use u4090 while it is unavailable, or add a terminal, generic slash-command parser, per-thread provider proxy, broad experimental app-server APIs, proprietary Rokid transport, or cross-host migration during M4.
 
 ## Completion discipline
 
@@ -180,6 +180,9 @@ Do not access Termux-private files or Unix sockets directly, route Termux throug
 
 ## Privileged commands
 
-When a required command needs `sudo`, open a new tmux pane below the current pane, run the command
-there, and wait for the user to enter the password. Do not silently replace it with a user-level
-fallback.
+When a required command needs interactive `sudo` authentication, automatically create a uniquely
+named temporary detached tmux session with a short name, run the exact command there, report the
+session name and attach command, and end the current turn so the thread becomes `READY`. Resume only
+after the user says password entry is complete, then inspect the result and remove only that temporary
+session when it is no longer needed. Never store, retrieve, capture, log, or relay the password, and
+do not silently replace the privileged command with a user-level fallback.

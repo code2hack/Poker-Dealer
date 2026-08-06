@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-27
-- **Last amended:** 2026-07-28 for M3 multi-host interaction architecture
+- **Last amended:** 2026-08-06 for expanded M4 Poker control and focus rules
 - **Amended by:** ADR 0003, which adds Fold6 Termux as a supported host
 - **Amended by:** ADR 0004, which embeds a userspace Tailscale node in Dealer
 - **Supersedes:** the tmux-pane bridge backend and any planned custom host conversation bridge
@@ -45,9 +45,9 @@ Codex app-server exposes structured thread, turn, item, streaming, interruption,
 20. An uncertain `turn/start` is never replayed. One client-identified user card advances from local pending to accepted and then delivered; it becomes unknown only when acceptance was not established.
 21. One-shot Dealer runs end in completed, recovered, cancelled, or error state. Service-owned run state survives Activity recreation and service rebinding within the application process.
 22. Dealer may keep Spark, u4090, and Fold6 Termux connected concurrently, using one initialized app-server connection per enabled host and a durable, user-controlled connection intent.
-23. Thread attachment is manual, host-qualified, and separate from host connectivity and soft control. Only Dealer attaches, detaches, or initiates thread lifecycle actions; Poker receives the synchronized projection and controls only its presentation.
+23. Thread attachment is manual, host-qualified, and separate from host connectivity and soft control. Only Dealer attaches, detaches, or initiates thread lifecycle actions; Poker receives the synchronized projection and may perform only the specified semantic input and presentation actions through Dealer.
 24. Soft-control claims are per `(hostId, threadId)`. Dealer may control several different threads concurrently, but process death, explicit host disconnection, or uncorrelated external activity revokes the affected claim.
-25. Discovered and attached threads expose `BUSY`, `ATTENTION_REQUIRED`, or `READY` work state independently of host availability. Attention takes automatic focus priority over Ready.
+25. Discovered and attached threads expose `BUSY`, `ATTENTION_REQUIRED`, or `READY` work state independently of host availability. Poker orders these groups horizontally but work-state changes and foreground wake never select or move focus; only the user's canonical navigation changes piles.
 26. M3 resolves only command-execution approvals, file-change approvals, and structured user-input questions, and resolves them only in Dealer. Unknown or incompletely renderable requests fail closed.
 27. Dealer retains attached-thread projections, drafts, and pending-action state in Dealer-private storage for process and same-phone reboot recovery. Host state remains authoritative; device loss and removal of Dealer-private storage are outside this guarantee.
 28. Safe Archive/Delete cascade preflight uses the narrowly accepted unstable `thread/list.ancestorThreadId` filter only on a host/version where fixtures and live qualification prove it. Without that proof, Dealer disables those actions rather than infer descendants from an incomplete visible list.
