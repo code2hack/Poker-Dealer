@@ -82,7 +82,8 @@ object CommandApprovalProtocol {
                 approvalId = approvalId,
                 scope = scope,
                 proposedExecpolicyAmendment = proposal,
-                offeredDecisions = offered,
+                offeredDecisions = offered.toSet(),
+                offeredDecisionOrder = offered,
                 fingerprint = fingerprint(wire.method, threadId, turnId, itemId, approvalId, scope, proposal),
                 createdAtMs = startedAtMs,
             ),
@@ -131,19 +132,19 @@ object CommandApprovalProtocol {
     private fun availableDecisions(
         element: JsonElement?,
         hasExecpolicyProposal: Boolean,
-    ): Set<CommandApprovalDecision> {
+    ): List<CommandApprovalDecision> {
         val protocolDecisions = if (element == null) {
             PROVEN_DECISIONS
         } else {
-            (element as? JsonArray).orEmpty().mapNotNullTo(mutableSetOf()) { decision ->
+            (element as? JsonArray).orEmpty().mapNotNull { decision ->
                 val name = (decision as? JsonPrimitive)?.contentOrNull
                     ?: (decision as? JsonObject)?.keys?.singleOrNull()
                 CommandApprovalDecision.entries.firstOrNull { it.wireName == name }
             }
         }
-        return protocolDecisions.filterTo(mutableSetOf()) {
+        return protocolDecisions.filter {
             it != CommandApprovalDecision.ACCEPT_WITH_EXECPOLICY_AMENDMENT || hasExecpolicyProposal
-        }
+        }.distinct()
     }
 
     private fun fingerprint(
@@ -174,7 +175,7 @@ object CommandApprovalProtocol {
         },
     )
 
-    private val PROVEN_DECISIONS = setOf(
+    private val PROVEN_DECISIONS = listOf(
         CommandApprovalDecision.ACCEPT,
         CommandApprovalDecision.ACCEPT_FOR_SESSION,
         CommandApprovalDecision.ACCEPT_WITH_EXECPOLICY_AMENDMENT,
