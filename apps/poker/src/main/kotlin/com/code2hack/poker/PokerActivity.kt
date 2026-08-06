@@ -41,7 +41,7 @@ class PokerActivity : ComponentActivity() {
         screenState = mutableStateOf(navigation.snapshot(cardTextByLocator))
         lifecycleScope.launch {
             PokerSnapshotRuntime.snapshot.collect { snapshot ->
-                installSnapshot(snapshot)
+                cardTextByLocator = navigation.installPokerSnapshot(snapshot)
                 PokerComposerBridge.projections.value.values.forEach(composerController::applyProjection)
                 screenState.value = navigation.snapshot(cardTextByLocator)
             }
@@ -97,35 +97,63 @@ class PokerActivity : ComponentActivity() {
         if (::input.isInitialized) input.onDisconnected()
         super.onDestroy()
     }
+}
 
-    private fun installSnapshot(snapshot: PokerSnapshot?) {
-        val currentLocators = navigation.metadata().orderedPiles
-            .plus(navigation.metadata().unknownWorkState)
-            .map { it.locator }
-        currentLocators.forEach(navigation::detach)
+/** Installs Dealer metadata without replacing Poker-local presentation state. */
+internal fun PokerNavigationReducer.installPokerSnapshot(
+    snapshot: PokerSnapshot?,
+): Map<CodexThreadLocator, String> {
+    val before = metadata()
+    val currentLocators = (before.orderedPiles + before.unknownWorkState).map { it.locator }
+    val currentFocusableLocators = before.orderedPiles.map { it.locator }
+    val previousLayouts = currentLocators.associateWith(::layout)
+    val piles = snapshot?.piles.orEmpty()
+    val pilesByLocator = piles.associateBy { it.metadata.locator }
+    val nextMetadata = snapshot?.projection?.orderedPiles.orEmpty() +
+        snapshot?.projection?.unknownWorkState.orEmpty()
+    val nextLocators = nextMetadata.map { it.locator }
+    val nextFocusableLocators = snapshot?.projection?.orderedPiles.orEmpty().map { it.locator }
+    val nextLocatorSet = nextLocators.toSet()
 
-        val piles = snapshot?.piles.orEmpty()
-        cardTextByLocator = piles.associate { pile ->
-            pile.metadata.locator to pile.cards.joinToString("\n\n") { it.fullText }
-        }
-        val ordered = snapshot?.projection?.orderedPiles.orEmpty()
-        val unknown = snapshot?.projection?.unknownWorkState.orEmpty()
-        (ordered + unknown).forEach { metadata ->
-            val pile = piles.single { it.metadata.locator == metadata.locator }
-            navigation.attach(
+    currentLocators.filter { it !in nextLocatorSet }.forEach(::detach)
+    nextMetadata.forEach { metadata ->
+        val pile = pilesByLocator.getValue(metadata.locator)
+        val layout = pile.layout(previousLayouts[metadata.locator])
+        if (metadata.locator in currentLocators) {
+            reconcile(
                 locator = metadata.locator,
                 evidence = metadata.evidence(),
                 atMs = metadata.stateChangedAtMs,
                 available = metadata.available,
-                layout = pile.layout(),
+            )
+            setLayout(metadata.locator, layout)
+        } else {
+            attach(
+                locator = metadata.locator,
+                evidence = metadata.evidence(),
+                atMs = metadata.stateChangedAtMs,
+                available = metadata.available,
+                layout = layout,
             )
         }
-        val focus = snapshot?.projection?.focused
-        if (snapshot?.projection?.hudVisible == true && focus != null) {
-            runCatching { navigation.view(focus) }
-        } else {
-            navigation.manualHide()
+    }
+
+    if (before.hudVisible) {
+        val focused = before.focused
+        val replacement = when {
+            focused == null -> null
+            focused in nextFocusableLocators -> focused
+            else -> {
+                val oldIndex = currentFocusableLocators.indexOf(focused)
+                nextFocusableLocators.getOrNull(oldIndex)
+                    ?: nextFocusableLocators.getOrNull(oldIndex - 1)
+            }
         }
+        if (replacement != null) view(replacement) else manualHide()
+    }
+
+    return piles.associate { pile ->
+        pile.metadata.locator to pile.cards.joinToString("\n\n") { it.fullText }
     }
 }
 
@@ -169,11 +197,22 @@ private fun PokerSnapshotPileMetadata.evidence(): ThreadWorkEvidence = when (wor
     else -> error("Unknown snapshot work state: $workState")
 }
 
-private fun PokerSnapshotPile.layout(): PokerPileLayout = PokerPileLayout(
-    cards = cards.map { card ->
-        PokerCardLayout(
-            id = card.id,
-            collapsedLineCount = (card.fullText.count { it == '\n' } + 1).coerceAtLeast(1),
-        )
-    },
-)
+private fun PokerSnapshotPile.layout(previous: PokerPileLayout? = null): PokerPileLayout {
+    val previousCards = previous?.cards.orEmpty().associateBy(PokerCardLayout::id)
+    return PokerPileLayout(
+        cards = cards.map { card ->
+            val previousCard = previousCards[card.id]
+            val collapsedLineCount = (card.fullText.count { it == '\n' } + 1).coerceAtLeast(1)
+            PokerCardLayout(
+                id = card.id,
+                collapsedLineCount = collapsedLineCount,
+                expandedLineCount = maxOf(
+                    collapsedLineCount,
+                    previousCard?.expandedLineCount ?: 0,
+                ),
+                requestPanel = previousCard?.requestPanel,
+            )
+        },
+        composer = previous?.composer,
+    )
+}
