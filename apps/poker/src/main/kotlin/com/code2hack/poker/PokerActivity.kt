@@ -47,6 +47,7 @@ class PokerActivity : ComponentActivity() {
     private lateinit var navigation: PokerNavigationReducer
     private lateinit var composerController: PokerComposerController
     private lateinit var primaryActionController: PokerPrimaryActionController
+    private lateinit var approvalController: PokerApprovalController
     private var postureSensorManager: SensorManager? = null
     private var postureSensor: Sensor? = null
     private val postureRotation = FloatArray(9)
@@ -93,10 +94,12 @@ class PokerActivity : ComponentActivity() {
         navigation = PokerNavigationReducer(viewportLineCount = 12)
         composerController = PokerComposerController(navigation, PokerComposerBridge::sendMutation)
         userInputController = PokerUserInputController(navigation, PokerComposerBridge::sendUserInputMutation)
+        approvalController = PokerApprovalController(navigation)
         primaryActionController = PokerPrimaryActionController(
             navigation = navigation,
             composer = composerController,
             userInput = userInputController,
+            approvals = approvalController,
             sendAction = PokerComposerBridge::sendPrimaryAction,
         )
         screenState = mutableStateOf(currentScreenState())
@@ -110,6 +113,7 @@ class PokerActivity : ComponentActivity() {
                 cardTextByLocator = navigation.installPokerSnapshot(snapshot)
                 PokerComposerBridge.projections.value.values.forEach(composerController::applyProjection)
                 PokerComposerBridge.userInputProjections.value.values.forEach(userInputController::applyProjection)
+                PokerComposerBridge.approvalProjections.value.values.forEach(approvalController::applyProjection)
                 screenState.value = currentScreenState()
             }
         }
@@ -140,6 +144,12 @@ class PokerActivity : ComponentActivity() {
             PokerComposerBridge.userInputResults.collect { results ->
                 results.values.forEach(userInputController::applyResult)
                 screenState.value = currentScreenState()
+            }
+        }
+        lifecycleScope.launch {
+            PokerComposerBridge.approvalProjections.collect { projections ->
+                projections.values.forEach(approvalController::applyProjection)
+                screenState.value = navigation.snapshot(cardTextByLocator, currentRequestProjections())
             }
         }
         lifecycleScope.launch {
@@ -349,7 +359,8 @@ private fun PokerCardReader(state: PokerScreenState) {
         cardTextByLocator = state.cardTextByLocator,
         anchorByLocator = state.anchors,
         composerTextByLocator = state.composerTextByLocator,
-        requestProjectionsByLocator = state.requestProjectionsByLocator,
+            requestProjectionsByLocator = state.requestProjectionsByLocator,
+        approvalProjectionsByLocator = state.approvalProjectionsByLocator,
         cardsByLocator = state.cardsByLocator,
         metadataByLocator = state.metadataByLocator,
         unreadCount = state.unreadCount,
@@ -402,6 +413,7 @@ private data class PokerScreenState(
     val metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata>,
     val requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>>,
     val unreadCount: Int,
+    val approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>>,
     val wheelState: PokerWheelState = PokerWheelState(),
 )
 
@@ -413,6 +425,7 @@ private fun PokerNavigationReducer.snapshot(
     requestCardsByLocator: Map<CodexThreadLocator, List<PokerSnapshotRequestCard>> = emptyMap(),
     unreadCount: Int = PokerSnapshotRuntime.unreadCount.value,
     wheelState: PokerWheelState = PokerWheelState(),
+    approvalProjectionsByLocator: Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>> = currentApprovalProjections(),
 ): PokerScreenState {
     val metadata = metadata()
     return PokerScreenState(
@@ -427,6 +440,7 @@ private fun PokerNavigationReducer.snapshot(
         metadataByLocator = metadataByLocator,
         requestCardsByLocator = requestCardsByLocator,
         unreadCount = unreadCount,
+        approvalProjectionsByLocator = approvalProjectionsByLocator,
         wheelState = wheelState,
     )
 }
@@ -444,6 +458,8 @@ private fun currentRequestProjections(): Map<CodexThreadLocator, List<UserInputR
 
 private fun RequestResolutionState.isFinalized(): Boolean = this != RequestResolutionState.PENDING &&
     this != RequestResolutionState.RESPONDING
+private fun currentApprovalProjections(): Map<CodexThreadLocator, List<com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection>> =
+    PokerComposerBridge.approvalProjections.value.values.groupBy { it.thread }
 
 private fun PokerSnapshotPile.layout(previous: PokerPileLayout? = null): PokerPileLayout {
     val previousCards = previous?.cards.orEmpty().associateBy(PokerCardLayout::id)

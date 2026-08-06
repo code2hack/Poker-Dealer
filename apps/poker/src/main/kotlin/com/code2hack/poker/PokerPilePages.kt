@@ -34,6 +34,8 @@ import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
 import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
+import com.code2hack.pokerdealer.protocol.PokerApprovalDecision
+import com.code2hack.pokerdealer.protocol.PokerApprovalRequestProjection
 
 internal data class PokerPilePage(
     val locator: CodexThreadLocator,
@@ -47,6 +49,7 @@ internal data class PokerPilePage(
     val hostLabel: String = "",
     val threadLabel: String = "",
     val unreadCount: Int = 0,
+    val approvalProjections: List<PokerApprovalRequestProjection> = emptyList(),
 )
 
 internal data class PokerPileRenderProjection(
@@ -65,6 +68,7 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
     cardsByLocator: Map<CodexThreadLocator, List<Card>> = emptyMap(),
     metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
     unreadCount: Int = 0,
+    approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -80,6 +84,7 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 hostLabel = metadataByLocator[pile.locator]?.hostLabel.orEmpty(),
                 threadLabel = metadataByLocator[pile.locator]?.threadLabel().orEmpty(),
                 unreadCount = unreadCount,
+                approvalProjections = approvalProjectionsByLocator[pile.locator].orEmpty(),
             )
         }
     },
@@ -98,6 +103,7 @@ internal fun PokerPilePages(
     metadataByLocator: Map<CodexThreadLocator, PokerSnapshotPileMetadata> = emptyMap(),
     unreadCount: Int = 0,
     onCardFinalLineVisible: (CodexThreadLocator, String) -> Unit = { _, _ -> },
+    approvalProjectionsByLocator: Map<CodexThreadLocator, List<PokerApprovalRequestProjection>> = emptyMap(),
     wheelState: PokerWheelState = PokerWheelState(),
 ) {
     val projection = metadata.toPokerPileRenderProjection(
@@ -108,6 +114,7 @@ internal fun PokerPilePages(
         cardsByLocator,
         metadataByLocator,
         unreadCount,
+        approvalProjectionsByLocator,
     )
     val page = projection.visiblePage ?: return
     val lines = remember(page.locator, page.cardText, page.cards) { page.renderLines() }
@@ -217,6 +224,60 @@ internal fun PokerPilePages(
                         controlPosition++
                     }
                 }
+                }
+            }
+
+            page.approvalProjections.forEach { projection ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 8.dp),
+                ) {
+                    Text(
+                        "Approval ${projection.locator.requestId} | ${projection.resolution}",
+                        color = Color(0xFFFFB4A2),
+                    )
+                    projection.scope.command?.let { Text("Command: $it", color = Color(0xFFE8EEF4)) }
+                    projection.scope.workingDirectory?.let {
+                        Text("Directory: $it", color = Color(0xFFE8EEF4))
+                    }
+                    projection.scope.networkHost?.let {
+                        Text(
+                            "Network: $it/${projection.scope.networkProtocol.orEmpty()}",
+                            color = Color(0xFFE8EEF4),
+                        )
+                    }
+                    projection.scope.reason?.let { Text("Reason: $it", color = Color(0xFFE8EEF4)) }
+                    projection.scope.grantRoot?.let { Text("Grant root: $it", color = Color(0xFFE8EEF4)) }
+                    projection.scope.fileChanges.forEach { change ->
+                        Text(
+                            "${change.kind}: ${change.path}",
+                            color = Color(0xFFE8EEF4),
+                        )
+                        Text(change.diff, color = Color(0xFFB7C8D8), fontFamily = FontFamily.Monospace)
+                    }
+                    projection.proposedExecpolicyAmendment?.let { amendment ->
+                        Text("Execpolicy amendment: ${amendment.joinToString(" ")}", color = Color(0xFFE8EEF4))
+                    }
+                    if (!projection.complete || !projection.actionable) {
+                        Text("Dealer review required; Primary disabled", color = Color(0xFFFFD18A))
+                    }
+                    projection.choices.forEachIndexed { index, choice ->
+                        val highlighted = page.anchor?.let { anchor ->
+                            anchor.mode == com.code2hack.pokerdealer.domain.PokerNavigationMode.REQUEST_PANEL &&
+                                anchor.inputId == projection.panelId && anchor.cursorPosition == index
+                        } == true
+                        Text(
+                            "${if (highlighted) "▶" else "·"} ${choice.label()}",
+                            color = if (highlighted) Color(0xFFFFD18A) else Color(0xFFE8EEF4),
+                        )
+                    }
+                    projection.decision?.let { decision ->
+                        Text("Decision: ${decision.label()}", color = Color(0xFFB7E3C0))
+                    }
+                    if (projection.resolvedElsewhere) {
+                        Text("Resolved elsewhere", color = Color(0xFFB7E3C0))
+                    }
                 }
             }
 
@@ -344,6 +405,14 @@ private fun PokerSnapshotPileMetadata.threadLabel(): String =
         .ifBlank { locator.threadId }
 
 private fun collapseWhitespace(value: String): String = value.trim().replace(Regex("\\s+"), " ")
+
+private fun PokerApprovalDecision.label(): String = when (this) {
+    PokerApprovalDecision.ACCEPT -> "Accept"
+    PokerApprovalDecision.ACCEPT_FOR_SESSION -> "Accept for session"
+    PokerApprovalDecision.ACCEPT_WITH_EXECPOLICY_AMENDMENT -> "Accept with execpolicy amendment"
+    PokerApprovalDecision.DECLINE -> "Decline"
+    PokerApprovalDecision.CANCEL -> "Cancel"
+}
 
 @Composable
 private fun wheelLabel(state: PokerWheelState, action: PokerWheelAction, label: String) {
