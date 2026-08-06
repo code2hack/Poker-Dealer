@@ -34,6 +34,25 @@ class PokerAsrCaptureTest {
     }
 
     @Test
+    fun `low storage stops before opening the recorder`() = runTest {
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = { true },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            storageAvailable = { false },
+            minimumBufferSize = { error("storage must gate buffer setup") },
+            recorderFactory = { error("storage must gate recorder creation") },
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertFalse(capture.start())
+        assertEquals(listOf("ASR failed"), reasons)
+    }
+
+    @Test
     fun `capture emits whole signed pcm16 chunks in order`() = runTest {
         val recorder = FakeRecorder(
             byteArrayOf(1, 0, -2, 127),
@@ -90,6 +109,29 @@ class PokerAsrCaptureTest {
         runCurrent()
 
         assertEquals(1, failures)
+        assertTrue(recorder.released)
+    }
+
+    @Test
+    fun `source loss terminates an already started capture`() = runTest {
+        val recorder = FakeRecorder(byteArrayOf(1, 0))
+        var reasons = mutableListOf<String>()
+        val capture = PokerAsrCapture(
+            scope = this,
+            send = { true },
+            onFailure = { error("reason callback must be used") },
+            onFailureReason = { reasons += it },
+            permissionGranted = { true },
+            sourceAvailable = { false },
+            minimumBufferSize = { POKER_ASR_FRAME_BYTES },
+            recorderFactory = { recorder },
+            dispatcher = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        assertTrue(capture.start())
+        runCurrent()
+
+        assertEquals(listOf("ASR failed"), reasons)
         assertTrue(recorder.released)
     }
 

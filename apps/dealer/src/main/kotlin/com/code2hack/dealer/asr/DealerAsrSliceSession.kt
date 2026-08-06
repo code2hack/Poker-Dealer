@@ -18,6 +18,15 @@ internal class DealerAsrSliceSession(
     var nextSampleOffset: Long = 0
         private set
 
+    var sliceStartSampleOffset: Long = 0
+        private set
+
+    var lastCommittedSlice: DealerAsrCommittedSlice? = null
+        private set
+
+    val hasUncommittedSlice: Boolean
+        get() = nextSampleOffset > sliceStartSampleOffset || recognizer.provisionalText().isNotBlank()
+
     private var lastProjectionAtMs: Long? = null
     private var closed = false
 
@@ -66,13 +75,26 @@ internal class DealerAsrSliceSession(
         check(fenceSampleOffset == nextSampleOffset) { "ASR commit fence is stale" }
         val text = recognizer.commitSlice()
         sliceRevision++
+        sliceStartSampleOffset = nextSampleOffset
         return text
     }
 
-    fun discardSlice() {
+    fun discardSlice(fenceSampleOffset: Long) {
         check(!closed) { "ASR session is closed" }
+        check(fenceSampleOffset == nextSampleOffset) { "ASR discard fence is stale" }
         recognizer.discardSlice()
         sliceRevision++
+        sliceStartSampleOffset = nextSampleOffset
+    }
+
+    fun rememberCommittedSlice(target: PokerAsrTarget, start: Int, endExclusive: Int, text: String) {
+        if (text.isNotEmpty()) {
+            lastCommittedSlice = DealerAsrCommittedSlice(target, start, endExclusive, text)
+        }
+    }
+
+    fun clearLastCommittedSlice() {
+        lastCommittedSlice = null
     }
 
     suspend fun close() {
@@ -85,3 +107,10 @@ internal class DealerAsrSliceSession(
         }
     }
 }
+
+internal data class DealerAsrCommittedSlice(
+    val target: PokerAsrTarget,
+    val start: Int,
+    val endExclusive: Int,
+    val text: String,
+)

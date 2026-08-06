@@ -17,12 +17,16 @@ import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.protocol.POKER_ASR_AUDIO_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_AVAILABILITY_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_COMMIT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_ASR_DISCARD_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_EXIT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_ASR_START_TYPE
 import com.code2hack.pokerdealer.protocol.PokerAsrAvailability
 import com.code2hack.pokerdealer.protocol.PokerAsrAudioFrame
 import com.code2hack.pokerdealer.protocol.PokerAsrCommitRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrCommitResult
+import com.code2hack.pokerdealer.protocol.PokerAsrDiscardKind
+import com.code2hack.pokerdealer.protocol.PokerAsrDiscardRequest
+import com.code2hack.pokerdealer.protocol.PokerAsrDiscardResult
 import com.code2hack.pokerdealer.protocol.PokerAsrExitRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrExitResult
 import com.code2hack.pokerdealer.protocol.PokerAsrMutationOutcome
@@ -112,7 +116,7 @@ class PokerAsrControllerTest {
             .map { message<PokerAsrAudioFrame>(POKER_ASR_AUDIO_TYPE, it).firstSampleOffset })
 
         harness.controller.handleInteraction(release(PokerOperation.DOWN))
-        assertEquals(1, harness.counters.captureStops)
+        assertEquals(0, harness.counters.captureStops)
         val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
         assertEquals(4L, commit.fenceSampleOffset)
         assertTrue(harness.controller.sendAudio(byteArrayOf(5, 0)))
@@ -131,7 +135,7 @@ class PokerAsrControllerTest {
         )
         assertEquals(PokerAsrState.ACTIVE, harness.controller.state)
         assertEquals(2, harness.counters.captures)
-        assertEquals(1, harness.counters.captureStops)
+        assertEquals(0, harness.counters.captureStops)
     }
 
     @Test
@@ -214,6 +218,92 @@ class PokerAsrControllerTest {
         )
         assertEquals(PokerAsrState.IDLE, controller.state)
         assertEquals(0, notices)
+    }
+
+    @Test
+    fun `short FN deletes only the last committed slice and flushes post fence audio`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
+        val committedTarget = start.target.copy(targetRevision = 8, cursorPosition = 5)
+        harness.controller.onCommitResult(
+            PokerAsrCommitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = commit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+                committedText = "ok.",
+                nextTarget = committedTarget,
+            ),
+        )
+
+        harness.controller.handleInteraction(release(PokerOperation.FN))
+        val discard = message<PokerAsrDiscardRequest>(POKER_ASR_DISCARD_TYPE)
+        assertEquals(PokerAsrDiscardKind.LAST_COMMITTED_SLICE, discard.kind)
+        assertEquals(2, discard.deleteStart)
+        assertEquals(5, discard.deleteEndExclusive)
+        assertEquals("ok.", discard.expectedText)
+        assertEquals(1L, discard.fenceSampleOffset)
+        assertTrue(harness.controller.sendAudio(byteArrayOf(2, 0)))
+        assertEquals(1, sent.filterType(POKER_ASR_AUDIO_TYPE).size)
+
+        val deletedTarget = committedTarget.copy(targetRevision = 9, cursorPosition = 2)
+        harness.controller.onDiscardResult(
+            PokerAsrDiscardResult(
+                target = committedTarget,
+                sessionId = start.sessionId,
+                operationId = discard.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+                nextTarget = deletedTarget,
+            ),
+        )
+        assertEquals(PokerAsrState.ACTIVE, harness.controller.state)
+        assertEquals(listOf(0L, 1L), sent.filterType(POKER_ASR_AUDIO_TYPE)
+            .map { message<PokerAsrAudioFrame>(POKER_ASR_AUDIO_TYPE, it).firstSampleOffset })
+    }
+
+    @Test
+    fun `long FN wins over a pending commit and accepts stale base target`() = runBlocking {
+        val harness = composerHarness()
+        assertTrue(harness.controller.start())
+        val start = message<PokerAsrStartRequest>(POKER_ASR_START_TYPE)
+        harness.controller.onStartResult(
+            PokerAsrStartResult(start.target, start.sessionId, PokerAsrStartOutcome.READY, pack),
+        )
+        assertTrue(harness.controller.sendAudio(byteArrayOf(1, 0)))
+        harness.controller.handleInteraction(release(PokerOperation.DOWN))
+        val commit = message<PokerAsrCommitRequest>(POKER_ASR_COMMIT_TYPE)
+
+        harness.controller.handleInteraction(release(PokerOperation.FN, durationMs = 500))
+        assertEquals(PokerAsrState.EXITING, harness.controller.state)
+        val exit = message<PokerAsrExitRequest>(POKER_ASR_EXIT_TYPE)
+        harness.controller.onCommitResult(
+            PokerAsrCommitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = commit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+                committedText = "ok.",
+                nextTarget = start.target.copy(targetRevision = 8, cursorPosition = 5),
+            ),
+        )
+        harness.controller.onExitResult(
+            PokerAsrExitResult(
+                target = start.target,
+                sessionId = start.sessionId,
+                operationId = exit.operationId,
+                outcome = PokerAsrMutationOutcome.ACKNOWLEDGED,
+            ),
+        )
+        assertEquals(PokerAsrState.IDLE, harness.controller.state)
+        assertEquals(1, harness.counters.notices)
     }
 
     @Test
@@ -306,6 +396,7 @@ class PokerAsrControllerTest {
         PokerAsrStartRequest::class -> PokerAsrStartRequest.serializer()
         PokerAsrAudioFrame::class -> PokerAsrAudioFrame.serializer()
         PokerAsrCommitRequest::class -> PokerAsrCommitRequest.serializer()
+        PokerAsrDiscardRequest::class -> PokerAsrDiscardRequest.serializer()
         PokerAsrExitRequest::class -> PokerAsrExitRequest.serializer()
         else -> error("missing test serializer")
     } as KSerializer<T>

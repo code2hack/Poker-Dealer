@@ -8,6 +8,8 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Process
+import android.os.StatFs
+import com.code2hack.pokerdealer.protocol.POKER_ASR_MAX_AUDIO_QUEUE_BYTES
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -72,12 +74,16 @@ internal class PokerAsrCapture internal constructor(
     private val minimumBufferSize: () -> Int,
     private val recorderFactory: (Int) -> PokerAsrRecorder?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Unconfined,
+    private val storageAvailable: () -> Boolean = { true },
+    private val sourceAvailable: () -> Boolean = { true },
+    private val onFailureReason: ((String) -> Unit)? = null,
 ) {
     constructor(
         context: Context,
         scope: CoroutineScope,
         send: suspend (ByteArray) -> Boolean,
         onFailure: () -> Unit,
+        onFailureReason: ((String) -> Unit)? = null,
     ) : this(
         scope = scope,
         send = send,
@@ -94,25 +100,33 @@ internal class PokerAsrCapture internal constructor(
         },
         recorderFactory = ::createAndroidPokerAsrRecorder,
         dispatcher = Dispatchers.IO,
+        storageAvailable = { hasNativeStorage(context) },
+        onFailureReason = onFailureReason,
     )
 
     private var recorder: PokerAsrRecorder? = null
     private var job: Job? = null
+    private var failureReported = false
 
     fun start(): Boolean {
         if (job?.isActive == true) return true
+        failureReported = false
         if (!permissionGranted()) {
-            onFailure()
+            reportFailure("ASR unavailable")
+            return false
+        }
+        if (!storageAvailable()) {
+            reportFailure("ASR failed")
             return false
         }
         val minimum = runCatching { minimumBufferSize() }.getOrDefault(-1)
         if (minimum <= 0) {
-            onFailure()
+            reportFailure("ASR unavailable")
             return false
         }
         val audio = recorderFactory(minimum)
         if (audio == null) {
-            onFailure()
+            reportFailure("ASR unavailable")
             return false
         }
         recorder = audio
@@ -123,7 +137,7 @@ internal class PokerAsrCapture internal constructor(
         }.getOrElse {
             runCatching { audio.release() }
             recorder = null
-            onFailure()
+            reportFailure("ASR unavailable")
             false
         }
     }
@@ -143,14 +157,22 @@ internal class PokerAsrCapture internal constructor(
         val buffer = ByteArray(POKER_ASR_FRAME_BYTES)
         try {
             while (scope.isActive && audio.isRecording) {
+                if (!permissionGranted()) {
+                    reportFailure("ASR unavailable")
+                    return
+                }
+                if (!storageAvailable() || !sourceAvailable()) {
+                    reportFailure("ASR failed")
+                    return
+                }
                 val count = audio.read(buffer, 0, buffer.size)
                 if (count < 0) {
-                    onFailure()
+                    reportFailure("ASR failed")
                     return
                 }
                 if (count > 0) {
                     if (count % 2 != 0 || !send(buffer.copyOf(count))) {
-                        onFailure()
+                        reportFailure("ASR failed")
                         return
                     }
                 }
@@ -162,5 +184,18 @@ internal class PokerAsrCapture internal constructor(
                 recorder = null
             }
         }
+    }
+
+    private fun reportFailure(reason: String) {
+        if (failureReported) return
+        failureReported = true
+        onFailureReason?.invoke(reason) ?: onFailure()
+    }
+
+    private companion object {
+        fun hasNativeStorage(context: Context): Boolean = runCatching {
+            val stats = StatFs(context.filesDir.path)
+            stats.availableBytes >= POKER_ASR_MAX_AUDIO_QUEUE_BYTES
+        }.getOrDefault(true)
     }
 }

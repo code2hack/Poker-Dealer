@@ -153,6 +153,7 @@ import com.code2hack.pokerdealer.protocol.PokerAsrCommitRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrCommitResult
 import com.code2hack.pokerdealer.protocol.PokerAsrDiscardRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrDiscardResult
+import com.code2hack.pokerdealer.protocol.PokerAsrDiscardKind
 import com.code2hack.pokerdealer.protocol.PokerAsrExitRequest
 import com.code2hack.pokerdealer.protocol.PokerAsrExitResult
 import com.code2hack.pokerdealer.protocol.PokerAsrMutationOutcome
@@ -299,6 +300,7 @@ class DealerConnectionService : Service() {
     private var pokerAsrSession: DealerAsrSliceSession? = null
     private var pokerAsrPreparing: PokerAsrStartRequest? = null
     private val pokerAsrCancelledSessions = mutableSetOf<String>()
+    private var pendingAsrTakeover: CodexThreadLocator? = null
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
@@ -819,6 +821,7 @@ class DealerConnectionService : Service() {
         if (state != PokerConnectionState.CONNECTED) {
             pokerBindings.connectionLost()
             publishPokerBindings(sendSnapshot = false)
+            pendingAsrTakeover = null
             pokerAsrPreparing?.sessionId?.let(pokerAsrCancelledSessions::add)
             pokerAsrPreparing = null
             closePokerAsrSession()
@@ -1328,6 +1331,7 @@ class DealerConnectionService : Service() {
         pokerUserInputResults.clear()
         pokerMorseResults.clear()
         pokerApprovalBindings.clear()
+        pendingAsrTakeover = null
         val snapshot = pokerSnapshotSource.current()
         mutableState.update {
             it.copy(
@@ -1649,6 +1653,10 @@ class DealerConnectionService : Service() {
             terminatePokerAsr(epoch, "audio-session-invalid")
             return
         }
+        validatePokerAsrTarget(epoch, session.target)?.let { reason ->
+            terminatePokerAsr(epoch, reason)
+            return
+        }
         session.accept(frame)?.let { reason ->
             terminatePokerAsr(epoch, reason)
             return
@@ -1701,7 +1709,7 @@ class DealerConnectionService : Service() {
                 request.sessionId,
                 request.operationId,
                 PokerAsrMutationOutcome.UNCERTAIN,
-                reason = failure.message ?: "ASR commit is uncertain",
+                reason = safeAsrFailureReason("ASR commit is uncertain"),
             )
             pokerAsrResults[request.operationId] = result
             sendPokerAsrResult(envelope, POKER_ASR_COMMIT_RESULT_TYPE, PokerAsrCommitResult.serializer(), result)
@@ -1717,13 +1725,24 @@ class DealerConnectionService : Service() {
                 request.operationId,
                 PokerAsrMutationOutcome.UNCERTAIN,
                 committedText = committedText,
-                reason = failure.message ?: "ASR commit durability is uncertain",
+                reason = safeAsrFailureReason("ASR commit durability is uncertain"),
             )
             pokerAsrResults[request.operationId] = result
             sendPokerAsrResult(envelope, POKER_ASR_COMMIT_RESULT_TYPE, PokerAsrCommitResult.serializer(), result)
             return
         }
         active.target = nextTarget
+        committedText.takeIf(String::isNotEmpty)?.let { text ->
+            val count = ComposerDraft.fromText(text).visibleUnits().size
+            if (count > 0) {
+                active.rememberCommittedSlice(
+                    target = nextTarget,
+                    start = request.target.cursorPosition,
+                    endExclusive = request.target.cursorPosition + count,
+                    text = text,
+                )
+            }
+        }
         mutableState.update {
             it.copy(asr = it.asr.copy(target = nextTarget, provisionalText = ""))
         }
@@ -1749,11 +1768,16 @@ class DealerConnectionService : Service() {
             sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), it)
             return
         }
+        if (request.kind == PokerAsrDiscardKind.LAST_COMMITTED_SLICE) {
+            handlePokerAsrCommittedSliceDelete(epoch, envelope, request)
+            return
+        }
         val session = pokerAsrSession
         val rejection = when {
             session == null -> "ASR session is no longer active"
             session.sessionId != request.sessionId -> "ASR session is stale"
             session.target != request.target -> "ASR target is stale"
+            request.fenceSampleOffset != session.nextSampleOffset -> "ASR discard fence is stale"
             else -> validatePokerAsrTarget(epoch, request.target)
         }
         if (rejection != null) {
@@ -1770,7 +1794,7 @@ class DealerConnectionService : Service() {
         }
         val active = checkNotNull(session)
         try {
-            active.discardSlice()
+            active.discardSlice(request.fenceSampleOffset)
         } catch (failure: Throwable) {
             terminatePokerAsr(epoch, "runtime-decode-failed")
             val result = PokerAsrDiscardResult(
@@ -1778,7 +1802,7 @@ class DealerConnectionService : Service() {
                 request.sessionId,
                 request.operationId,
                 PokerAsrMutationOutcome.UNCERTAIN,
-                reason = failure.message ?: "ASR discard is uncertain",
+                reason = safeAsrFailureReason("ASR discard is uncertain"),
             )
             pokerAsrResults[request.operationId] = result
             sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
@@ -1791,6 +1815,75 @@ class DealerConnectionService : Service() {
             request.operationId,
             PokerAsrMutationOutcome.ACKNOWLEDGED,
             nextTarget = active.target,
+        )
+        pokerAsrResults[request.operationId] = result
+        sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
+        sendPokerAsrProjection(epoch, active, immediate = true)
+    }
+
+    private suspend fun handlePokerAsrCommittedSliceDelete(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        request: PokerAsrDiscardRequest,
+    ) {
+        val session = pokerAsrSession
+        val committed = session?.lastCommittedSlice
+        val rejection = when {
+            session == null -> "ASR session is no longer active"
+            session.sessionId != request.sessionId -> "ASR session is stale"
+            session.target != request.target -> "ASR target is stale"
+            request.fenceSampleOffset != session.nextSampleOffset -> "ASR discard fence is stale"
+            committed == null -> "ASR committed slice is no longer deletable"
+            session.hasUncommittedSlice -> "ASR current slice is not empty"
+            committed.target != request.target -> "ASR committed slice is stale"
+            committed.start != request.deleteStart ||
+                committed.endExclusive != request.deleteEndExclusive ||
+                committed.text != request.expectedText -> "ASR committed slice is stale"
+            else -> validatePokerAsrTarget(epoch, request.target)
+        }
+        if (rejection != null) {
+            val result = PokerAsrDiscardResult(
+                request.target,
+                request.sessionId,
+                request.operationId,
+                PokerAsrMutationOutcome.REJECTED,
+                reason = rejection,
+            )
+            pokerAsrResults[request.operationId] = result
+            sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
+            return
+        }
+
+        val active = checkNotNull(session)
+        val nextTarget = try {
+            deletePokerAsrText(
+                target = request.target,
+                start = checkNotNull(request.deleteStart),
+                endExclusive = checkNotNull(request.deleteEndExclusive),
+                expectedText = checkNotNull(request.expectedText),
+            )
+        } catch (_: Throwable) {
+            terminatePokerAsr(epoch, "composer-durability-uncertain")
+            val result = PokerAsrDiscardResult(
+                request.target,
+                request.sessionId,
+                request.operationId,
+                PokerAsrMutationOutcome.UNCERTAIN,
+                reason = safeAsrFailureReason("ASR committed-slice delete is uncertain"),
+            )
+            pokerAsrResults[request.operationId] = result
+            sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
+            return
+        }
+        active.target = nextTarget
+        active.clearLastCommittedSlice()
+        mutableState.update { it.copy(asr = it.asr.copy(target = nextTarget, provisionalText = "")) }
+        val result = PokerAsrDiscardResult(
+            request.target,
+            request.sessionId,
+            request.operationId,
+            PokerAsrMutationOutcome.ACKNOWLEDGED,
+            nextTarget = nextTarget,
         )
         pokerAsrResults[request.operationId] = result
         sendPokerAsrResult(envelope, POKER_ASR_DISCARD_RESULT_TYPE, PokerAsrDiscardResult.serializer(), result)
@@ -1819,11 +1912,12 @@ class DealerConnectionService : Service() {
             return
         }
         val session = pokerAsrSession
+        val exactTarget = session?.target == request.target
         val rejection = when {
             session == null -> "ASR session is no longer active"
             session.sessionId != request.sessionId -> "ASR session is stale"
-            session.target != request.target -> "ASR target is stale"
-            else -> validatePokerAsrTarget(epoch, request.target)
+            !exactTarget && !sameAsrSessionTarget(session.target, request.target) -> "ASR target is stale"
+            else -> validatePokerAsrTarget(epoch, if (exactTarget) request.target else session.target)
         }
         val result = if (rejection != null) {
             PokerAsrExitResult(
@@ -1898,6 +1992,15 @@ class DealerConnectionService : Service() {
         }
     }
 
+    private fun sameAsrSessionTarget(first: PokerAsrTarget, second: PokerAsrTarget): Boolean =
+        first.locator == second.locator &&
+            first.field == second.field &&
+            first.requestLocator == second.requestLocator &&
+            first.questionId == second.questionId &&
+            first.controlGeneration == second.controlGeneration &&
+            first.connectionEpoch == second.connectionEpoch &&
+            first.modeSession == second.modeSession
+
     private suspend fun commitPokerAsrText(target: PokerAsrTarget, text: String): PokerAsrTarget {
         if (text.isEmpty()) return target
         return when (target.field) {
@@ -1933,6 +2036,59 @@ class DealerConnectionService : Service() {
         }
     }
 
+    private suspend fun deletePokerAsrText(
+        target: PokerAsrTarget,
+        start: Int,
+        endExclusive: Int,
+        expectedText: String,
+    ): PokerAsrTarget {
+        require(start < endExclusive)
+        require(target.cursorPosition == endExclusive) { "ASR committed slice must end at the cursor" }
+        return when (target.field) {
+            PokerAsrTargetField.COMPOSER -> {
+                val draft = mutableState.value.threadActions.composerDraft(target.locator)
+                val units = draft.visibleUnits()
+                require(endExclusive <= units.size)
+                require(units.subList(start, endExclusive).all { !it.isPhoto })
+                require(units.subList(start, endExclusive).joinToString("") { it.text.orEmpty() } == expectedText) {
+                    "ASR committed slice text is stale"
+                }
+                val next = draft.replaceUnits(start, endExclusive).withRevision(draft.revision + 1)
+                draftMutex.withLock { threadAttachmentStore.writeDraft(target.locator, next) }
+                mutableState.update {
+                    it.copy(threadActions = it.threadActions.editComposerDraft(target.locator, next))
+                }
+                pokerComposerEpoch?.let { epoch -> sendPokerProjection(epoch, target.locator) }
+                target.copy(targetRevision = next.revision, cursorPosition = start)
+            }
+            PokerAsrTargetField.REQUEST_TEXT -> {
+                val requestLocator = checkNotNull(target.requestLocator)
+                val state = mutableState.value
+                val request = state.userInputRequests.requests.getValue(requestLocator)
+                val buffer = state.userInputAnswers.buffer(requestLocator)
+                val question = request.questions.first { it.id == target.questionId }
+                val field = ComposerDraft.fromText(buffer.activeValue(question), buffer.revision)
+                val units = field.visibleUnits()
+                require(endExclusive <= units.size)
+                require(units.subList(start, endExclusive).all { !it.isPhoto })
+                require(units.subList(start, endExclusive).joinToString("") { it.text.orEmpty() } == expectedText) {
+                    "ASR committed slice text is stale"
+                }
+                val nextText = field.replaceUnits(start, endExclusive).displayText
+                val next = buffer.edit(request, question.id, UserInputAnswerEdit.SetText(nextText))
+                mutableState.update {
+                    it.copy(
+                        userInputAnswers = it.userInputAnswers.copy(
+                            buffers = it.userInputAnswers.buffers + (requestLocator to next),
+                        ),
+                    )
+                }
+                pokerComposerEpoch?.let { epoch -> sendPokerUserInputProjection(epoch, requestLocator) }
+                target.copy(targetRevision = next.revision, cursorPosition = start)
+            }
+        }
+    }
+
     private suspend fun sendPokerAsrProjection(
         epoch: PokerConnectionEpoch,
         session: DealerAsrSliceSession,
@@ -1962,17 +2118,46 @@ class DealerConnectionService : Service() {
                 sessionId = session.sessionId,
                 operationId = operationId,
                 outcome = PokerAsrMutationOutcome.REJECTED,
-                reason = reason,
+                reason = safeAsrFailureReason(reason),
             ),
         )
     }
 
-    private fun closePokerAsrSession() {
+    private fun safeAsrFailureReason(reason: String): String = when {
+        reason.contains("overflow", ignoreCase = true) -> "ASR audio queue overflow"
+        reason.contains("permission", ignoreCase = true) -> "ASR permission unavailable"
+        reason.contains("storage", ignoreCase = true) -> "ASR storage unavailable"
+        reason.contains("target", ignoreCase = true) -> "ASR target is no longer editable"
+        reason.contains("sequence", ignoreCase = true) -> "ASR audio sequence is invalid"
+        reason.contains("session", ignoreCase = true) -> "ASR session is no longer valid"
+        reason.contains("control", ignoreCase = true) ||
+            reason.contains("take over", ignoreCase = true) -> "ASR control was taken over"
+        else -> "ASR recognition failed"
+    }
+
+    private fun closePokerAsrSession(failureReason: String? = null) {
         val session = pokerAsrSession ?: return
         pokerAsrSession = null
         mutableState.update { it.copy(asr = DealerAsrUiState()) }
         scope.launch {
             runCatching { session.close() }
+        }
+        if (failureReason != null) {
+            val epoch = pokerComposerEpoch ?: return
+            scope.launch {
+                sendPokerAsr(
+                    epoch = epoch,
+                    type = POKER_ASR_EXIT_RESULT_TYPE,
+                    serializer = PokerAsrExitResult.serializer(),
+                    value = PokerAsrExitResult(
+                        target = session.target,
+                        sessionId = session.sessionId,
+                        operationId = UUID.randomUUID().toString(),
+                        outcome = PokerAsrMutationOutcome.REJECTED,
+                        reason = safeAsrFailureReason(failureReason),
+                    ),
+                )
+            }
         }
     }
 
@@ -5407,6 +5592,20 @@ class DealerConnectionService : Service() {
         }
         val locator = CodexThreadLocator(hostId, threadId)
         if (locator !in mutableState.value.threadAttachments.attached) return false
+        val asr = pokerAsrSession?.takeIf { it.target.locator == locator }
+        if (asr?.hasUncommittedSlice == true) {
+            if (pendingAsrTakeover != locator) {
+                pendingAsrTakeover = locator
+                mutableState.update {
+                    it.copy(error = "ASR has uncommitted text; take control again to discard it")
+                }
+                return false
+            }
+            pendingAsrTakeover = null
+            closePokerAsrSession("ASR control was taken over by Dealer")
+        } else {
+            pendingAsrTakeover = null
+        }
         mutableState.update { state ->
             val attachments = state.threadAttachments.claim(locator)
             state.copy(
