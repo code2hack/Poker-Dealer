@@ -8,6 +8,11 @@ import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.ComposerSurface
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
+import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
+import com.code2hack.pokerdealer.domain.UserInputQuestion
+import com.code2hack.pokerdealer.domain.UserInputRequest
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -94,5 +99,55 @@ class ProtocolTest {
 
         assertEquals(request, PokerProtocolJson.decodeFromString<ComposerMutationRequest>(PokerProtocolJson.encodeToString(request)))
         assertEquals(projection, PokerProtocolJson.decodeFromString<ComposerDraftProjection>(PokerProtocolJson.encodeToString(projection)))
+    }
+
+    @Test
+    fun `user input projection and mutation preserve request locator and plaintext buffer`() {
+        val request = UserInputRequest(
+            locator = ServerRequestLocator("spark", 8, "request-1"),
+            thread = CodexThreadLocator("spark", "thread"),
+            turnId = "turn",
+            itemId = "item",
+            questions = listOf(UserInputQuestion("answer", "Answer", "Answer?", null, false, true)),
+            autoResolutionMs = null,
+            receivedAtMs = 1,
+            fingerprint = "fingerprint",
+        )
+        val projection = UserInputRequestProjection(
+            request = request,
+            buffer = UserInputAnswerBuffer()
+                .edit(request, "answer", UserInputAnswerEdit.SetText("visible secret")),
+            cardId = "item",
+            controlGeneration = 2,
+            connectionEpoch = 3,
+            modeSession = "request-mode",
+        )
+        val target = UserInputAnswerMutationTarget(
+            locator = request.locator,
+            questionId = "answer",
+            answerRevision = 1,
+            controlGeneration = 2,
+            connectionEpoch = 3,
+            modeSession = "request-mode",
+            operationId = "operation-1",
+        )
+        val mutation = UserInputAnswerMutationRequest(
+            target = target,
+            kind = UserInputAnswerMutationKind.SET_TEXT,
+            value = "visible secret",
+        )
+
+        assertEquals(
+            projection,
+            PokerProtocolJson.decodeFromString<UserInputRequestProjection>(
+                PokerProtocolJson.encodeToString(projection),
+            ),
+        )
+        assertEquals(
+            mutation,
+            PokerProtocolJson.decodeFromString<UserInputAnswerMutationRequest>(
+                PokerProtocolJson.encodeToString(mutation),
+            ),
+        )
     }
 }

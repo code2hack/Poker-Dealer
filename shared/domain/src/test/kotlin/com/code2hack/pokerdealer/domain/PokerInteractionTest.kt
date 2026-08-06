@@ -188,6 +188,52 @@ class PokerNavigationTest {
     }
 
     @Test
+    fun `request panel traverses every question and reaches later cards without resolving`() {
+        val reducer = PokerNavigationReducer(viewportLineCount = 4)
+        reducer.attach(
+            locator,
+            evidence(true, requests = 2),
+            atMs = 1,
+            layout = PokerPileLayout(
+                cards = listOf(
+                    PokerCardLayout(
+                        "first-request",
+                        collapsedLineCount = 1,
+                        requestPanel = PokerRequestPanelLayout(
+                            id = "first",
+                            positionCount = 3,
+                            questions = listOf(
+                                PokerRequestQuestionLayout("one", 2, listOf("A", "Other"), true),
+                                PokerRequestQuestionLayout("two", 1),
+                            ),
+                        ),
+                    ),
+                    PokerCardLayout(
+                        "later-request",
+                        collapsedLineCount = 1,
+                        requestPanel = PokerRequestPanelLayout("later"),
+                    ),
+                ),
+            ),
+        )
+        reducer.view(locator)
+
+        assertEquals(PokerNavigationEffect.CARD_MOVED, reducer.apply(PokerOperation.UP))
+        assertEquals(PokerNavigationEffect.ENTERED_REQUEST_PANEL, reducer.apply(PokerOperation.DOWN))
+        assertEquals(0, reducer.anchor(locator)?.cursorPosition)
+        assertEquals(PokerNavigationEffect.SCROLLED, reducer.apply(PokerOperation.DOWN))
+        assertEquals(1, reducer.anchor(locator)?.cursorPosition)
+        assertEquals(PokerNavigationEffect.SCROLLED, reducer.apply(PokerOperation.DOWN))
+        assertEquals(2, reducer.anchor(locator)?.cursorPosition)
+        assertEquals(PokerNavigationEffect.CARD_MOVED, reducer.apply(PokerOperation.DOWN))
+        assertEquals("later-request", reducer.anchor(locator)?.cardId)
+        assertEquals(PokerNavigationMode.NAVIGATION, reducer.anchor(locator)?.mode)
+        assertEquals(PokerNavigationEffect.ENTERED_REQUEST_PANEL, reducer.apply(PokerOperation.DOWN))
+        assertEquals(PokerNavigationEffect.EXITED_INPUT, reducer.apply(PokerOperation.UP))
+        assertEquals(PokerNavigationMode.NAVIGATION, reducer.anchor(locator)?.mode)
+    }
+
+    @Test
     fun `tap expands complete details, navigation FN is a no-op, and taptap hides`() {
         val reducer = PokerNavigationReducer(viewportLineCount = 2)
         reducer.attach(

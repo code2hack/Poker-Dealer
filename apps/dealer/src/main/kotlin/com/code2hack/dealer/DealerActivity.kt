@@ -36,10 +36,8 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -47,8 +45,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.code2hack.dealer.asr.DealerAsrCatalogStore
@@ -74,7 +70,8 @@ import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputOutcome
-import com.code2hack.pokerdealer.domain.UserInputQuestion
+import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
+import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
 import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.domain.composerAction
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionState
@@ -184,9 +181,10 @@ class DealerActivity : ComponentActivity() {
                         onCommandApproval = { locator, decision ->
                             service?.resolveCommandApproval(locator, decision)
                         },
-                        onUserInput = { locator, answers ->
-                            service?.resolveUserInput(locator, answers)
+                        onUserInputEdit = { locator, questionId, edit ->
+                            service?.updateUserInputAnswer(locator, questionId, edit)
                         },
+                        onUserInput = { locator -> service?.resolveUserInput(locator) },
                         onUserInputNoAnswer = { service?.resolveUserInputWithoutAnswer(it) },
                         onFileApproval = { locator, decision ->
                             service?.resolveFileApproval(locator, decision)
@@ -407,7 +405,8 @@ private fun DealerApp(
     onSubmit: (CodexThreadLocator) -> Unit,
     onInterrupt: (CodexThreadLocator) -> Unit,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
-    onUserInput: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onUserInputEdit: (ServerRequestLocator, String, UserInputAnswerEdit) -> Unit,
+    onUserInput: (ServerRequestLocator) -> Unit,
     onUserInputNoAnswer: (ServerRequestLocator) -> Unit,
     onFileApproval: (ServerRequestLocator, FileApprovalDecision) -> Unit,
     onStartTailnet: () -> Unit,
@@ -894,9 +893,11 @@ private fun DealerApp(
             },
             state.commandApprovals.requests.values.filter { requestVisible(it.locator, it.thread) },
             state.userInputRequests.requests.values.filter { requestVisible(it.locator, it.thread) },
+            state.userInputAnswers,
             state.fileApprovals.requests.values.filter { requestVisible(it.locator, it.thread) },
             state.threadAttachments.dealerClaims,
             onCommandApproval,
+            onUserInputEdit,
             onUserInput,
             onUserInputNoAnswer,
             onFileApproval,
@@ -1566,10 +1567,12 @@ private fun DealerCards(
     cards: List<Card>,
     approvals: List<CommandApprovalRequest>,
     userInputs: List<UserInputRequest>,
+    userInputAnswers: com.code2hack.pokerdealer.domain.UserInputAnswerState,
     fileApprovals: List<FileApprovalRequest>,
     dealerClaims: Set<CodexThreadLocator>,
     onCommandApproval: (ServerRequestLocator, CommandApprovalDecision) -> Unit,
-    onUserInput: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onUserInputEdit: (ServerRequestLocator, String, UserInputAnswerEdit) -> Unit,
+    onUserInput: (ServerRequestLocator) -> Unit,
     onUserInputNoAnswer: (ServerRequestLocator) -> Unit,
     onFileApproval: (ServerRequestLocator, FileApprovalDecision) -> Unit,
     modifier: Modifier = Modifier,
@@ -1654,7 +1657,9 @@ private fun DealerCards(
         items(userInputs, key = { "user-input:${it.locator}" }) { request ->
             UserInputCard(
                 request,
+                userInputAnswers.buffer(request.locator),
                 request.thread in dealerClaims,
+                onUserInputEdit,
                 onUserInput,
                 onUserInputNoAnswer,
             )
@@ -1734,32 +1739,13 @@ private fun CommandApprovalCard(
 @Composable
 private fun UserInputCard(
     request: UserInputRequest,
+    buffer: UserInputAnswerBuffer,
     canAnswer: Boolean,
-    onAnswer: (ServerRequestLocator, Map<String, List<String>>) -> Unit,
+    onEdit: (ServerRequestLocator, String, UserInputAnswerEdit) -> Unit,
+    onAnswer: (ServerRequestLocator) -> Unit,
     onNoAnswer: (ServerRequestLocator) -> Unit,
 ) {
-    val answers = remember(request.locator) { mutableStateMapOf<String, String>() }
-    val otherAnswers = remember(request.locator) { mutableStateMapOf<String, String>() }
-    val useOther = remember(request.locator) { mutableStateMapOf<String, Boolean>() }
-    fun clearSecrets() {
-        request.questions.filter(UserInputQuestion::isSecret).forEach { question ->
-            answers.remove(question.id)
-            otherAnswers.remove(question.id)
-            useOther.remove(question.id)
-        }
-    }
-    LaunchedEffect(request.resolution) {
-        if (request.resolution != RequestResolutionState.PENDING) clearSecrets()
-    }
-    val response = request.questions.associate { question ->
-        val answer = if (useOther[question.id] == true) {
-            otherAnswers[question.id].orEmpty()
-        } else {
-            answers[question.id].orEmpty()
-        }
-        question.id to listOf(answer)
-    }
-    val complete = response.values.all { values -> values.single().isNotBlank() }
+    val complete = buffer.isComplete(request)
     val remainingMs by produceState<Long?>(
         request.deadlineAtMs?.let {
             (it - System.currentTimeMillis()).coerceAtLeast(0)
@@ -1795,11 +1781,13 @@ private fun UserInputCard(
                 question.options?.forEach { option ->
                     Row {
                         RadioButton(
-                            selected = useOther[question.id] != true &&
-                                answers[question.id] == option.label,
+                            selected = buffer.answer(question.id).selectedOption == option.label,
                             onClick = {
-                                useOther[question.id] = false
-                                answers[question.id] = option.label
+                                onEdit(
+                                    request.locator,
+                                    question.id,
+                                    UserInputAnswerEdit.SelectOption(option.label),
+                                )
                             },
                             enabled = request.resolution == RequestResolutionState.PENDING,
                         )
@@ -1814,35 +1802,34 @@ private fun UserInputCard(
                 if (question.options != null && question.isOther) {
                     Row {
                         RadioButton(
-                            selected = useOther[question.id] == true,
-                            onClick = { useOther[question.id] = true },
+                            selected = buffer.answer(question.id).selectedOption == null,
+                            onClick = {
+                                onEdit(
+                                    request.locator,
+                                    question.id,
+                                    UserInputAnswerEdit.SelectOther,
+                                )
+                            },
                             enabled = request.resolution == RequestResolutionState.PENDING,
                         )
                         Text("Other")
                     }
                 }
-                if (question.options == null || useOther[question.id] == true) {
-                    val value = if (useOther[question.id] == true) {
-                        otherAnswers[question.id].orEmpty()
-                    } else {
-                        answers[question.id].orEmpty()
-                    }
+                if (question.options == null ||
+                    (question.options != null && question.isOther && buffer.answer(question.id).selectedOption == null)
+                ) {
+                    val value = buffer.answer(question.id).otherText
                     OutlinedTextField(
                         value = value,
                         onValueChange = {
-                            if (useOther[question.id] == true) {
-                                otherAnswers[question.id] = it
-                            } else {
-                                answers[question.id] = it
-                            }
+                            onEdit(
+                                request.locator,
+                                question.id,
+                                UserInputAnswerEdit.SetText(it),
+                            )
                         },
-                        label = { Text(if (question.isSecret) "Secret answer" else "Answer") },
+                        label = { Text("Answer") },
                         enabled = request.resolution == RequestResolutionState.PENDING,
-                        visualTransformation = if (question.isSecret) {
-                            PasswordVisualTransformation()
-                        } else {
-                            VisualTransformation.None
-                        },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -1857,8 +1844,7 @@ private fun UserInputCard(
             RequestResolutionState.PENDING -> {
                 Button(
                     onClick = {
-                        onAnswer(request.locator, response)
-                        clearSecrets()
+                        onAnswer(request.locator)
                     },
                     enabled = canAnswer && complete,
                 ) {
@@ -1867,7 +1853,6 @@ private fun UserInputCard(
                 OutlinedButton(
                     onClick = {
                         onNoAnswer(request.locator)
-                        clearSecrets()
                     },
                 ) {
                     Text("No answer")

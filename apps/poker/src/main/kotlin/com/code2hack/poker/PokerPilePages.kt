@@ -21,6 +21,7 @@ import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.PokerPileAnchor
 import com.code2hack.pokerdealer.domain.PokerPileMetadata
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 
 internal data class PokerPilePage(
     val locator: CodexThreadLocator,
@@ -28,6 +29,7 @@ internal data class PokerPilePage(
     val cardText: String,
     val anchor: PokerPileAnchor? = null,
     val composerText: String? = null,
+    val requestProjections: List<UserInputRequestProjection> = emptyList(),
 )
 
 internal data class PokerPileRenderProjection(
@@ -42,6 +44,7 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
     cardTextByLocator: Map<CodexThreadLocator, String>,
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
     composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
+    requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
 ): PokerPileRenderProjection = PokerPileRenderProjection(
     orderedPages = orderedPiles.mapNotNull { pile ->
         pile.workState?.let { state ->
@@ -51,6 +54,7 @@ internal fun PokerPileMetadata.toPokerPileRenderProjection(
                 cardText = cardTextByLocator[pile.locator].orEmpty(),
                 anchor = anchorByLocator[pile.locator],
                 composerText = composerTextByLocator[pile.locator],
+                requestProjections = requestProjectionsByLocator[pile.locator].orEmpty(),
             )
         }
     },
@@ -64,11 +68,13 @@ internal fun PokerPilePages(
     modifier: Modifier = Modifier,
     anchorByLocator: Map<CodexThreadLocator, PokerPileAnchor> = emptyMap(),
     composerTextByLocator: Map<CodexThreadLocator, String> = emptyMap(),
+    requestProjectionsByLocator: Map<CodexThreadLocator, List<UserInputRequestProjection>> = emptyMap(),
 ) {
     val projection = metadata.toPokerPileRenderProjection(
         cardTextByLocator,
         anchorByLocator,
         composerTextByLocator,
+        requestProjectionsByLocator,
     )
     val page = projection.visiblePage ?: return
     val lines = remember(page.locator, page.cardText) { page.cardText.split('\n') }
@@ -108,6 +114,63 @@ internal fun PokerPilePages(
                     .padding(horizontal = 18.dp, vertical = 8.dp),
                 color = Color(0xFFB7E3C0),
             )
+        }
+
+        page.requestProjections.forEach { projection ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    "Request ${projection.request.locator.requestId} | ${projection.request.resolution}",
+                    color = Color(0xFFFFD18A),
+                )
+                var controlPosition = 0
+                projection.request.questions.forEach { question ->
+                    Text(question.header, color = Color(0xFFE8EEF4))
+                    Text(question.question, color = Color(0xFFE8EEF4))
+                    question.options?.forEach { option ->
+                        val selected = projection.buffer.answer(question.id).selectedOption == option.label
+                        val highlighted = page.anchor?.let { anchor ->
+                            anchor.mode == com.code2hack.pokerdealer.domain.PokerNavigationMode.REQUEST_PANEL &&
+                                anchor.inputId == projection.request.panelId &&
+                                anchor.cursorPosition == controlPosition
+                        } == true
+                        Text(
+                            "${if (highlighted) "▶" else if (selected) "✓" else "·"} " +
+                                "${option.label}: ${option.description}",
+                            color = Color(0xFFE8EEF4),
+                        )
+                        controlPosition++
+                    }
+                    if (question.options != null && question.isOther) {
+                        val answer = projection.buffer.answer(question.id)
+                        val highlighted = page.anchor?.let { anchor ->
+                            anchor.mode == com.code2hack.pokerdealer.domain.PokerNavigationMode.REQUEST_PANEL &&
+                                anchor.inputId == projection.request.panelId &&
+                                anchor.cursorPosition == controlPosition
+                        } == true
+                        Text(
+                            "${if (highlighted) "▶" else if (answer.selectedOption == null) "✓" else "·"} " +
+                                "Other: ${answer.otherText}",
+                            color = Color(0xFFE8EEF4),
+                        )
+                        controlPosition++
+                    } else if (question.options == null) {
+                        val highlighted = page.anchor?.let { anchor ->
+                            anchor.mode == com.code2hack.pokerdealer.domain.PokerNavigationMode.REQUEST_PANEL &&
+                                anchor.inputId == projection.request.panelId &&
+                                anchor.cursorPosition == controlPosition
+                        } == true
+                        Text(
+                            "${if (highlighted) "▶ " else ""}Answer: " +
+                                projection.buffer.answer(question.id).otherText,
+                        )
+                        controlPosition++
+                    }
+                }
+            }
         }
 
         Text(

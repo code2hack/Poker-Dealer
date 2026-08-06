@@ -46,6 +46,9 @@ import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.RequestResolutionState
 import com.code2hack.pokerdealer.domain.ServerRequestLocator
 import com.code2hack.pokerdealer.domain.UserInputOutcome
+import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
+import com.code2hack.pokerdealer.domain.UserInputAnswerEdit
+import com.code2hack.pokerdealer.domain.UserInputAnswerState
 import com.code2hack.pokerdealer.domain.UserInputRequest
 import com.code2hack.pokerdealer.domain.UserInputRequestState
 import com.code2hack.pokerdealer.protocol.appserver.M1OneHostDealerSlice
@@ -87,6 +90,15 @@ import com.code2hack.pokerdealer.protocol.ComposerMutationOutcome
 import com.code2hack.pokerdealer.protocol.ComposerMutationRequest
 import com.code2hack.pokerdealer.protocol.ComposerMutationResult
 import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationKind
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationOutcome
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationTarget
+import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.PokerConnectionOwner
 import com.code2hack.pokerdealer.protocol.PokerConnectionEpoch
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
@@ -152,6 +164,8 @@ class DealerConnectionService : Service() {
     private var pokerComposerEpoch: PokerConnectionEpoch? = null
     private val pokerComposerBindings = mutableMapOf<CodexThreadLocator, PokerComposerBinding>()
     private val pokerComposerResults = mutableMapOf<CodexThreadLocator, ComposerMutationResult>()
+    private val pokerUserInputBindings = mutableMapOf<ServerRequestLocator, PokerUserInputBinding>()
+    private val pokerUserInputResults = mutableMapOf<String, UserInputAnswerMutationResult>()
     private val tailnetEngine = Engine()
     private val hostSessionConfigs = mutableMapOf<String, HostSessionConnectionConfig>()
     private val hostSessionSecrets = mutableMapOf<String, StoredHostConnection>()
@@ -258,6 +272,9 @@ class DealerConnectionService : Service() {
             )
             pokerComposerEpoch?.let { epoch ->
                 restoredAttachments.forEach { locator -> sendPokerProjection(epoch, locator) }
+                mutableState.value.userInputRequests.requests.values
+                    .filter { it.thread in restoredAttachments && it.resolution != RequestResolutionState.RESOLVED }
+                    .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
             }
             pokerSnapshotReady.complete(Unit)
             startRecoveryPersistence(recovered.pendingRequestsWritable)
@@ -297,6 +314,10 @@ class DealerConnectionService : Service() {
                             it.userInputRequests.connectionLost(hostId, generation),
                         )
                     }
+                    mutableState.value.userInputRequests.unresolved(hostId)
+                        .map(UserInputRequest::thread)
+                        .distinct()
+                        .forEach(::refreshPokerUserInputProjection)
                 }
                 (connected - connectedHostIds).forEach { hostId ->
                     val generation = hostGenerations.getOrDefault(hostId, 0) + 1
@@ -663,6 +684,10 @@ class DealerConnectionService : Service() {
             }
             state.withApprovals(commands, files).withUserInputRequests(questions)
         }
+        currentQuestions
+            .map(UserInputRequest::thread)
+            .distinct()
+            .forEach(::refreshPokerUserInputProjection)
     }
 
     fun updateDraft(locator: CodexThreadLocator, text: String) =
@@ -682,26 +707,44 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch?.let { epoch ->
             scope.launch { sendPokerProjection(epoch, locator) }
         }
+        refreshPokerUserInputProjection(locator)
     }
 
     private suspend fun onPokerConnected(epoch: PokerConnectionEpoch) {
         pokerComposerEpoch = epoch
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
+        pokerUserInputBindings.clear()
+        pokerUserInputResults.clear()
         mutableState.value.threadAttachments.attached
             .toList()
             .forEach { locator -> sendPokerProjection(epoch, locator) }
+        mutableState.value.userInputRequests.requests.values
+            .filter { it.thread in mutableState.value.threadAttachments.attached }
+            .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
     }
 
     private suspend fun onPokerEnvelope(epoch: PokerConnectionEpoch, envelope: ProtocolEnvelope) {
-        if (envelope.type != POKER_COMPOSER_MUTATION_TYPE) return
-        val request = runCatching {
-            PokerProtocolJson.decodeFromJsonElement(
-                ComposerMutationRequest.serializer(),
-                envelope.payload,
-            )
-        }.getOrNull() ?: return
-        handlePokerComposerMutation(epoch, envelope, request)
+        when (envelope.type) {
+            POKER_COMPOSER_MUTATION_TYPE -> {
+                val request = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        ComposerMutationRequest.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerComposerMutation(epoch, envelope, request)
+            }
+            POKER_USER_INPUT_MUTATION_TYPE -> {
+                val request = runCatching {
+                    PokerProtocolJson.decodeFromJsonElement(
+                        UserInputAnswerMutationRequest.serializer(),
+                        envelope.payload,
+                    )
+                }.getOrNull() ?: return
+                handlePokerUserInputMutation(epoch, envelope, request)
+            }
+        }
     }
 
     private suspend fun sendPokerProjection(
@@ -736,6 +779,179 @@ class DealerConnectionService : Service() {
             projection,
         ).jsonObject
         pokerConnectionOwner.send(POKER_COMPOSER_DRAFT_PROJECTION_TYPE, payload)
+    }
+
+    private suspend fun sendPokerUserInputProjection(
+        epoch: PokerConnectionEpoch,
+        locator: ServerRequestLocator,
+    ) {
+        if (pokerComposerEpoch != epoch) return
+        val state = mutableState.value
+        val request = state.userInputRequests.requests[locator] ?: return
+        if (request.thread !in state.threadAttachments.attached) {
+            return
+        }
+        val controlGeneration = state.threadAttachments.controlGeneration(request.thread)
+        val current = pokerUserInputBindings[locator]
+        val modeSession = current
+            ?.takeIf {
+                it.epoch == epoch.value && it.controlGeneration == controlGeneration
+            }
+            ?.modeSession
+            ?: UUID.randomUUID().toString()
+        pokerUserInputBindings[locator] = PokerUserInputBinding(
+            epoch = epoch.value,
+            controlGeneration = controlGeneration,
+            modeSession = modeSession,
+        )
+        val projection = UserInputRequestProjection(
+            request = request,
+            buffer = state.userInputAnswers.buffer(locator).takeUnless {
+                request.resolution == RequestResolutionState.UNKNOWN ||
+                    request.resolution == RequestResolutionState.RESOLVED
+            } ?: UserInputAnswerBuffer(),
+            cardId = request.itemId,
+            controlGeneration = controlGeneration,
+            connectionEpoch = epoch.value,
+            modeSession = modeSession,
+        )
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            UserInputRequestProjection.serializer(),
+            projection,
+        ).jsonObject
+        pokerConnectionOwner.send(POKER_USER_INPUT_PROJECTION_TYPE, payload)
+    }
+
+    private fun refreshPokerUserInputProjection(locator: CodexThreadLocator) {
+        pokerComposerEpoch?.let { epoch ->
+            scope.launch {
+                mutableState.value.userInputRequests.requests.values
+                    .filter { it.thread == locator && it.resolution != RequestResolutionState.RESOLVED }
+                    .forEach { request -> sendPokerUserInputProjection(epoch, request.locator) }
+            }
+        }
+    }
+
+    private suspend fun handlePokerUserInputMutation(
+        epoch: PokerConnectionEpoch,
+        envelope: ProtocolEnvelope,
+        request: UserInputAnswerMutationRequest,
+    ) {
+        val target = request.target
+        val state = mutableState.value
+        val pendingRequest = state.userInputRequests.requests[target.locator]
+        val current = pendingRequest?.let { state.userInputAnswers.buffer(target.locator) }
+            ?: UserInputAnswerBuffer()
+        fun result(
+            outcome: UserInputAnswerMutationOutcome,
+            buffer: UserInputAnswerBuffer = current,
+            reason: String? = null,
+        ) = UserInputAnswerMutationResult(target, outcome, buffer, reason)
+
+        pokerUserInputResults[target.operationId]
+            ?.takeIf { it.target == target }
+            ?.let { cached ->
+                sendPokerUserInputMutationResult(envelope, cached)
+                return
+            }
+        val binding = pokerUserInputBindings[target.locator]
+        val rejection = when {
+            pendingRequest == null -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input request is no longer known",
+            )
+            pendingRequest.resolution != RequestResolutionState.PENDING -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input request is no longer editable",
+            )
+            target.connectionEpoch != epoch.value || pokerComposerEpoch != epoch -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input connection epoch is stale",
+            )
+            target.locator.hostId != pendingRequest.thread.hostId -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input host target is stale",
+            )
+            !state.threadAttachments.hasDealerClaim(pendingRequest.thread) -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "Dealer control is unavailable",
+            )
+            binding == null || binding.epoch != epoch.value ||
+                binding.controlGeneration != target.controlGeneration ||
+                binding.modeSession != target.modeSession -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input control target is stale",
+            )
+            target.answerRevision != current.revision -> result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = "User-input answer revision is stale",
+            )
+            else -> null
+        }
+        if (rejection != null) {
+            pokerUserInputResults[target.operationId] = rejection
+            sendPokerUserInputMutationResult(envelope, rejection)
+            if (pendingRequest != null) sendPokerUserInputProjection(epoch, target.locator)
+            return
+        }
+
+        val edit = try {
+            when (request.kind) {
+                UserInputAnswerMutationKind.SELECT_OPTION ->
+                    UserInputAnswerEdit.SelectOption(request.value ?: error("Option is missing"))
+                UserInputAnswerMutationKind.SELECT_OTHER -> UserInputAnswerEdit.SelectOther
+                UserInputAnswerMutationKind.SET_TEXT ->
+                    UserInputAnswerEdit.SetText(request.value ?: error("Text is missing"))
+            }
+        } catch (failure: Throwable) {
+            val response = result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = failure.message ?: "User-input mutation is malformed",
+            )
+            pokerUserInputResults[target.operationId] = response
+            sendPokerUserInputMutationResult(envelope, response)
+            if (pendingRequest != null) sendPokerUserInputProjection(epoch, target.locator)
+            return
+        }
+        val liveRequest = pendingRequest ?: return
+        val next = try {
+            current.edit(liveRequest, target.questionId, edit)
+        } catch (failure: Throwable) {
+            val response = result(
+                UserInputAnswerMutationOutcome.REJECTED,
+                reason = failure.message ?: "User-input mutation is stale",
+            )
+            pokerUserInputResults[target.operationId] = response
+            sendPokerUserInputMutationResult(envelope, response)
+            sendPokerUserInputProjection(epoch, target.locator)
+            return
+        }
+        mutableState.update {
+            it.copy(
+                userInputAnswers = it.userInputAnswers.copy(
+                    buffers = it.userInputAnswers.buffers + (target.locator to next),
+                ),
+            )
+        }
+        val response = result(UserInputAnswerMutationOutcome.ACKNOWLEDGED, next)
+        pokerUserInputResults[target.operationId] = response
+        sendPokerUserInputMutationResult(envelope, response)
+        sendPokerUserInputProjection(epoch, target.locator)
+    }
+
+    private suspend fun sendPokerUserInputMutationResult(
+        envelope: ProtocolEnvelope,
+        result: UserInputAnswerMutationResult,
+    ) {
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            UserInputAnswerMutationResult.serializer(),
+            result,
+        ).jsonObject
+        pokerConnectionOwner.send(
+            type = POKER_USER_INPUT_MUTATION_RESULT_TYPE,
+            payload = payload,
+            replyTo = envelope.messageId,
+        )
     }
 
     private suspend fun handlePokerComposerMutation(
@@ -1897,17 +2113,36 @@ class DealerConnectionService : Service() {
                                     continue
                                 }
                                 try {
+                                    val previousReissueLocator = mutableState.value.userInputRequests.requests.values
+                                        .firstOrNull { previous ->
+                                            previous.locator.hostId == parsed.request.locator.hostId &&
+                                                previous.locator.requestId == parsed.request.locator.requestId &&
+                                                previous.locator.appServerGeneration != parsed.request.locator.appServerGeneration &&
+                                                previous.fingerprint == parsed.request.fingerprint &&
+                                                previous.resolution == RequestResolutionState.UNKNOWN
+                                        }?.locator
+                                    val sameIdReissueQualified = previousReissueLocator != null
                                     mutableState.update {
-                                        it.withUserInputRequests(
-                                            it.userInputRequests.receive(
+                                        val requests = it.userInputRequests.receive(
+                                            parsed.request,
+                                            sameIdReissueQualified = sameIdReissueQualified,
+                                        )
+                                        it.withUserInputRequests(requests).copy(
+                                            userInputAnswers = it.userInputAnswers.receive(
+                                                it.userInputRequests,
                                                 parsed.request,
-                                                sameIdReissueQualified = false,
+                                                sameIdReissueQualified = sameIdReissueQualified,
                                             ),
                                         )
+                                    }
+                                    previousReissueLocator?.let { oldLocator ->
+                                        wireUserInputs.remove(oldLocator)
+                                        userInputTimeoutJobs.remove(oldLocator)?.cancel()
                                     }
                                     wireUserInputs[parsed.request.locator] = wire
                                     scheduleUserInputTimeout(parsed.request)
                                     recordThreadTransition(parsed.request.thread)
+                                    refreshPokerUserInputProjection(parsed.request.thread)
                                 } catch (failure: IllegalArgumentException) {
                                     appServer.reject(
                                         wire,
@@ -2083,6 +2318,43 @@ class DealerConnectionService : Service() {
         respondUserInput(locator, answers, UserInputOutcome.ANSWERED, requireControl = true)
     }
 
+    fun resolveUserInput(locator: ServerRequestLocator) {
+        val state = mutableState.value
+        val request = state.userInputRequests.requests[locator] ?: return
+        respondUserInput(
+            locator,
+            state.userInputAnswers.buffer(locator).response(request),
+            UserInputOutcome.ANSWERED,
+            requireControl = true,
+        )
+    }
+
+    @Synchronized
+    fun updateUserInputAnswer(
+        locator: ServerRequestLocator,
+        questionId: String,
+        edit: UserInputAnswerEdit,
+    ): Boolean {
+        val state = mutableState.value
+        val request = state.userInputRequests.requests[locator]
+        if (request == null || request.resolution != RequestResolutionState.PENDING) {
+            return false
+        }
+        if (!state.threadAttachments.hasDealerClaim(request.thread)) {
+            mutableState.update { it.copy(error = "Take control before editing this request") }
+            return false
+        }
+        val updated = try {
+            state.userInputAnswers.edit(request, questionId, edit)
+        } catch (failure: IllegalArgumentException) {
+            mutableState.update { it.copy(error = failure.message) }
+            return false
+        }
+        mutableState.update { it.copy(userInputAnswers = updated, error = null) }
+        refreshPokerUserInputProjection(request.thread)
+        return true
+    }
+
     fun resolveUserInputWithoutAnswer(locator: ServerRequestLocator) {
         respondUserInput(locator, emptyMap(), UserInputOutcome.NO_ANSWER, requireControl = false)
     }
@@ -2130,6 +2402,7 @@ class DealerConnectionService : Service() {
                 it.withUserInputRequests(it.userInputRequests.unknown(locator))
                     .copy(error = "User-input request is no longer connected; no response was replayed")
             }
+            refreshPokerUserInputProjection(request.thread)
             return
         }
         val responding = state.userInputRequests.begin(locator, outcome)
@@ -2137,7 +2410,17 @@ class DealerConnectionService : Service() {
         userInputTimeoutJobs.remove(locator)?.let {
             if (outcome != UserInputOutcome.AUTO_RESOLVED) it.cancel()
         }
-        mutableState.update { it.withUserInputRequests(responding).copy(error = null) }
+        mutableState.update { state ->
+            state.withUserInputRequests(responding).copy(
+                userInputAnswers = if (outcome == UserInputOutcome.ANSWERED) {
+                    state.userInputAnswers
+                } else {
+                    state.userInputAnswers.remove(locator)
+                },
+                error = null,
+            )
+        }
+        refreshPokerUserInputProjection(request.thread)
         scope.launch {
             try {
                 persistPendingRequestState()
@@ -2146,6 +2429,7 @@ class DealerConnectionService : Service() {
                     it.withUserInputRequests(it.userInputRequests.unknown(locator))
                         .copy(error = "Response was not sent because recovery storage failed: ${failure.message}")
                 }
+                refreshPokerUserInputProjection(request.thread)
                 return@launch
             }
             try {
@@ -2160,6 +2444,7 @@ class DealerConnectionService : Service() {
                                 "user-input response was not replayed",
                         )
                 }
+                refreshPokerUserInputProjection(request.thread)
             }
         }
     }
@@ -2246,7 +2531,20 @@ class DealerConnectionService : Service() {
                             it.appServerGeneration == generation &&
                             it.requestId == resolved.requestId
                     }
+                    val resolvedQuestionLocator = mutableState.value.userInputRequests.requests.values
+                        .firstOrNull {
+                            it.locator.hostId == hostId &&
+                                it.locator.appServerGeneration == generation &&
+                                it.locator.requestId == resolved.requestId &&
+                                it.thread.threadId == resolved.threadId
+                        }?.locator
                     mutableState.update {
+                        val questions = it.userInputRequests.resolved(
+                            hostId,
+                            generation,
+                            resolved.requestId,
+                            resolved.threadId,
+                        )
                         it.withApprovals(
                             commandApprovals = it.commandApprovals.resolved(
                                 hostId,
@@ -2260,14 +2558,17 @@ class DealerConnectionService : Service() {
                                 resolved.requestId,
                                 resolved.threadId,
                             ),
-                        ).withUserInputRequests(
-                            it.userInputRequests.resolved(
-                                hostId,
-                                generation,
-                                resolved.requestId,
-                                resolved.threadId,
-                            ),
-                        )
+                        ).withUserInputRequests(questions)
+                    }
+                    pokerUserInputBindings.keys.removeAll {
+                        it.hostId == hostId &&
+                            it.appServerGeneration == generation &&
+                            it.requestId == resolved.requestId
+                    }
+                    resolvedQuestionLocator?.let { questionLocator ->
+                        pokerComposerEpoch?.let { pokerEpoch ->
+                            sendPokerUserInputProjection(pokerEpoch, questionLocator)
+                        }
                     }
                     recordThreadTransition(CodexThreadLocator(hostId, resolved.threadId))
                     continue
@@ -2329,7 +2630,16 @@ class DealerConnectionService : Service() {
                                 request?.thread == locator && request.turnId == turnId
                             }
                             .forEach { userInputTimeoutJobs.remove(it)?.cancel() }
+                        val settledQuestionLocators = mutableState.value.userInputRequests.requests.values
+                            .filter { it.thread == locator && it.turnId == turnId }
+                            .map(UserInputRequest::locator)
                         mutableState.update { state ->
+                            val questions = turnId?.let {
+                                state.userInputRequests.turnSettled(locator, it)
+                            } ?: state.userInputRequests
+                            val answers = settledQuestionLocators.fold(state.userInputAnswers) { current, requestLocator ->
+                                current.remove(requestLocator)
+                            }
                             state.withApprovals(
                                 commandApprovals = turnId?.let {
                                     state.commandApprovals.turnSettled(locator, it)
@@ -2337,11 +2647,8 @@ class DealerConnectionService : Service() {
                                 fileApprovals = turnId?.let {
                                     state.fileApprovals.turnSettled(locator, it)
                                 } ?: state.fileApprovals,
-                            ).withUserInputRequests(
-                                turnId?.let {
-                                    state.userInputRequests.turnSettled(locator, it)
-                                } ?: state.userInputRequests,
-                            ).copy(
+                            ).withUserInputRequests(questions).copy(
+                                userInputAnswers = answers,
                                 threadActions = state.threadActions.reconcileInterrupt(locator, null),
                                 threads = state.threads[locator]?.let { row ->
                                     state.threads + (
@@ -2354,6 +2661,8 @@ class DealerConnectionService : Service() {
                                 } ?: state.threads,
                             )
                         }
+                        pokerUserInputBindings.keys.removeAll { it in settledQuestionLocators }
+                        refreshPokerUserInputProjection(locator)
                         recordThreadTransition(locator)
                         scope.launch {
                             draftMutex.withLock {
@@ -2910,6 +3219,8 @@ class DealerConnectionService : Service() {
         pokerComposerEpoch = null
         pokerComposerBindings.clear()
         pokerComposerResults.clear()
+        pokerUserInputBindings.clear()
+        pokerUserInputResults.clear()
         pokerConnectionOwner.stop()
         runCatching { tailnetEngine.stop() }
         synchronized(hostSessionConfigs) {
@@ -3171,7 +3482,16 @@ private fun DealerUiState.withCommandApprovals(approvals: CommandApprovalState):
 }
 
 private fun DealerUiState.withUserInputRequests(requests: UserInputRequestState): DealerUiState {
-    return copy(userInputRequests = requests).withBlockingRequests()
+    return copy(
+        userInputRequests = requests,
+        userInputAnswers = userInputAnswers.copy(
+            buffers = userInputAnswers.buffers.filterKeys {
+                requests.requests[it]?.resolution?.let { resolution ->
+                    resolution != RequestResolutionState.RESOLVED
+                } == true
+            },
+        ),
+    ).withBlockingRequests()
 }
 
 internal fun DealerUiState.withApprovals(
@@ -3239,6 +3559,12 @@ private data class PokerComposerBinding(
     val modeSession: String,
 )
 
+private data class PokerUserInputBinding(
+    val epoch: Long,
+    val controlGeneration: Long,
+    val modeSession: String,
+)
+
 enum class DealerRunState(
     val label: String,
     val active: Boolean = false,
@@ -3270,6 +3596,7 @@ data class DealerUiState(
     val threadActions: ThreadActionState = ThreadActionState(),
     val commandApprovals: CommandApprovalState = CommandApprovalState(),
     val userInputRequests: UserInputRequestState = UserInputRequestState(),
+    val userInputAnswers: UserInputAnswerState = UserInputAnswerState(),
     val fileApprovals: FileApprovalState = FileApprovalState(),
     val knownBlockingRequestThreads: Set<CodexThreadLocator> = emptySet(),
     val tailnet: EmbeddedTailnetUiState = EmbeddedTailnetUiState(),

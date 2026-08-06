@@ -2,6 +2,7 @@ package com.code2hack.pokerdealer.domain
 
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class UserInputRequestsTest {
@@ -49,6 +50,48 @@ class UserInputRequestsTest {
         assertEquals(RequestResolutionState.PENDING, qualified.requests.getValue(current.locator).resolution)
     }
 
+    @Test
+    fun `answer buffer preserves Other text while switching named option`() {
+        val request = requestWithOptions()
+        val buffer = UserInputAnswerBuffer()
+            .edit(request, "target", UserInputAnswerEdit.SelectOther)
+            .edit(request, "target", UserInputAnswerEdit.SetText("another host"))
+            .edit(request, "target", UserInputAnswerEdit.SelectOption("Spark"))
+
+        assertEquals("Spark", buffer.activeValue(request.questions.single()))
+        assertEquals("another host", buffer.answer("target").otherText)
+
+        val other = buffer.edit(request, "target", UserInputAnswerEdit.SelectOther)
+        assertEquals("another host", other.activeValue(request.questions.single()))
+        assertTrue(other.isComplete(request))
+    }
+
+    @Test
+    fun `qualified request reissue carries only the live process buffer`() {
+        val old = requestWithOptions()
+        val current = old.copy(locator = old.locator.copy(appServerGeneration = 2))
+        val requests = UserInputRequestState().receive(old, sameIdReissueQualified = false)
+        val answers = UserInputAnswerState()
+            .receive(UserInputRequestState(), old, sameIdReissueQualified = false)
+            .edit(old, "target", UserInputAnswerEdit.SelectOption("Fold6"))
+        val rebound = answers.receive(requests, current, sameIdReissueQualified = true)
+
+        assertEquals("Fold6", rebound.buffer(current.locator).activeValue(current.questions.single()))
+        assertEquals(UserInputAnswerBuffer(), UserInputAnswerState().receive(requests, current, true).buffer(current.locator))
+    }
+
+    @Test
+    fun `secret buffer has a redacted diagnostic representation and purges explicitly`() {
+        val request = request().copy(
+            questions = listOf(request().questions.single().copy(isSecret = true)),
+        )
+        val buffer = UserInputAnswerBuffer()
+            .edit(request, "answer", UserInputAnswerEdit.SetText("secret-value"))
+
+        assertTrue("secret-value" !in buffer.toString())
+        assertTrue(buffer.clearSecretAnswers(request).answers.isEmpty())
+    }
+
     private fun request() = UserInputRequest(
         locator = ServerRequestLocator("spark", 1, "s:question"),
         thread = CodexThreadLocator("spark", "thread"),
@@ -60,5 +103,21 @@ class UserInputRequestsTest {
         autoResolutionMs = 100,
         receivedAtMs = 10,
         fingerprint = "fingerprint",
+    )
+
+    private fun requestWithOptions() = request().copy(
+        questions = listOf(
+            UserInputQuestion(
+                id = "target",
+                header = "Target",
+                question = "Where?",
+                options = listOf(
+                    UserInputOption("Spark", "workstation"),
+                    UserInputOption("Fold6", "phone"),
+                ),
+                isOther = true,
+                isSecret = false,
+            ),
+        ),
     )
 }

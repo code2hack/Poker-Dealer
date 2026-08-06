@@ -164,13 +164,71 @@ enum class PokerNavigationMode {
     REQUEST_PANEL,
 }
 
+data class PokerRequestQuestionLayout(
+    val id: String,
+    val controlCount: Int,
+    val optionLabels: List<String> = emptyList(),
+    val hasOther: Boolean = false,
+) {
+    init {
+        require(id.isNotBlank()) { "Request question id must not be blank" }
+        require(controlCount > 0) { "Request question control count must be positive" }
+        require(optionLabels.distinct().size == optionLabels.size) {
+            "Request question option labels must be unique"
+        }
+    }
+}
+
+data class PokerRequestControl(
+    val questionId: String,
+    val optionLabel: String? = null,
+    val isOther: Boolean = false,
+)
+
 data class PokerRequestPanelLayout(
     val id: String,
     val positionCount: Int = 1,
+    val questions: List<PokerRequestQuestionLayout> = emptyList(),
 ) {
     init {
         require(id.isNotBlank()) { "Request-panel id must not be blank" }
         require(positionCount > 0) { "Request-panel position count must be positive" }
+        require(questions.map(PokerRequestQuestionLayout::id).distinct().size == questions.size) {
+            "Request question ids must be unique"
+        }
+        if (questions.isNotEmpty()) {
+            require(questions.sumOf(PokerRequestQuestionLayout::controlCount) == positionCount) {
+                "Request question controls must cover the request panel"
+            }
+        }
+    }
+
+    fun questionAt(position: Int): PokerRequestQuestionLayout? {
+        require(position in 0 until positionCount) { "Request-panel position is outside the panel" }
+        var start = 0
+        return questions.firstOrNull { question ->
+            val contains = position in start until (start + question.controlCount)
+            start += question.controlCount
+            contains
+        }
+    }
+
+    fun controlAt(position: Int): PokerRequestControl? {
+        require(position in 0 until positionCount) { "Request-panel position is outside the panel" }
+        var start = 0
+        return questions.firstNotNullOfOrNull { question ->
+            val local = position - start
+            start += question.controlCount
+            if (local !in 0 until question.controlCount) {
+                null
+            } else {
+                PokerRequestControl(
+                    questionId = question.id,
+                    optionLabel = question.optionLabels.getOrNull(local),
+                    isOther = question.hasOther && local == question.controlCount - 1,
+                )
+            }
+        }
     }
 }
 

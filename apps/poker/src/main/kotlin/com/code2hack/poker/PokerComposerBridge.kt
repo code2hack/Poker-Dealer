@@ -3,6 +3,13 @@ package com.code2hack.poker
 import com.code2hack.pokerdealer.protocol.ComposerDraftProjection
 import com.code2hack.pokerdealer.protocol.ComposerMutationRequest
 import com.code2hack.pokerdealer.protocol.ComposerMutationResult
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_RESULT_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_MUTATION_TYPE
+import com.code2hack.pokerdealer.protocol.POKER_USER_INPUT_PROJECTION_TYPE
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationRequest
+import com.code2hack.pokerdealer.protocol.UserInputAnswerMutationResult
+import com.code2hack.pokerdealer.protocol.UserInputRequestProjection
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_DRAFT_PROJECTION_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_RESULT_TYPE
 import com.code2hack.pokerdealer.protocol.POKER_COMPOSER_MUTATION_TYPE
@@ -19,22 +26,34 @@ import kotlinx.serialization.json.jsonObject
 internal object PokerComposerBridge {
     private val projectionState = MutableStateFlow<Map<com.code2hack.pokerdealer.domain.CodexThreadLocator, ComposerDraftProjection>>(emptyMap())
     private val resultState = MutableStateFlow<Map<String, ComposerMutationResult>>(emptyMap())
+    private val userInputProjectionState =
+        MutableStateFlow<Map<ServerRequestLocator, UserInputRequestProjection>>(emptyMap())
+    private val userInputResultState =
+        MutableStateFlow<Map<String, UserInputAnswerMutationResult>>(emptyMap())
     private var sender: (suspend (String, JsonObject, Boolean) -> Boolean)? = null
 
     val projections: StateFlow<Map<com.code2hack.pokerdealer.domain.CodexThreadLocator, ComposerDraftProjection>> =
         projectionState
     val results: StateFlow<Map<String, ComposerMutationResult>> = resultState
+    val userInputProjections: StateFlow<Map<ServerRequestLocator, UserInputRequestProjection>> =
+        userInputProjectionState
+    val userInputResults: StateFlow<Map<String, UserInputAnswerMutationResult>> =
+        userInputResultState
 
     fun attach(sender: suspend (String, JsonObject, Boolean) -> Boolean) {
         this.sender = sender
         projectionState.value = emptyMap()
         resultState.value = emptyMap()
+        userInputProjectionState.value = emptyMap()
+        userInputResultState.value = emptyMap()
     }
 
     fun detach() {
         sender = null
         projectionState.value = emptyMap()
         resultState.value = emptyMap()
+        userInputProjectionState.value = emptyMap()
+        userInputResultState.value = emptyMap()
     }
 
     fun receive(envelope: ProtocolEnvelope): Boolean = try {
@@ -53,6 +72,22 @@ internal object PokerComposerBridge {
                 )
                 resultState.value = resultState.value + (result.target.operationId to result)
             }
+            POKER_USER_INPUT_PROJECTION_TYPE -> {
+                val projection = PokerProtocolJson.decodeFromJsonElement(
+                    UserInputRequestProjection.serializer(),
+                    envelope.payload,
+                )
+                userInputProjectionState.value = userInputProjectionState.value +
+                    (projection.request.locator to projection)
+            }
+            POKER_USER_INPUT_MUTATION_RESULT_TYPE -> {
+                val result = PokerProtocolJson.decodeFromJsonElement(
+                    UserInputAnswerMutationResult.serializer(),
+                    envelope.payload,
+                )
+                userInputResultState.value = userInputResultState.value +
+                    (result.target.operationId to result)
+            }
             else -> return false
         }
         true
@@ -67,5 +102,14 @@ internal object PokerComposerBridge {
             request,
         ).jsonObject
         return send(POKER_COMPOSER_MUTATION_TYPE, payload, true)
+    }
+
+    suspend fun sendUserInputMutation(request: UserInputAnswerMutationRequest): Boolean {
+        val send = sender ?: return false
+        val payload = PokerProtocolJson.encodeToJsonElement(
+            UserInputAnswerMutationRequest.serializer(),
+            request,
+        ).jsonObject
+        return send(POKER_USER_INPUT_MUTATION_TYPE, payload, true)
     }
 }

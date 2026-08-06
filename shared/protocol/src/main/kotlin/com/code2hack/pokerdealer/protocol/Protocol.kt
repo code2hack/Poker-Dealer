@@ -9,6 +9,9 @@ import kotlinx.serialization.json.JsonObject
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerEditTarget
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
+import com.code2hack.pokerdealer.domain.ServerRequestLocator
+import com.code2hack.pokerdealer.domain.UserInputAnswerBuffer
+import com.code2hack.pokerdealer.domain.UserInputRequest
 
 const val POKER_PROTOCOL_NAME = "poker-dealer"
 const val POKER_PROTOCOL_MAJOR = 1
@@ -32,6 +35,9 @@ const val POKER_SNAPSHOT_ACK_TYPE = "snapshot.ack"
 const val POKER_COMPOSER_DRAFT_PROJECTION_TYPE = "composer.projection"
 const val POKER_COMPOSER_MUTATION_TYPE = "composer.mutation"
 const val POKER_COMPOSER_MUTATION_RESULT_TYPE = "composer.mutation.result"
+const val POKER_USER_INPUT_PROJECTION_TYPE = "user-input.projection"
+const val POKER_USER_INPUT_MUTATION_TYPE = "user-input.mutation"
+const val POKER_USER_INPUT_MUTATION_RESULT_TYPE = "user-input.mutation.result"
 const val POKER_LISTENER_PORT = 39_817
 
 val PokerProtocolJson = Json {
@@ -87,6 +93,65 @@ data class ComposerMutationResult(
     val target: ComposerEditTarget,
     val outcome: ComposerMutationOutcome,
     val draft: ComposerDraft,
+    val reason: String? = null,
+)
+
+@Serializable
+data class UserInputRequestProjection(
+    val request: UserInputRequest,
+    val buffer: UserInputAnswerBuffer = UserInputAnswerBuffer(),
+    @SerialName("card_id") val cardId: String = "",
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String,
+)
+
+@Serializable
+data class UserInputAnswerMutationTarget(
+    val locator: ServerRequestLocator,
+    @SerialName("question_id") val questionId: String,
+    @SerialName("answer_revision") val answerRevision: Long,
+    @SerialName("control_generation") val controlGeneration: Long,
+    @SerialName("connection_epoch") val connectionEpoch: Long,
+    @SerialName("mode_session") val modeSession: String,
+    @SerialName("operation_id") val operationId: String,
+) {
+    init {
+        require(questionId.isNotBlank()) { "Question id must not be blank" }
+        require(answerRevision >= 0) { "Answer revision must not be negative" }
+        require(controlGeneration >= 0) { "Control generation must not be negative" }
+        require(connectionEpoch >= 0) { "Connection epoch must not be negative" }
+        require(modeSession.isNotBlank()) { "Mode session must not be blank" }
+        require(operationId.isNotBlank()) { "Operation id must not be blank" }
+    }
+}
+
+@Serializable
+enum class UserInputAnswerMutationKind {
+    SELECT_OPTION,
+    SELECT_OTHER,
+    SET_TEXT,
+}
+
+@Serializable
+data class UserInputAnswerMutationRequest(
+    val target: UserInputAnswerMutationTarget,
+    val kind: UserInputAnswerMutationKind,
+    val value: String? = null,
+)
+
+@Serializable
+enum class UserInputAnswerMutationOutcome {
+    ACKNOWLEDGED,
+    REJECTED,
+    UNCERTAIN,
+}
+
+@Serializable
+data class UserInputAnswerMutationResult(
+    val target: UserInputAnswerMutationTarget,
+    val outcome: UserInputAnswerMutationOutcome,
+    val buffer: UserInputAnswerBuffer,
     val reason: String? = null,
 )
 

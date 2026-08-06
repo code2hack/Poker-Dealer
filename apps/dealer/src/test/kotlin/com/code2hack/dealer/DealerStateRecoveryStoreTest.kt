@@ -133,6 +133,7 @@ class DealerStateRecoveryStoreTest {
         assertEquals(RequestResolutionState.UNKNOWN, restored.commandApprovals.requests[requestLocator]?.resolution)
         assertEquals(RequestResolutionState.UNKNOWN, restored.fileApprovals.requests[fileLocator]?.resolution)
         assertEquals(RequestResolutionState.UNKNOWN, restored.userInputRequests.requests[questionLocator]?.resolution)
+        assertTrue(restored.userInputAnswers.buffers.isEmpty())
         assertEquals(setOf(locator), restored.knownBlockingRequestThreads)
         assertEquals(listOf(card(locator)), restored.cards)
     }
