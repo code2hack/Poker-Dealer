@@ -43,8 +43,10 @@ class AndroidKeystorePairingIdentity(
     fun createForExplicitEnrollment() {
         val keyStore = loadKeyStore()
         if (keyStore.containsAlias(alias)) {
-            load(keyStore)
-            return
+            val existing = load(keyStore)
+            if (supportsTlsSigning(existing.keyStore.getKey(alias, null) as? PrivateKey)) return
+            runCatching { keyStore.deleteEntry(alias) }
+                .getOrElse { throw PairingKeyUnavailableException(it) }
         }
         try {
             val generator = KeyPairGenerator.getInstance(
@@ -60,7 +62,7 @@ class AndroidKeystorePairingIdentity(
                     KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY,
                 )
                     .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256)
                     .setCertificateSubject(X500Principal("CN=Poker-Dealer Dealer"))
                     .setCertificateSerialNumber(BigInteger.ONE)
                     .setCertificateNotBefore(notBefore)
@@ -101,6 +103,11 @@ class AndroidKeystorePairingIdentity(
             throw PairingKeyUnavailableException(failure)
         }
     }
+
+    private fun supportsTlsSigning(privateKey: PrivateKey?): Boolean =
+        privateKey != null && runCatching {
+            Signature.getInstance("NONEwithECDSA").initSign(privateKey)
+        }.isSuccess
 
     private fun loadKeyStore(): KeyStore = try {
         KeyStore.getInstance(ANDROID_KEYSTORE).also { it.load(null) }
