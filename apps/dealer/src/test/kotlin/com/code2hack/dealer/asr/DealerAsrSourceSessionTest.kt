@@ -43,6 +43,7 @@ class DealerAsrSourceSessionTest {
     @Test
     fun `active source stays fixed while setting changes for the next session`() {
         val session = DealerAsrSourceSession()
+        assertTrue(dealerAsrSourceSelectionEnabled(activeSession = true))
         session.setFutureSource(PokerAsrSource.DEALER_PHONE)
         assertEquals(
             PokerAsrSource.DEALER_PHONE,

@@ -81,3 +81,9 @@ internal fun shouldRequestDealerAsrPhonePermission(
     source: PokerAsrSource,
     permissionGranted: Boolean,
 ): Boolean = source == PokerAsrSource.DEALER_PHONE && !permissionGranted
+
+@Suppress("UNUSED_PARAMETER")
+internal fun dealerAsrSourceSelectionEnabled(activeSession: Boolean): Boolean {
+    // The active source is immutable; this control edits the next-session preference.
+    return true
+}

@@ -65,6 +65,7 @@ import com.code2hack.dealer.asr.DealerAsrPackKey
 import com.code2hack.dealer.asr.DealerAsrMode
 import com.code2hack.dealer.asr.DealerAsrProfileSaveResult
 import com.code2hack.dealer.asr.DealerAsrProcess
+import com.code2hack.dealer.asr.dealerAsrSourceSelectionEnabled
 import com.code2hack.dealer.asr.prettyDealerAsrProfile
 import com.code2hack.dealer.asr.shouldRequestDealerAsrPhonePermission
 import com.code2hack.pokerdealer.domain.Card
@@ -876,7 +877,7 @@ private fun DealerApp(
                 onSetMirror = onSetAsrMirror,
                 onSaveProfile = onSaveAsrProfile,
                 selectedSource = state.asr.selectedSource,
-                sourceLocked = state.asr.active,
+                activeSession = state.asr.active,
                 onSource = onSetAsrSource,
             )
             discoveredThreads.forEach { thread ->
@@ -1216,7 +1217,7 @@ private fun DealerAsrCatalogPanel(
     onSetMirror: (String?) -> Unit,
     onSaveProfile: (DealerAsrPackKey, String, (DealerAsrProfileSaveResult) -> Unit) -> Unit,
     selectedSource: PokerAsrSource,
-    sourceLocked: Boolean,
+    activeSession: Boolean,
     onSource: (PokerAsrSource) -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
@@ -1239,6 +1240,7 @@ private fun DealerAsrCatalogPanel(
         .filter { it.state != DealerAsrDownloadState.FAILED }
         .map { it.key }
         .toSet()
+    val sourceSelectionEnabled = dealerAsrSourceSelectionEnabled(activeSession)
 
     Column(
         modifier = Modifier
@@ -1248,18 +1250,24 @@ private fun DealerAsrCatalogPanel(
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text("ASR microphone", style = MaterialTheme.typography.titleMedium)
-        Text("The source is fixed for each session; changes apply to the next session.")
+        Text(
+            if (activeSession) {
+                "ASR is active. This choice applies to the next session; the current session keeps its source."
+            } else {
+                "Choose the source for the next ASR session."
+            },
+        )
         PokerAsrSource.entries.forEach { source ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(enabled = !sourceLocked) { onSource(source) },
+                    .clickable(enabled = sourceSelectionEnabled) { onSource(source) },
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 RadioButton(
                     selected = selectedSource == source,
-                    onClick = { if (!sourceLocked) onSource(source) },
-                    enabled = !sourceLocked,
+                    onClick = { if (sourceSelectionEnabled) onSource(source) },
+                    enabled = sourceSelectionEnabled,
                 )
                 Text(
                     when (source) {
@@ -1269,7 +1277,6 @@ private fun DealerAsrCatalogPanel(
                 )
             }
         }
-        if (sourceLocked) Text("Locked while ASR is active.", style = MaterialTheme.typography.labelSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("ASR model catalog", style = MaterialTheme.typography.titleMedium)
             OutlinedButton(onClick = { showCatalog = !showCatalog }) {
