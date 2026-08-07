@@ -28,6 +28,11 @@ import org.junit.jupiter.api.Test
 
 class ProtocolTest {
     @Test
+    fun `listener port remains the hardware-qualified Fold6 to RG port`() {
+        assertEquals(39_817, POKER_LISTENER_PORT)
+    }
+
+    @Test
     fun `envelope round trips without losing protocol fields`() {
         val envelope = ProtocolEnvelope(
             type = "card.append",
