@@ -5,8 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -52,15 +55,11 @@ import com.code2hack.pokerdealer.protocol.PokerFontScaleProtocol
 import com.code2hack.pokerdealer.protocol.PokerFontScaleInstallResult
 import com.code2hack.pokerdealer.protocol.PokerTransientNoticeProtocol
 import com.code2hack.pokerdealer.protocol.PokerPairingController
-import com.code2hack.pokerdealer.protocol.PokerPairingEnrollment
 import com.code2hack.pokerdealer.protocol.PokerPairingFailure
-import com.code2hack.pokerdealer.protocol.PokerPairingState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -72,18 +71,19 @@ class PokerListenerService : Service() {
     private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
     private lateinit var pairingIdentity: AndroidKeystorePairingIdentity
     private lateinit var pairing: PokerPairingController
+    private lateinit var bluetoothBootstrapServer: PokerBluetoothBootstrapServer
+    private var bluetoothBondReceiver: BroadcastReceiver? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var foregroundStarted = false
-    private var pairingServer: PokerEnrollmentServer? = null
-    private var activeEnrollment: PokerPairingEnrollment? = null
-    private var enrollmentExpiryJob: Job? = null
     private val bindingSendMutex = Mutex()
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        pairingIdentity = AndroidKeystorePairingIdentity()
+        pairingIdentity = AndroidKeystorePairingIdentity().also {
+            it.ensureCreatedForBondBootstrap()
+        }
         pairing = pairingIdentity.pairingController(this)
         val pokerScheduler = CoroutinePokerScheduler(serviceScope)
         PokerBindingRuntime.attachService { serviceScope.launch { sendBindingState() } }
@@ -155,6 +155,14 @@ class PokerListenerService : Service() {
             },
             callbacks = pokerSnapshotHandler,
         )
+        bluetoothBootstrapServer = PokerBluetoothBootstrapServer(
+            context = this,
+            identity = pairingIdentity,
+            pairing = pairing,
+            scope = serviceScope,
+            onProvisioned = ::handleBluetoothProvisioned,
+            onFailure = ::handleBluetoothBootstrapFailure,
+        )
         PokerComposerBridge.attach { type, payload, requireWritable ->
             owner.send(type, payload, requireWritable = requireWritable)
         }
@@ -163,6 +171,7 @@ class PokerListenerService : Service() {
             owner.send(type, payload, requireWritable = requireWritable)
         }
         registerNetworkCallback()
+        registerBluetoothBondReceiver()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -170,7 +179,6 @@ class PokerListenerService : Service() {
             ACTION_DISABLE -> {
                 setEnabled(this, false)
                 owner.stop()
-                stopEnrollmentServer()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 foregroundStarted = false
                 PokerPairingRuntime.publish(pairing.status)
@@ -184,15 +192,9 @@ class PokerListenerService : Service() {
                 startConfiguredRuntime()
             }
 
-            ACTION_OPEN_ENROLLMENT -> {
-                setEnabled(this, true)
-                startForegroundCompat()
-                openEnrollment(intent.getBooleanExtra(EXTRA_REPLACEMENT, false))
-            }
-
             ACTION_RETRY -> if (isEnabled(this)) {
                 startForegroundCompat()
-                if (pairing.status.state == PokerPairingState.PAIRED && owner.isRunning) {
+                if (pairing.isPaired && owner.isRunning) {
                     owner.retry(PokerReconnectTrigger.MANUAL_RETRY)
                 } else startConfiguredRuntime()
             } else {
@@ -221,7 +223,9 @@ class PokerListenerService : Service() {
         PokerSnapshotRuntime.detachForegroundRequester()
         PokerSnapshotRuntime.detachDiagnosticsRequester()
         PokerPresentationRuntime.detachDiagnosticsRequester()
-        stopEnrollmentServer()
+        if (::bluetoothBootstrapServer.isInitialized) bluetoothBootstrapServer.close()
+        bluetoothBondReceiver?.let { receiver -> runCatching { unregisterReceiver(receiver) } }
+        bluetoothBondReceiver = null
         owner.stop()
         PokerBindingRuntime.notifyConnectionLost()
         PokerBindingRuntime.detachService()
@@ -237,94 +241,12 @@ class PokerListenerService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun startConfiguredRuntime() {
-        when (pairing.status.state) {
-            PokerPairingState.PAIRED -> owner.start()
-            PokerPairingState.ENROLLMENT_OPEN -> activeEnrollment?.let(::startEnrollmentServer)
-            PokerPairingState.UNPAIRED -> PokerPairingRuntime.publish(pairing.status)
-        }
-    }
-
-    private fun openEnrollment(replacement: Boolean) {
-        owner.stop()
-        stopEnrollmentServer()
-        runCatching {
-            pairingIdentity.createForExplicitEnrollment()
-            pairing.openEnrollment(
-                nowMs = System.currentTimeMillis(),
-                physicalEnrollmentConfirmed = true,
-                physicalReplacementConfirmed = replacement,
-            )
-        }.onSuccess { enrollment ->
-            activeEnrollment = enrollment
-            scheduleEnrollmentExpiry(enrollment)
-            startEnrollmentServer(enrollment)
-        }.onFailure { failure ->
-            PokerPairingRuntime.publishFailure(
-                (failure as? com.code2hack.pokerdealer.protocol.PokerPairingRejected)?.reason
-                    ?: PokerPairingFailure.KEYSTORE_INVALID,
-            )
-        }
-    }
-
-    private fun startEnrollmentServer(enrollment: PokerPairingEnrollment) {
-        if (pairingServer != null) return
-        val server = PokerEnrollmentServer(
-            addressProvider = { activeWifiAddress(this) },
-            enrollment = enrollment,
-            pairing = pairing,
-            scope = serviceScope,
-            nowMs = System::currentTimeMillis,
-            onFailure = { reason, attempts ->
-                if (pairing.status.state == PokerPairingState.ENROLLMENT_OPEN) {
-                    val host = (PokerPairingRuntime.state.value as? PokerPairingUiState.EnrollmentOpen)
-                        ?.host.orEmpty()
-                    PokerPairingRuntime.publishEnrollment(
-                        enrollment = enrollment,
-                        host = host,
-                        failedAttempts = attempts,
-                        failure = reason,
-                    )
-                    if (attempts >= com.code2hack.pokerdealer.protocol.POKER_PAIRING_MAX_ATTEMPTS) {
-                        activeEnrollment = null
-                        stopEnrollmentServer()
-                    }
-                } else {
-                    PokerPairingRuntime.publish(pairing.status)
-                }
-            },
-            onComplete = {
-                activeEnrollment = null
-                stopEnrollmentServer()
-                enrollmentExpiryJob?.cancel()
-                enrollmentExpiryJob = null
-                PokerPairingRuntime.publish(pairing.status)
-                owner.start()
-            },
-        )
-        runCatching {
-            val host = server.start()
-            pairingServer = server
-            PokerPairingRuntime.publishEnrollment(enrollment, host)
-        }.onFailure {
-            server.stop()
-            PokerPairingRuntime.publishFailure(PokerPairingFailure.INVALID_ENDPOINT)
-        }
-    }
-
-    private fun stopEnrollmentServer() {
-        pairingServer?.stop()
-        pairingServer = null
-    }
-
-    private fun scheduleEnrollmentExpiry(enrollment: PokerPairingEnrollment) {
-        enrollmentExpiryJob?.cancel()
-        enrollmentExpiryJob = serviceScope.launch {
-            delay((enrollment.challenge.expiresAtMs - System.currentTimeMillis()).coerceAtLeast(0L))
-            if (pairing.closeExpiredEnrollment(System.currentTimeMillis())) {
-                activeEnrollment = null
-                stopEnrollmentServer()
-                PokerPairingRuntime.publish(pairing.status)
-            }
+        bluetoothBootstrapServer.start()
+        if (pairing.isPaired) {
+            owner.start()
+        } else {
+            owner.stop()
+            PokerPairingRuntime.publish(pairing.status)
         }
     }
 
@@ -352,13 +274,65 @@ class PokerListenerService : Service() {
 
     private fun requestNetworkRetry() {
         if (!isEnabled(this)) return
-        if (pairing.status.state == PokerPairingState.ENROLLMENT_OPEN) {
-            stopEnrollmentServer()
-            activeEnrollment?.let(::startEnrollmentServer)
-        } else {
+        bluetoothBootstrapServer.start()
+        if (pairing.isPaired) {
             owner.retry(PokerReconnectTrigger.NETWORK_CHANGE)
         }
     }
+
+    private fun handleBluetoothProvisioned() {
+        PokerPairingRuntime.publish(pairing.status)
+        PokerSnapshotRuntime.initializeUnread(
+            this,
+            runCatching {
+                pairing.pinnedPeerPublicKey?.let { peer ->
+                    pokerPairingFingerprint(pairingIdentity.publicKey, peer)
+                }
+            }.getOrNull(),
+        )
+        owner.stop()
+        owner.start()
+    }
+
+    private fun handleBluetoothBootstrapFailure(failure: PokerPairingFailure) {
+        if (!pairing.isPaired) PokerPairingRuntime.publishFailure(failure)
+    }
+
+    private fun registerBluetoothBondReceiver() {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+                val device = intent.bluetoothDeviceExtra() ?: return
+                val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+                when (state) {
+                    BluetoothDevice.BOND_NONE -> {
+                        if (pairing.revokeBondTrust(device.address)) {
+                            owner.stop()
+                            PokerPairingRuntime.publish(pairing.status)
+                            PokerSnapshotRuntime.initializeUnread(this@PokerListenerService, null)
+                        }
+                    }
+                    BluetoothDevice.BOND_BONDED -> bluetoothBootstrapServer.restart()
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(receiver, filter)
+        }
+        bluetoothBondReceiver = receiver
+    }
+
+    @Suppress("DEPRECATION")
+    private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+        } else {
+            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+        }
 
     private suspend fun sendBindingState() {
         if (!owner.isConnected) return
@@ -532,8 +506,6 @@ class PokerListenerService : Service() {
         const val ACTION_ENABLE = "com.code2hack.poker.action.ENABLE_LISTENER"
         const val ACTION_DISABLE = "com.code2hack.poker.action.DISABLE_LISTENER"
         const val ACTION_RETRY = "com.code2hack.poker.action.RETRY_LISTENER"
-        const val ACTION_OPEN_ENROLLMENT = "com.code2hack.poker.action.OPEN_ENROLLMENT"
-        const val EXTRA_REPLACEMENT = "replacement"
         private const val PREFS = "poker_listener"
         private const val ENABLED = "enabled"
         private const val CHANNEL_ID = "poker_listener"
@@ -552,14 +524,6 @@ class PokerListenerService : Service() {
         fun enable(context: Context) {
             setEnabled(context, true)
             start(context, ACTION_ENABLE)
-        }
-
-        fun openEnrollment(context: Context, replacement: Boolean) {
-            setEnabled(context, true)
-            start(
-                context,
-                intentFor(context.packageName, launchSpec(ACTION_OPEN_ENROLLMENT, replacement)),
-            )
         }
 
         fun disable(context: Context) {
@@ -583,15 +547,13 @@ class PokerListenerService : Service() {
         internal fun activityStartAction(enabled: Boolean): String =
             if (enabled) ACTION_RETRY else ACTION_ENABLE
 
-        internal data class LaunchSpec(val action: String, val replacement: Boolean = false)
+        internal data class LaunchSpec(val action: String)
 
-        internal fun launchSpec(action: String, replacement: Boolean = false): LaunchSpec =
-            LaunchSpec(action, replacement)
+        internal fun launchSpec(action: String): LaunchSpec = LaunchSpec(action)
 
         internal fun intentFor(packageName: String, spec: LaunchSpec): Intent = Intent()
             .setClassName(packageName, PokerListenerService::class.java.name)
             .setAction(spec.action)
-            .putExtra(EXTRA_REPLACEMENT, spec.replacement)
 
         private fun start(context: Context, action: String) {
             start(context, intentFor(context.packageName, launchSpec(action)))

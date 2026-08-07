@@ -46,6 +46,7 @@ data class PokerPairingRecord(
     val dealerPublicKey: ByteArray,
     val pokerPublicKey: ByteArray,
     val endpoint: PokerHotspotEndpoint? = null,
+    val bondedPeerId: String? = null,
 ) {
     fun isValid(): Boolean = dealerPublicKey.isNotEmpty() && pokerPublicKey.isNotEmpty()
 }
@@ -109,6 +110,10 @@ enum class PokerPairingFailure {
     INVALID_CHALLENGE,
     NOT_ENROLLMENT_DEVICE,
     INVALID_ENDPOINT,
+    BLUETOOTH_PERMISSION_REQUIRED,
+    BLUETOOTH_NOT_BONDED,
+    BLUETOOTH_AMBIGUOUS,
+    BOOTSTRAP_INVALID,
 }
 
 data class PokerPairingStatus(
@@ -220,6 +225,7 @@ class PokerPairingController(
     private val codeFactory: () -> String = { generatePairingCode(random) },
 ) {
     private var record: PokerPairingRecord? = null
+    private var rememberedBondedPeerId: String? = null
     private var window: PairingWindow? = null
     private var pendingDealerRecord: PokerPairingRecord? = null
     private var pendingChallenge: PokerPairingChallenge? = null
@@ -249,6 +255,9 @@ class PokerPairingController(
 
     val endpoint: PokerHotspotEndpoint? get() = record?.endpoint
 
+    /** Android's bonded-device identity remembered independently of app-key rotation. */
+    val bondedPeerId: String? get() = record?.bondedPeerId ?: rememberedBondedPeerId
+
     /** The non-secret public key pinned for the next mutually-authenticated connection. */
     val pinnedPeerPublicKey: ByteArray?
         get() = record?.let { paired ->
@@ -269,9 +278,11 @@ class PokerPairingController(
             val stored = store.load()
             if (stored == null) {
                 record = null
+                rememberedBondedPeerId = null
                 failure = PokerPairingFailure.NONE
                 return
             }
+            rememberedBondedPeerId = stored.bondedPeerId
             val localKey = currentPublicKey()
             val expectedLocal = if (role == PokerPairingRole.DEALER) {
                 stored.dealerPublicKey
@@ -287,6 +298,7 @@ class PokerPairingController(
             failure = PokerPairingFailure.NONE
         } catch (_: CorruptPokerPairingStateException) {
             record = null
+            rememberedBondedPeerId = null
             failure = PokerPairingFailure.CORRUPT_STATE
         } catch (_: PairingKeyUnavailableException) {
             record = null
@@ -294,7 +306,75 @@ class PokerPairingController(
         }
     }
 
-    /** Poker-only entry point, called by an explicit physical enrollment action. */
+    /**
+     * Commits transport trust that has already been authorized by Android's Bluetooth bond.
+     * This bypasses the legacy PAKE ceremony: the bonded RFCOMM channel is the user trust
+     * boundary and the supplied key has already passed bootstrap proof-of-possession.
+     */
+    fun provisionFromTrustedBond(
+        bondedPeerId: String,
+        peerPublicKey: ByteArray,
+        endpoint: PokerHotspotEndpoint,
+    ): AuthenticatedPokerPeer {
+        require(bondedPeerId.isNotBlank()) { "Bonded peer identity must not be blank" }
+        require(peerPublicKey.isNotEmpty()) { "Peer public key must not be empty" }
+        ensureKeyUsable()
+        val localKey = currentPublicKey()
+        val provisioned = if (role == PokerPairingRole.DEALER) {
+            PokerPairingRecord(
+                dealerPublicKey = localKey,
+                pokerPublicKey = peerPublicKey.copyOf(),
+                endpoint = endpoint,
+                bondedPeerId = bondedPeerId,
+            )
+        } else {
+            PokerPairingRecord(
+                dealerPublicKey = peerPublicKey.copyOf(),
+                pokerPublicKey = localKey,
+                endpoint = endpoint,
+                bondedPeerId = bondedPeerId,
+            )
+        }
+        store.save(provisioned)
+        record = provisioned
+        rememberedBondedPeerId = bondedPeerId
+        window = null
+        pendingDealerRecord = null
+        pendingChallenge = null
+        pendingChallengeId = null
+        pendingClientEphemeralPublicKey = null
+        pendingClientProof = null
+        pendingSessionKey = null
+        failedAttempts = 0
+        failure = PokerPairingFailure.NONE
+        val pinnedPeer = if (role == PokerPairingRole.DEALER) {
+            provisioned.pokerPublicKey
+        } else {
+            provisioned.dealerPublicKey
+        }
+        return AuthenticatedPokerPeer(this, fingerprint(pinnedPeer))
+    }
+
+    /** Revokes app transport trust when Android reports that the remembered peer is unbonded. */
+    fun revokeBondTrust(peerId: String? = null): Boolean {
+        val remembered = bondedPeerId ?: return false
+        if (peerId != null && peerId != remembered) return false
+        store.clear()
+        record = null
+        rememberedBondedPeerId = null
+        window = null
+        pendingDealerRecord = null
+        pendingChallenge = null
+        pendingChallengeId = null
+        pendingClientEphemeralPublicKey = null
+        pendingClientProof = null
+        pendingSessionKey = null
+        failedAttempts = 0
+        failure = PokerPairingFailure.NONE
+        return true
+    }
+
+    /** Poker-only legacy entry point retained only for compatibility fixtures; production uses Bluetooth bootstrap. */
     fun openEnrollment(
         nowMs: Long,
         physicalEnrollmentConfirmed: Boolean,

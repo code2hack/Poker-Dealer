@@ -9,6 +9,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.input.InputManager
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.KeyEvent
@@ -52,6 +53,7 @@ import com.code2hack.pokerdealer.domain.PokerPostureSample
 import com.code2hack.pokerdealer.domain.PokerWheelState
 import com.code2hack.pokerdealer.domain.ThreadWorkEvidence
 import com.code2hack.pokerdealer.domain.ThreadWorkState
+import com.code2hack.pokerdealer.protocol.PokerPairingFailure
 import com.code2hack.pokerdealer.protocol.PokerSnapshot
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPile
 import com.code2hack.pokerdealer.protocol.PokerSnapshotPileMetadata
@@ -131,9 +133,23 @@ class PokerActivity : ComponentActivity() {
             lifecycleScope.launch { asrController.fail("ASR unavailable") }
         }
     }
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            PokerListenerService.retry(this)
+        } else {
+            PokerPairingRuntime.publishFailure(PokerPairingFailure.BLUETOOTH_PERMISSION_REQUIRED)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
         navigation = PokerNavigationReducer(viewportLineCount = 12)
         composerController = PokerComposerController(
             navigation = navigation,
@@ -480,8 +496,6 @@ class PokerActivity : ComponentActivity() {
                             camera = camera,
                             notice = notice,
                             pairingState = pairingState,
-                            onPair = { PokerListenerService.openEnrollment(this@PokerActivity, false) },
-                            onReplace = { PokerListenerService.openEnrollment(this@PokerActivity, true) },
                         )
                     }
                 }
@@ -637,8 +651,6 @@ private fun PokerCardReader(
     camera: PokerCamera2Controller,
     notice: PokerTransientNotice?,
     pairingState: PokerPairingUiState,
-    onPair: () -> Unit,
-    onReplace: () -> Unit,
 ) {
     if (photoState.phase != PokerPhotoPhase.IDLE) {
         PokerPhotoSurface(photoState, camera)
@@ -703,7 +715,7 @@ private fun PokerCardReader(
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
-            PokerPairingPanel(pairingState, onPair, onReplace)
+            PokerPairingPanel(pairingState)
         }
     }
 }

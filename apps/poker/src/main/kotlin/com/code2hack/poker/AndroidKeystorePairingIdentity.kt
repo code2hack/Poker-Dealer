@@ -19,7 +19,7 @@ import java.security.spec.ECGenParameterSpec
 import java.util.Calendar
 import javax.security.auth.x500.X500Principal
 
-/** The private key never leaves Android Keystore; no recovery path silently regenerates it. */
+/** The private key never leaves Android Keystore; Android's Bluetooth bond authorizes automatic reprovisioning. */
 class AndroidKeystorePairingIdentity(
     private val alias: String = DEFAULT_ALIAS,
 ) : PokerPairingIdentity {
@@ -40,11 +40,16 @@ class AndroidKeystorePairingIdentity(
         throw PairingKeyUnavailableException(failure)
     }
 
-    fun createForExplicitEnrollment() {
+    fun ensureCreatedForBondBootstrap() {
         val keyStore = loadKeyStore()
         if (keyStore.containsAlias(alias)) {
-            load(keyStore)
-            return
+            try {
+                load(keyStore)
+                return
+            } catch (_: PairingKeyUnavailableException) {
+                runCatching { keyStore.deleteEntry(alias) }
+                    .getOrElse { throw PairingKeyUnavailableException(it) }
+            }
         }
         try {
             val generator = KeyPairGenerator.getInstance(

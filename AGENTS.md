@@ -70,10 +70,11 @@ Do not reopen these decisions unless the user explicitly requests an architectur
 9. **A thread stays on its original execution host. Cross-host migration is not the same thread.**
 10. **Multiple clients may observe a thread, but one human-control surface should actively write or decide approvals at a time.**
 11. **Poker receives a structured projection from Dealer; it does not connect directly to any app-server.**
-12. **Dealer↔Poker uses the validated ordinary Android hotspot path, with Dealer initiating and Poker listening.**
-13. **No proprietary Rokid CXR transport is a production dependency.**
-14. **Dealer embeds a userspace Tailscale node for workstation access without claiming Android's `VpnService` slot.**
-15. **The embedded tailnet routes only Dealer-owned connections; Dealer is not a system VPN or exit-node client.**
+12. **Android Bluetooth bond between Fold6 and RG is the sole Dealer–Poker user trust decision; secure RFCOMM automatically bootstraps app keys and Poker's current Wi-Fi endpoint.**
+13. **Dealer↔Poker product data uses the validated ordinary Android hotspot/Wi-Fi path, with Dealer initiating and Poker listening; Bluetooth is bootstrap/discovery only.**
+14. **No proprietary Rokid CXR transport is a production dependency.**
+15. **Dealer embeds a userspace Tailscale node for workstation access without claiming Android's `VpnService` slot.**
+16. **The embedded tailnet routes only Dealer-owned connections; Dealer is not a system VPN or exit-node client.**
 
 ## Stale-design ban
 
@@ -91,7 +92,8 @@ Do not implement or restore any of the following:
 - requiring the standalone Tailscale Android app as Dealer's only remote route;
 - using Android `VpnService` for Dealer's embedded tailnet;
 - routing all Fold6 traffic through Dealer's embedded tailnet;
-- CXR-M, CXR-S, CXR-L, ADB tunnels, or proprietary Rokid data channels.
+- CXR-M, CXR-S, CXR-L, ADB tunnels, or proprietary Rokid data channels;
+- production `Pair Dealer`/`Replace Dealer` actions, numeric/QR Poker–Dealer pairing ceremonies, or manual Poker IP/port entry when an Android Bluetooth bond is the trust boundary.
 
 Git history may contain these designs. History is evidence only, not current guidance.
 
@@ -173,9 +175,9 @@ The M2 workstation slice proves Spark and u4090 through the same daemon-backed a
 
 M2T now proves the tested Fold6 community build through loopback SSH, the distribution-specific daemon lifecycle, the shared app-server stack, its daemon-backed local TUI, and recovery after proxy, `sshd`, daemon, and Termux-process interruption without replay; see `docs/evidence/fold6-m2t-turn-2026-07-28.md` and `docs/evidence/fold6-m2t-recovery-2026-07-28.md`.
 
-M3 is complete. The current slice is the expanded M4: Dealer↔Poker pairing and synchronization, horizontal `BUSY | ATTENTION_REQUIRED | READY` card piles without an attached-thread list, canonical operations and HID bindings, reviewed composer/request input, the fixed action wheel, Photo, Morse, and Dealer-local ASR/model management. The former M5 milestone is retired. Follow the published dependency DAG for issues #33–#64; `SPEC.md` section 17 defines scope order, not a global serialization barrier.
+M3 is complete. The current slice is the expanded M4: automatic Dealer↔Poker trust bootstrap from the existing Android Bluetooth bond, Wi-Fi synchronization, horizontal `BUSY | ATTENTION_REQUIRED | READY` card piles without an attached-thread list, canonical operations and HID bindings, reviewed composer/request input, the fixed action wheel, Photo, Morse, and Dealer-local ASR/model management. The former M5 milestone is retired. Follow the published dependency DAG for issues #33–#64; `SPEC.md` section 17 defines scope order, not a global serialization barrier.
 
-Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, add an attached-thread list or configurable wheel, revive M5, use u4090 outside the narrow ADB/audio exception above, or add a terminal, generic slash-command parser, per-thread provider proxy, broad experimental app-server APIs, proprietary Rokid transport, or cross-host migration during M4.
+Do not access Termux-private files or Unix sockets directly, route Termux through embedded tsnet, assume upstream Linux installation/update behavior, add an attached-thread list or configurable wheel, revive M5, use u4090 outside the narrow ADB/audio exception above, or add a terminal, generic slash-command parser, per-thread provider proxy, broad experimental app-server APIs, proprietary Rokid transport, cross-host migration, or a second Poker–Dealer trust ceremony after Android Bluetooth bonding during M4.
 
 ## M4 implementation orchestration
 

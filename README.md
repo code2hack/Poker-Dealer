@@ -29,10 +29,13 @@ Dealer ─ loopback SSH ┘               │
           + proxy                      ▼
                                   Codex threads
 
-Dealer ─ authenticated Dealer↔Poker link ─ Poker on Rokid glasses
+Dealer ─ secure RFCOMM bootstrap over existing Bluetooth bond ─ Poker on Rokid glasses
+Dealer ───────── Dealer-initiated ordinary Wi-Fi/mTLS ─────────── Poker
 ```
 
 Dealer uses the same SSH, proxy, WebSocket, and app-server protocol stack for all hosts. Connectivity and lifecycle details remain behind adapters.
+
+For Dealer↔Poker, the Android Bluetooth bond is the sole user trust decision. Secure RFCOMM automatically discovers the bonded Poker service, proves possession of the apps' Android-Keystore transport keys, and supplies Poker's current Wi-Fi endpoint. The actual Poker–Dealer data plane remains the Dealer-initiated Wi-Fi/mTLS connection; Bluetooth does not carry cards, photos, ASR PCM, or ordinary semantic actions. Normal production UI has no Poker–Dealer pairing code, manual IP/port form, or second trust prompt.
 
 ## Workstation connectivity without Android VPN conflict
 
@@ -168,7 +171,7 @@ Dealer selects Spark, u4090, or Fold6 Termux and accepts only the routes valid f
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-M3 is complete. The next implementation slice is the expanded M4: secure Dealer↔Poker synchronization, horizontal card-pile navigation, canonical controls and HID bindings, reviewed composer/request input, fixed-wheel Photo/Morse/ASR/Send/Steer/Interrupt, and integrated real-hardware acceptance. The former M5 milestone is retired; see `SPEC.md` sections 16–17 for the normative contract and issue order.
+M3 is complete. The next implementation slice is the expanded M4: automatic Dealer↔Poker trust/bootstrap from the existing Android Bluetooth bond, secure Wi-Fi synchronization, horizontal card-pile navigation, canonical controls and HID bindings, reviewed composer/request input, fixed-wheel Photo/Morse/ASR/Send/Steer/Interrupt, and integrated real-hardware acceptance. The former M5 milestone is retired; see `SPEC.md` sections 16–17 for the normative contract and issue order.
 
 ## Build and test
 

@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.Settings
 import android.text.format.DateUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -130,6 +131,11 @@ class DealerActivity : ComponentActivity() {
     private val asrAudioPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { _ -> }
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) service?.retryPokerConnection()
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -201,9 +207,10 @@ class DealerActivity : ComponentActivity() {
                         dealerFontScale = dealerFontState,
                         onDealerFontScale = ::setDealerFontScale,
                         onPokerFontScale = { service?.setPokerFontScale(it) },
-                        onBeginPokerPairing = { host, port, code ->
-                            service?.beginPokerPairing(host, port, code)
+                        onOpenPokerBluetoothSettings = {
+                            startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                         },
+                        onRetryPokerBootstrap = { service?.retryPokerConnection() },
                         onPrivateKey = { loadCredential(it, CredentialKind.PRIVATE_KEY) },
                         onKnownHosts = { loadCredential(it, CredentialKind.KNOWN_HOSTS) },
                         onRun = ::runM1,
@@ -304,6 +311,7 @@ class DealerActivity : ComponentActivity() {
             }
         }
         requestNotificationPermission()
+        requestBluetoothPermission()
     }
 
     override fun onStart() {
@@ -420,6 +428,14 @@ class DealerActivity : ComponentActivity() {
         }
     }
 
+    private fun requestBluetoothPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+        ) {
+            bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+    }
+
     private fun setAsrSource(source: PokerAsrSource) {
         service?.setAsrSource(source)
         if (shouldRequestDealerAsrPhonePermission(
@@ -505,7 +521,8 @@ private fun DealerApp(
     dealerFontScale: PokerFontScaleState,
     onDealerFontScale: (Int) -> Unit,
     onPokerFontScale: (Int) -> Unit,
-    onBeginPokerPairing: (String, Int, String) -> Unit,
+    onOpenPokerBluetoothSettings: () -> Unit,
+    onRetryPokerBootstrap: () -> Unit,
     onPrivateKey: (Uri) -> Unit,
     onKnownHosts: (Uri) -> Unit,
     onRun: (DealerRunConfig) -> Unit,
@@ -792,7 +809,8 @@ private fun DealerApp(
             DealerPokerPairingPanel(
                 state = state,
                 serviceReady = setup.serviceReady,
-                onBegin = onBeginPokerPairing,
+                onOpenBluetoothSettings = onOpenPokerBluetoothSettings,
+                onRetry = onRetryPokerBootstrap,
             )
             PokerBindingsPanel(
                 state = state.pokerBindings,

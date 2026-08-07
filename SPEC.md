@@ -1,7 +1,7 @@
 # Poker–Dealer Implementation Specification
 
-**Status:** Normative implementation contract, revision 10
-**Date:** 2026-08-06
+**Status:** Normative implementation contract, revision 11
+**Date:** 2026-08-07
 **Repository:** `code2hack/Poker-Dealer`  
 **Primary implementer:** fresh local Codex sessions  
 **Product names:** **Dealer** = Android phone client; **Poker** = Rokid glasses client
@@ -54,7 +54,8 @@ DGX Spark / Ubuntu / ARM64
                                │
                          Dealer / Fold6
                                │
-                               │ authenticated Dealer↔Poker
+                               │ secure RFCOMM bootstrap over the Android Bluetooth bond
+                               │ Dealer-initiated Wi-Fi/mTLS product connection
                                ▼
                          Poker / Rokid
                                ▲
@@ -204,6 +205,35 @@ It MUST:
 - use a separate tailnet node identity from the standalone Tailscale app or Termux;
 - remain behind a narrow Android module interface.
 
+### 2.6 Dealer–Poker Bluetooth bond and bootstrap
+
+The Android Bluetooth bond between the Fold6 and RG glasses is the sole user
+trust decision for Poker–Dealer. A **Poker Bluetooth bootstrap** is a bounded,
+secure RFCOMM exchange with one project-private service UUID used only to:
+
+- discover the bonded Poker installation;
+- prove possession of each installation's Android-Keystore app key using fresh
+  nonces and signatures;
+- provision or rotate the peer app public-key pin;
+- communicate Poker's current ordinary-Wi-Fi endpoint and bootstrap protocol
+  capabilities; and
+- detect revocation when the remembered peer is no longer `BOND_BONDED`.
+
+Bluetooth bootstrap is not the Poker–Dealer data transport. Cards, controls,
+photos, and ASR PCM MUST continue over the Dealer-initiated Wi-Fi/mTLS
+connection. Normal production bootstrap MUST NOT require a Poker–Dealer pairing
+code, QR code, manual IP/port entry, physical `Pair Dealer`/`Replace Dealer`
+action, or second trust confirmation.
+
+Dealer remembers the exact Android bonded-device identity after successful
+bootstrap; friendly names are display-only. With no remembered identity,
+exactly one bonded device answering the private Poker service may be adopted
+automatically. Multiple matching bonded Poker devices fail closed as ambiguous.
+Temporary Bluetooth loss does not revoke trust or tear down a healthy Wi-Fi
+connection. `BOND_NONE` for the remembered peer revokes the relationship,
+deletes the pinned peer transport record/endpoint, and closes the Wi-Fi
+connection. Rebonding permits automatic bootstrap again.
+
 ---
 
 ## 3. Authority and state ownership
@@ -242,8 +272,10 @@ Dealer is authoritative for:
 - the Dealer-local ASR runtime, pinned model artifacts, active recognition
   session, provisional transcript slice, model catalog, installed packs,
   profiles, and download state;
-- Poker trust, device bindings, Poker font scale, synchronization revisions,
-  and pairing-specific unread state.
+- the remembered bonded Poker identity, Bluetooth-bootstrap lifecycle, pinned
+  Poker app transport key and current authenticated Wi-Fi endpoint;
+- device bindings, Poker font scale, synchronization revisions, and
+  trust-scoped unread state.
 
 ### 3.3 Poker authority
 
@@ -258,11 +290,12 @@ Poker is authoritative only for:
 
 Poker MUST NOT become the authoritative store for thread history, durable
 drafts or photo assets, model profiles, bindings, or delivery state. It MAY
-persist pairing and enabled-listener state, pairing-specific unread identifiers
-and watermarks, and the last acknowledged Dealer-owned binding map and Poker
-font value together with their revisions
-in private backup-excluded storage. Synchronized card content and modal input
-state remain process-local; Dealer resynchronizes them after Poker restarts.
+persist the remembered bonded Dealer identity, pinned Dealer app transport key,
+enabled-listener state, trust-scoped unread identifiers and watermarks, and the
+last acknowledged Dealer-owned binding map and Poker font value together with
+their revisions in private backup-excluded storage. Synchronized card content
+and modal input state remain process-local; Dealer resynchronizes them after
+Poker restarts.
 
 ---
 
@@ -1014,7 +1047,10 @@ Dealer MUST treat these as normal recoverable events:
 - daemon restart or app-server update;
 - workstation sleep/reboot;
 - Termux application stop, `sshd` stop, or Android suspension;
-- Poker disconnect/restart.
+- Poker disconnect/restart;
+- temporary Bluetooth loss or Wi-Fi endpoint change;
+- app-key loss/reinstall while the remembered Bluetooth bond remains intact; or
+- Bluetooth bond removal/rebond.
 
 After host transport failure, Dealer SHOULD:
 
@@ -1073,7 +1109,7 @@ Dealer MUST be a native Android Kotlin application using:
 - coroutines and `Flow`/`StateFlow`;
 - Room for hosts, thread attachment metadata, recent projection, unread state, and pending actions;
 - DataStore for non-secret preferences;
-- Android Keystore-backed protection for SSH credentials, host-key pins, and Poker pairing secrets;
+- Android Keystore-backed protection for SSH credentials, host-key pins, and Poker app transport identities;
 - a foreground service while live host, embedded-tailnet, or Poker connections are enabled.
 
 Dealer is a Codex client, not a terminal emulator.
@@ -1087,9 +1123,12 @@ The embedded tailnet module MAY contain Go/native code, but its public Android-f
 Poker MUST be an ordinary native Android application compatible with the observed Android 12/API 32 glasses environment.
 
 Poker MUST use `minSdk = 28`, public Android APIs, shared pure-Kotlin modules,
-and a foreground service for the Dealer listener when enabled. A paired,
+and a foreground service for the Dealer listener when enabled. A bonded,
 enabled Poker starts that listener after boot with one silent, content-free
-notification. Android force-stop is respected and requires a manual app open.
+notification and exposes the secure RFCOMM bootstrap service. Android force-stop
+is respected and requires a manual app open. On Android 12/API 31 and later,
+Dealer and Poker request `BLUETOOTH_CONNECT` only as an Android capability
+permission; it is not a second Poker–Dealer trust ceremony.
 
 Dealer and Poker MUST request camera and microphone permission lazily at first
 mode use. Denial or later revocation exits or refuses the mode, returns to
@@ -1102,22 +1141,33 @@ own microphone permission. If the fallback permission/source is unavailable,
 ASR remains unavailable. Revocation after recording starts always exits and
 never hot-switches.
 
-### 13.3 Dealer↔Poker transport
+### 13.3 Dealer↔Poker trust bootstrap and transport
 
-The validated topology remains:
+The normal production topology is:
 
 ```text
-Fold6 / Dealer / hotspot owner / TCP client
-                  │
-                  │ authenticated bidirectional transport
-                  ▼
-Rokid / Poker / hotspot client / TCP listener
+Fold6 / Dealer ── secure RFCOMM over existing Android Bluetooth bond ── Poker / RG
+       │                     bootstrap/discovery only                    │
+       └──────────── Dealer-initiated ordinary Wi-Fi/mTLS ──────────────┘
+                              product data plane
 ```
 
-Dealer initiates. Poker listens only on the active hotspot/Wi-Fi interface. No
-CXR, ADB tunnel, or proprietary companion channel may be required. Pairing,
-connection epochs, heartbeat, synchronization, and content-free Poker
-persistence follow ADR 0001.
+The Bluetooth bond is the sole user trust decision. Dealer automatically
+enumerates bonded devices and probes Poker's private secure RFCOMM service. The
+bootstrap exchanges only bounded trust/endpoint metadata and app-key
+proof-of-possession; it does not carry cards, photos, ASR audio, or ordinary
+semantic operations.
+
+After bootstrap, Dealer initiates the existing mutually authenticated TCP
+connection. Poker listens only on the active ordinary hotspot/Wi-Fi interface,
+using the hardware-qualified TCP port. The validated Fold6-hotspot topology
+remains the production acceptance topology, while an ordinary shared Wi-Fi LAN
+is also valid when peer-to-peer TCP is reachable.
+
+No CXR, ADB tunnel, proprietary companion channel, numeric pairing code, manual
+IP/port form, QR code, or second Poker trust confirmation may be required.
+Bluetooth bootstrap, app-key rotation, bond revocation, connection epochs,
+heartbeat, synchronization, and content-free Poker persistence follow ADR 0001.
 
 ---
 
@@ -1168,7 +1218,9 @@ Dealer MUST persist:
 - recent projection and unread state;
 - pending actions with idempotency metadata;
 - unresolved request deadlines and earliest-deadline reconciliation metadata;
-- Poker pairing, synchronization, key-binding, listener, and font-scale state;
+- the remembered bonded Poker identity, pinned app transport key, authenticated
+  Poker Wi-Fi endpoint, Bluetooth-bootstrap state, synchronization, key-binding,
+  listener, and font-scale state;
 - durable composer photo assets and their draft/pending/uncertain references;
 - the validated ASR catalog snapshot, installed model packs, pinned revisions,
   selected default, versioned profiles, and resumable download jobs/partials;
@@ -1207,11 +1259,13 @@ incompatible new ASR model/profile schema is a side-by-side candidate with a
 fresh default profile, not a guessed migration of user settings.
 
 Poker persists no card text. Its private backup-excluded state is limited to
-the pairing/listener identity, pairing-specific unread IDs/watermarks, and the
-last-acknowledged Dealer-owned binding map and Poker font value with their
-revisions. Corrupt derived Poker
-state establishes a fresh unread baseline and resynchronizes bindings/font;
-pairing-key corruption returns to unpaired state.
+the remembered bonded Dealer identity, pinned Dealer app transport key,
+listener state, trust-scoped unread IDs/watermarks, and the last-acknowledged
+Dealer-owned binding map and Poker font value with their revisions. Corrupt
+derived Poker state establishes a fresh unread baseline and resynchronizes
+bindings/font. Corrupt or missing app-key peer state is cleared and may be
+reprovisioned automatically only while the remembered Android Bluetooth bond is
+still present; absence of that bond remains untrusted.
 
 M3 does not guarantee recovery after app uninstall, Clear data, factory reset, unrecoverable device storage failure, or loss of the phone. Host-retained thread state remains rediscoverable; Dealer-only drafts and uncertain local actions are unrecoverable after loss of Dealer-private storage. Device migration, cloud backup, and a separate Dealer content-encryption/passcode layer are outside M3.
 
@@ -1358,7 +1412,7 @@ of narrow tracer bullets: synchronization/piles, canonical operations/bindings,
 composer/wheel, Morse, ASR/model management, Photo, then integrated hardware
 acceptance.
 
-M4 is complete when production Dealer and Poker pair and recover securely;
+M4 is complete when production Dealer and Poker automatically bootstrap trust from their Android Bluetooth bond and recover securely;
 render retained/live horizontal `BUSY | ATTENTION_REQUIRED | READY` piles with
 the accepted navigation, unread, footer, and wake behavior; support glasses and
 one bound HID remote; provide reviewed composer and eligible request-panel
@@ -1951,8 +2005,10 @@ and Fold6 Termux. Recorded real-device evidence MUST cover:
 
 - built-in controls and one bonded HID remote, including learning and remote-FN
   wheel posture;
-- initial and replacement pairing, identity mismatch/Keystore-loss fail-closed
-  behavior, reconnect heartbeat/backoff, and forced snapshot recovery;
+- automatic bootstrap over an existing Bluetooth bond with no typed code/IP/port
+  or second trust prompt, app-key reprovision after Keystore loss/reinstall,
+  ambiguous/non-bonded peer rejection, bond removal/rebond revocation, reconnect
+  heartbeat/backoff, and forced snapshot recovery;
 - horizontal piles, unread/footer clearing, foreground wake without focus
   change, request countdown/expiry, font scaling, and accessible labels;
 - Camera2 open/preview/capture/zoom, repeated Photo capture, transfer/deletion
@@ -1974,7 +2030,7 @@ Complete when:
 - lifecycle/power tests pass on Spark, u4090, Fold6 Termux, Dealer, and Rokid;
 - embedded-tailnet and daemon/app-server update interruption are handled;
 - compatibility and recovery diagnostics are visible;
-- security review covers SSH, Tailscale state, native bridge, Android sandbox boundaries, secrets, Poker pairing, and approval safety;
+- security review covers SSH, Tailscale state, native bridge, Android sandbox boundaries, secrets, Bluetooth-bond bootstrap/app-key provisioning, and approval safety;
 - end-to-end real-hardware acceptance is recorded.
 
 ---
@@ -1983,8 +2039,8 @@ Complete when:
 
 M3 is closed. Before implementation, create narrow M4 issues in this order:
 
-1. pairing, connection epochs, retained/live synchronization, piles, unread,
-   footer, wake, and recovery;
+1. Bluetooth-bond trust/bootstrap, app-key provisioning, connection epochs,
+   retained/live synchronization, piles, unread, footer, wake, and recovery;
 2. canonical interaction lifecycle, glasses defaults, HID bindings, and learning;
 3. ordinary composer/request editing, control fences, fixed action wheel, and
    Send/Steer/Interrupt;
