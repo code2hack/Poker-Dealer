@@ -503,12 +503,11 @@ class PokerActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        if (PokerListenerService.isEnabled(this)) {
-            PokerListenerService.resume(this)
-        } else {
-            PokerListenerService.enable(this)
+    override fun onPostResume() {
+        super.onPostResume()
+        when (PokerListenerService.activityForegroundAction(PokerListenerService.isEnabled(this))) {
+            PokerListenerService.ACTION_RETRY -> PokerListenerService.resume(this)
+            else -> PokerListenerService.enable(this)
         }
     }
 

@@ -544,7 +544,7 @@ class PokerListenerService : Service() {
         internal fun activityResumeAction(enabled: Boolean): String? =
             ACTION_RETRY.takeIf { enabled }
 
-        internal fun activityStartAction(enabled: Boolean): String =
+        internal fun activityForegroundAction(enabled: Boolean): String =
             if (enabled) ACTION_RETRY else ACTION_ENABLE
 
         internal data class LaunchSpec(val action: String)

@@ -7,14 +7,14 @@ import org.junit.Test
 
 class PokerProductionWiringTest {
     @Test
-    fun `activity starts the private listener and retries it when already enabled`() {
+    fun `foreground activity starts the private listener and retries it when already enabled`() {
         assertEquals(
             PokerListenerService.ACTION_RETRY,
-            PokerListenerService.activityStartAction(enabled = true),
+            PokerListenerService.activityForegroundAction(enabled = true),
         )
         assertEquals(
             PokerListenerService.ACTION_ENABLE,
-            PokerListenerService.activityStartAction(enabled = false),
+            PokerListenerService.activityForegroundAction(enabled = false),
         )
         assertEquals(
             PokerListenerService.ACTION_RETRY,
