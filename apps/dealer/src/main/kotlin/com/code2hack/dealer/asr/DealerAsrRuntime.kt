@@ -3,11 +3,18 @@ package com.code2hack.dealer.asr
 import android.content.Context
 import android.content.res.AssetManager
 import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.OfflineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineMoonshineModelConfig
+import com.k2fsa.sherpa.onnx.OfflineRecognizer
+import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.Vad
+import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.Closeable
 import java.io.File
 import java.io.FileInputStream
@@ -48,6 +55,8 @@ data class DealerAsrPackManifest(
     val joinerSha256: String,
     val tokensPath: String,
     val tokensSha256: String,
+    val vadPath: String? = null,
+    val vadSha256: String? = null,
 )
 
 sealed interface DealerAsrPackVerification {
@@ -61,27 +70,35 @@ internal sealed interface VerifiedAsrPackSource {
         val assetManager: AssetManager,
         val encoderPath: String,
         val decoderPath: String,
-        val joinerPath: String,
+        val joinerPath: String?,
         val tokensPath: String,
+        val vadPath: String?,
         val expectedSha256: List<String>,
     ) : VerifiedAsrPackSource
 
     data class Files(
         val encoder: File,
         val decoder: File,
-        val joiner: File,
+        val joiner: File?,
         val tokens: File,
+        val vad: File?,
         val expectedSha256: List<String>,
     ) : VerifiedAsrPackSource
 
     fun revalidate() {
         val valid = when (this) {
             is Assets -> runCatching {
-                listOf(encoderPath, decoderPath, joinerPath, tokensPath)
+                listOfNotNull(
+                    encoderPath,
+                    decoderPath,
+                    joinerPath,
+                    tokensPath,
+                    vadPath,
+                )
                     .zip(expectedSha256)
                     .all { (path, expected) -> sha256(assetManager, path) == expected }
             }.getOrDefault(false)
-            is Files -> listOf(encoder, decoder, joiner, tokens)
+            is Files -> listOfNotNull(encoder, decoder, joiner, tokens, vad)
                 .zip(expectedSha256)
                 .all { (file, expected) ->
                     java.nio.file.Files.isRegularFile(
@@ -227,17 +244,13 @@ class DealerAsrRuntime private constructor(
         if (!pack.belongsTo(ownerToken)) {
             return DealerAsrStartup.Unavailable("model-pack-owner-mismatch")
         }
-        if (pack.adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
-            notifyPackFailure(pack, "adapter-not-supported")
-            return DealerAsrStartup.Unavailable("adapter-not-supported")
-        }
         return try {
             loadNativeRuntime()
             DealerAsrStartup.Ready(
                 DealerAsrCapabilities(
                     backend = "cpu",
                     sampleRateHz = 16_000,
-                    adapters = setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
+                    adapters = DealerAsrAdapter.entries.toSet(),
                 ),
             )
         } catch (_: LinkageError) {
@@ -297,6 +310,89 @@ class DealerAsrRuntime private constructor(
         return openStreaming(pack, featureDim = 128, profile = profile)
     }
 
+    internal fun openMoonshineOffline(
+        pack: VerifiedAsrPack,
+        profile: DealerAsrProfile,
+        spoolStore: DealerAsrOfflineSpoolStore,
+    ): DealerAsrRecognizer {
+        check(profile.packId == pack.id && profile.revision == pack.revision) {
+            "ASR profile does not match pack"
+        }
+        check(pack.belongsTo(ownerToken)) { "ASR pack belongs to another runtime" }
+        check(pack.adapter == DealerAsrAdapter.MOONSHINE_V2_OFFLINE) {
+            "ASR adapter is not implemented"
+        }
+        val source = pack.source
+        val vadPath = when (source) {
+            is VerifiedAsrPackSource.Assets -> source.vadPath
+            is VerifiedAsrPackSource.Files -> source.vad?.path
+        } ?: error("ASR VAD artifact is missing")
+        val paths = when (source) {
+            is VerifiedAsrPackSource.Assets -> OfflineRecognizerPaths(
+                assetManager = source.assetManager,
+                encoder = source.encoderPath,
+                decoder = source.decoderPath,
+                tokens = source.tokensPath,
+                vad = vadPath,
+            )
+            is VerifiedAsrPackSource.Files -> OfflineRecognizerPaths(
+                assetManager = null,
+                encoder = source.encoder.path,
+                decoder = source.decoder.path,
+                tokens = source.tokens.path,
+                vad = vadPath,
+            )
+        }
+        pack.source.revalidate()
+        var offlineRecognizer: OfflineRecognizer? = null
+        var vad: Vad? = null
+        var spool: DealerAsrOfflineSpool? = null
+        return try {
+            offlineRecognizer = OfflineRecognizer(
+                assetManager = paths.assetManager,
+                config = OfflineRecognizerConfig(
+                    featConfig = FeatureConfig(sampleRate = 16_000, featureDim = 80),
+                    modelConfig = OfflineModelConfig(
+                        moonshine = OfflineMoonshineModelConfig(
+                            encoder = paths.encoder,
+                            mergedDecoder = paths.decoder,
+                        ),
+                        tokens = paths.tokens,
+                        numThreads = 1,
+                        provider = "cpu",
+                    ),
+                ),
+            )
+            vad = Vad(
+                assetManager = paths.assetManager,
+                config = VadModelConfig(
+                    sileroVadModelConfig = SileroVadModelConfig(
+                        model = paths.vad,
+                        threshold = 0.2f,
+                        minSilenceDuration = 0.25f,
+                        minSpeechDuration = 0.25f,
+                        windowSize = 512,
+                        maxSpeechDuration = 15f,
+                    ),
+                    sampleRate = 16_000,
+                    numThreads = 1,
+                    provider = "cpu",
+                ),
+            )
+            spool = spoolStore.open(pack.id)
+            DealerAsrOfflineSession(
+                recognizer = requireNotNull(offlineRecognizer),
+                vad = requireNotNull(vad),
+                spool = requireNotNull(spool),
+            )
+        } catch (failure: Throwable) {
+            spool?.close()
+            vad?.release()
+            offlineRecognizer?.release()
+            throw failure
+        }
+    }
+
     /** Test-only compact transducer fixture; it is not a production adapter capability. */
     internal fun openInstrumentationStreamingFixture(pack: VerifiedAsrPack): DealerAsrSession =
         openStreaming(pack, featureDim = 80, profile = null)
@@ -322,14 +418,14 @@ class DealerAsrRuntime private constructor(
                     assetManager = source.assetManager,
                     encoder = source.encoderPath,
                     decoder = source.decoderPath,
-                    joiner = source.joinerPath,
+                    joiner = requireNotNull(source.joinerPath),
                     tokens = source.tokensPath,
                 )
                 is VerifiedAsrPackSource.Files -> RecognizerPaths(
                     assetManager = null,
                     encoder = source.encoder.path,
                     decoder = source.decoder.path,
-                    joiner = source.joiner.path,
+                    joiner = requireNotNull(source.joiner).path,
                     tokens = source.tokens.path,
                 )
             }
@@ -397,23 +493,46 @@ class DealerAsrRuntime private constructor(
     }
 
     private fun validate(manifest: DealerAsrPackManifest): String? {
-        if (manifest.adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
-            return "adapter-not-supported"
-        }
         if (!PACK_ID.matches(manifest.id) || !PACK_ID.matches(manifest.revision)) {
             return "pack-identity-invalid"
         }
-        if (!isDataPath(manifest.encoderPath, ".onnx")) return "encoder-path-invalid"
-        if (!isDataPath(manifest.decoderPath, ".onnx")) return "decoder-path-invalid"
-        if (!isDataPath(manifest.joinerPath, ".onnx")) return "joiner-path-invalid"
-        if (!isDataPath(manifest.tokensPath, ".txt")) return "tokens-path-invalid"
-        if (listOf(
-                manifest.encoderSha256,
-                manifest.decoderSha256,
-                manifest.joinerSha256,
-                manifest.tokensSha256,
-            ).any { !SHA256.matches(it) }
+        val modelSuffix = when (manifest.adapter) {
+            DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING -> ".onnx"
+            DealerAsrAdapter.MOONSHINE_V2_OFFLINE -> ".ort"
+        }
+        if (!isDataPath(manifest.encoderPath, modelSuffix)) return "encoder-path-invalid"
+        if (!isDataPath(manifest.decoderPath, modelSuffix)) return "decoder-path-invalid"
+        if (manifest.adapter == DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING &&
+            !isDataPath(manifest.joinerPath, ".onnx")
         ) {
+            return "joiner-path-invalid"
+        }
+        if (!isDataPath(manifest.tokensPath, ".txt")) return "tokens-path-invalid"
+        val digests = when (manifest.adapter) {
+            DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING -> {
+                if (manifest.vadPath != null || manifest.vadSha256 != null) return "vad-path-invalid"
+                listOf(
+                    manifest.encoderSha256,
+                    manifest.decoderSha256,
+                    manifest.joinerSha256,
+                    manifest.tokensSha256,
+                )
+            }
+            DealerAsrAdapter.MOONSHINE_V2_OFFLINE -> {
+                if (manifest.vadPath == null || !isDataPath(manifest.vadPath, ".onnx") ||
+                    manifest.vadSha256 == null
+                ) {
+                    return "vad-path-invalid"
+                }
+                listOf(
+                    manifest.encoderSha256,
+                    manifest.decoderSha256,
+                    manifest.tokensSha256,
+                    manifest.vadSha256,
+                )
+            }
+        }
+        if (digests.any { !SHA256.matches(it) }) {
             return "pack-digest-invalid"
         }
         return null
@@ -476,8 +595,9 @@ private class AssetPackSource(private val assets: AssetManager) : PackSource {
             assetManager = assets,
             encoderPath = manifest.encoderPath,
             decoderPath = manifest.decoderPath,
-            joinerPath = manifest.joinerPath,
+            joinerPath = manifest.joinerPath.takeIf(String::isNotBlank),
             tokensPath = manifest.tokensPath,
+            vadPath = manifest.vadPath,
             expectedSha256 = artifacts.map(PackArtifact::sha256),
         )
     }
@@ -508,11 +628,13 @@ private class FilePackSource(private val installedPacksRoot: File) : PackSource 
             }
             file
         }
+        val byPath = artifacts.mapIndexed { index, artifact -> artifact.path to files[index] }.toMap()
         return VerifiedAsrPackSource.Files(
-            encoder = files[0],
-            decoder = files[1],
-            joiner = files[2],
-            tokens = files[3],
+            encoder = byPath.getValue(manifest.encoderPath),
+            decoder = byPath.getValue(manifest.decoderPath),
+            joiner = manifest.joinerPath.takeIf(String::isNotBlank)?.let(byPath::getValue),
+            tokens = byPath.getValue(manifest.tokensPath),
+            vad = manifest.vadPath?.let(byPath::getValue),
             expectedSha256 = artifacts.map(PackArtifact::sha256),
         )
     }
@@ -541,51 +663,69 @@ private data class PackArtifact(val path: String, val sha256: String)
 
 internal fun DealerAsrDownloadJob.runtimeManifest(): DealerAsrPackManifest? {
     if (artifacts.isEmpty()) return null
-    if (adapter != DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING) {
-        return DealerAsrPackManifest(
-            id = packId,
-            revision = revision,
-            adapter = adapter,
-            encoderPath = "encoder.onnx",
-            encoderSha256 = "0".repeat(64),
-            decoderPath = "decoder.onnx",
-            decoderSha256 = "0".repeat(64),
-            joinerPath = "joiner.onnx",
-            joinerSha256 = "0".repeat(64),
-            tokensPath = "tokens.txt",
-            tokensSha256 = "0".repeat(64),
-        )
-    }
     fun artifact(prefix: String, suffix: String): DealerAsrDownloadArtifact? =
         artifacts.firstOrNull { artifact ->
             val name = artifact.path.substringAfterLast('/')
             name.startsWith(prefix) && name.endsWith(suffix)
         }
-    val encoder = artifact("encoder", ".onnx") ?: return null
-    val decoder = artifact("decoder", ".onnx") ?: return null
-    val joiner = artifact("joiner", ".onnx") ?: return null
     val tokens = artifacts.firstOrNull { it.path.substringAfterLast('/') == "tokens.txt" } ?: return null
-    return DealerAsrPackManifest(
-        id = packId,
-        revision = revision,
-        adapter = adapter,
-        encoderPath = encoder.path,
-        encoderSha256 = encoder.sha256,
-        decoderPath = decoder.path,
-        decoderSha256 = decoder.sha256,
-        joinerPath = joiner.path,
-        joinerSha256 = joiner.sha256,
-        tokensPath = tokens.path,
-        tokensSha256 = tokens.sha256,
-    )
+    return when (adapter) {
+        DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING -> {
+            val encoder = artifact("encoder", ".onnx") ?: return null
+            val decoder = artifact("decoder", ".onnx") ?: return null
+            val joiner = artifact("joiner", ".onnx") ?: return null
+            DealerAsrPackManifest(
+                id = packId,
+                revision = revision,
+                adapter = adapter,
+                encoderPath = encoder.path,
+                encoderSha256 = encoder.sha256,
+                decoderPath = decoder.path,
+                decoderSha256 = decoder.sha256,
+                joinerPath = joiner.path,
+                joinerSha256 = joiner.sha256,
+                tokensPath = tokens.path,
+                tokensSha256 = tokens.sha256,
+            )
+        }
+        DealerAsrAdapter.MOONSHINE_V2_OFFLINE -> {
+            val encoder = artifact("encoder_model", ".ort") ?: return null
+            val decoder = artifact("decoder_model_merged", ".ort") ?: return null
+            val vad = artifacts.firstOrNull { it.path.substringAfterLast('/') == "silero_vad.onnx" }
+                ?: return null
+            DealerAsrPackManifest(
+                id = packId,
+                revision = revision,
+                adapter = adapter,
+                encoderPath = encoder.path,
+                encoderSha256 = encoder.sha256,
+                decoderPath = decoder.path,
+                decoderSha256 = decoder.sha256,
+                joinerPath = "",
+                joinerSha256 = "",
+                tokensPath = tokens.path,
+                tokensSha256 = tokens.sha256,
+                vadPath = vad.path,
+                vadSha256 = vad.sha256,
+            )
+        }
+    }
 }
 
-private fun DealerAsrPackManifest.artifacts(): List<PackArtifact> = listOf(
-    PackArtifact(encoderPath, encoderSha256),
-    PackArtifact(decoderPath, decoderSha256),
-    PackArtifact(joinerPath, joinerSha256),
-    PackArtifact(tokensPath, tokensSha256),
-)
+private fun DealerAsrPackManifest.artifacts(): List<PackArtifact> = when (adapter) {
+    DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING -> listOf(
+        PackArtifact(encoderPath, encoderSha256),
+        PackArtifact(decoderPath, decoderSha256),
+        PackArtifact(joinerPath, joinerSha256),
+        PackArtifact(tokensPath, tokensSha256),
+    )
+    DealerAsrAdapter.MOONSHINE_V2_OFFLINE -> listOf(
+        PackArtifact(encoderPath, encoderSha256),
+        PackArtifact(decoderPath, decoderSha256),
+        PackArtifact(tokensPath, tokensSha256),
+        PackArtifact(requireNotNull(vadPath), requireNotNull(vadSha256)),
+    )
+}
 
 private data class RecognizerPaths(
     val assetManager: AssetManager?,
@@ -593,6 +733,14 @@ private data class RecognizerPaths(
     val decoder: String,
     val joiner: String,
     val tokens: String,
+)
+
+private data class OfflineRecognizerPaths(
+    val assetManager: AssetManager?,
+    val encoder: String,
+    val decoder: String,
+    val tokens: String,
+    val vad: String,
 )
 
 private class PackRejected(val reason: String) : Exception()

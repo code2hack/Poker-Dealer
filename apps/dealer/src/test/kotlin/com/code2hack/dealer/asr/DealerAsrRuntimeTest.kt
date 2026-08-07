@@ -67,11 +67,16 @@ class DealerAsrRuntimeTest {
     }
 
     @Test
-    fun verifierRejectsUnsupportedMoonshineUntilItsRuntimeExists() {
-        assertEquals(
-            DealerAsrPackVerification.Rejected("adapter-not-supported"),
-            DealerAsrRuntime {}.verifyPack(manifest(adapter = DealerAsrAdapter.MOONSHINE_V2_OFFLINE)),
-        )
+    fun verifierAcceptsMoonshineWithPinnedVadArtifact() {
+        val fixture = installedMoonshinePack()
+        try {
+            assertTrue(
+                DealerAsrRuntime(fixture.root) {}.verifyPack(fixture.manifest)
+                    is DealerAsrPackVerification.Verified,
+            )
+        } finally {
+            fixture.root.deleteRecursively()
+        }
     }
 
     @Test
@@ -99,7 +104,7 @@ class DealerAsrRuntimeTest {
             val startup = runtime.startup(pack)
             assertTrue(startup is DealerAsrStartup.Ready)
             assertEquals(
-                setOf(DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING),
+                DealerAsrAdapter.entries.toSet(),
                 (startup as DealerAsrStartup.Ready).capabilities.adapters,
             )
         } finally {
@@ -289,6 +294,36 @@ class DealerAsrRuntimeTest {
         tokensPath = "tokens.txt",
         tokensSha256 = "0".repeat(64),
     )
+
+    private fun installedMoonshinePack(): InstalledPack {
+        val root = Files.createTempDirectory("dealer-asr-moonshine").toFile()
+        val packRoot = root.resolve("moonshine-pack/r1").apply { mkdirs() }
+        val bytes = mapOf(
+            "encoder_model.ort" to "encoder".toByteArray(),
+            "decoder_model_merged.ort" to "decoder".toByteArray(),
+            "tokens.txt" to "tokens".toByteArray(),
+            "silero_vad.onnx" to "vad".toByteArray(),
+        )
+        bytes.forEach { (name, content) -> Files.write(packRoot.resolve(name).toPath(), content) }
+        return InstalledPack(
+            root = root,
+            manifest = DealerAsrPackManifest(
+                id = "moonshine-pack",
+                revision = "r1",
+                adapter = DealerAsrAdapter.MOONSHINE_V2_OFFLINE,
+                encoderPath = "encoder_model.ort",
+                encoderSha256 = sha256(bytes.getValue("encoder_model.ort")),
+                decoderPath = "decoder_model_merged.ort",
+                decoderSha256 = sha256(bytes.getValue("decoder_model_merged.ort")),
+                joinerPath = "",
+                joinerSha256 = "",
+                tokensPath = "tokens.txt",
+                tokensSha256 = sha256(bytes.getValue("tokens.txt")),
+                vadPath = "silero_vad.onnx",
+                vadSha256 = sha256(bytes.getValue("silero_vad.onnx")),
+            ),
+        )
+    }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)

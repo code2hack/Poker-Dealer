@@ -10,19 +10,30 @@ import kotlinx.serialization.json.JsonObject
 
 /** One process-local owner for the pack manager and native recognizer. */
 internal class DealerAsrProcess private constructor(context: Context) {
-    private val runtime = DealerAsrRuntime(context.applicationContext)
+    private val applicationContext = context.applicationContext
+    private val runtime = DealerAsrRuntime(applicationContext)
+    private val offlineSpools = DealerAsrOfflineSpoolStore(
+        root = applicationContext.createDeviceProtectedStorageContext().noBackupFilesDir
+            .resolve("asr-spools"),
+        hasRoomFor = DealerAsrStorageSpace.from(
+            applicationContext.createDeviceProtectedStorageContext(),
+        )::hasRoom,
+    )
     private val manager = DealerAsrDownloadManager(
-        context = context.applicationContext,
+        context = applicationContext,
         runtimeHealth = runtime::checkInstalledPack,
     )
 
     internal val downloadManager: DealerAsrDownloadManager
         get() = manager
 
-    internal suspend fun start() = manager.start()
+    internal suspend fun start() = withContext(Dispatchers.IO) {
+        offlineSpools.purgeAtStartup()
+        manager.start()
+    }
 
     internal suspend fun availability(): PokerAsrAvailability = withContext(Dispatchers.IO) {
-        manager.start()
+        start()
         val key = manager.stateFlow.value.defaultPack
             ?: return@withContext PokerAsrAvailability(false, reason = "model-pack-not-installed")
         val job = manager.stateFlow.value.jobs.firstOrNull { it.key == key }
@@ -37,7 +48,7 @@ internal class DealerAsrProcess private constructor(context: Context) {
     }
 
     internal suspend fun open(expected: PokerAsrPackSelection? = null): DealerAsrProcessSession = withContext(Dispatchers.IO) {
-        manager.start()
+        start()
         val key = manager.stateFlow.value.defaultPack
             ?: error("model-pack-not-installed")
         val job = manager.stateFlow.value.jobs.firstOrNull { it.key == key }
@@ -55,8 +66,14 @@ internal class DealerAsrProcess private constructor(context: Context) {
         }
         val profile = manager.beginAsrSession(key)
         try {
+            val recognizer = when (pack.adapter) {
+                DealerAsrAdapter.PARAKEET_UNIFIED_STREAMING ->
+                    DealerAsrSessionRecognizer(runtime.openParakeetStreaming(pack, profile.profile))
+                DealerAsrAdapter.MOONSHINE_V2_OFFLINE ->
+                    runtime.openMoonshineOffline(pack, profile.profile, offlineSpools)
+            }
             DealerAsrProcessSession(
-                recognizer = runtime.openParakeetStreaming(pack, profile.profile),
+                recognizer = recognizer,
                 manager = manager,
                 profile = profile,
             )
@@ -66,7 +83,10 @@ internal class DealerAsrProcess private constructor(context: Context) {
         }
     }
 
-    internal fun close() = manager.close()
+    internal fun close() {
+        offlineSpools.purge()
+        manager.close()
+    }
 
     private fun selection(job: DealerAsrDownloadJob): PokerAsrPackSelection {
         val profile = runCatching { Json.parseToJsonElement(job.currentProfileJson) as JsonObject }
@@ -128,6 +148,16 @@ internal class DealerAsrProcessSession internal constructor(
         profile: DealerAsrSessionProfile,
     ) : this(
         recognizer = DealerAsrSessionRecognizer(recognizer),
+        endSession = { manager.endAsrSession(profile) },
+        profile = profile.profile,
+    )
+
+    internal constructor(
+        recognizer: DealerAsrRecognizer,
+        manager: DealerAsrDownloadManager,
+        profile: DealerAsrSessionProfile,
+    ) : this(
+        recognizer = recognizer,
         endSession = { manager.endAsrSession(profile) },
         profile = profile.profile,
     )

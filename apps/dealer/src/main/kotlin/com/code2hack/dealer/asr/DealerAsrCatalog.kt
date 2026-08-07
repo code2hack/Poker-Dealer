@@ -10,6 +10,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -27,9 +28,9 @@ internal data class DealerAsrCatalogArtifact(
     val sha256: String,
     private val repository: String,
     private val revision: String,
+    private val urlOverride: String? = null,
 ) {
-    val canonicalUrl: String
-        get() = "https://huggingface.co/$repository/resolve/$revision/$path"
+    val canonicalUrl: String get() = urlOverride ?: "https://huggingface.co/$repository/resolve/$revision/$path"
 }
 
 internal data class DealerAsrCatalogEntry(
@@ -156,12 +157,16 @@ internal data class DealerAsrCatalog(
                 require(isArtifactPath(artifact.path)) { "catalog-artifact-path-invalid" }
                 require(artifact.bytes > 0) { "catalog-artifact-size-invalid" }
                 require(SHA256.matches(artifact.sha256)) { "catalog-artifact-digest-invalid" }
+                require(artifact.canonicalUrl == null || isSafeHttpsUrl(artifact.canonicalUrl)) {
+                    "catalog-artifact-url-invalid"
+                }
                 DealerAsrCatalogArtifact(
                     path = artifact.path,
                     bytes = artifact.bytes,
                     sha256 = artifact.sha256,
                     repository = source.repository,
                     revision = source.revision,
+                    urlOverride = artifact.canonicalUrl,
                 )
             }
             val artifactBytes = artifacts.fold(0L) { total, artifact ->
@@ -226,6 +231,12 @@ internal data class DealerAsrCatalog(
             }
             return path.split('/').all { it.isNotEmpty() && it != "." && it != ".." }
         }
+
+        private fun isSafeHttpsUrl(value: String): Boolean = runCatching {
+            val uri = URI(value)
+            uri.scheme == "https" && uri.host != null && uri.userInfo == null &&
+                uri.query == null && uri.fragment == null
+        }.getOrDefault(false)
 
         private val catalogJson = Json {
             ignoreUnknownKeys = true
@@ -432,6 +443,7 @@ private data class CatalogArtifact(
     val path: String,
     val bytes: Long,
     val sha256: String,
+    val canonicalUrl: String? = null,
 )
 
 private const val CATALOG_SCHEMA_VERSION = 1
