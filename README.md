@@ -29,13 +29,12 @@ Dealer ─ loopback SSH ┘               │
           + proxy                      ▼
                                   Codex threads
 
-Dealer ─ secure RFCOMM bootstrap over existing Bluetooth bond ─ Poker on Rokid glasses
-Dealer ───────── Dealer-initiated ordinary Wi-Fi/mTLS ─────────── Poker
+Dealer ─ NSD/mDNS-discovered Wi-Fi PAKE/mTLS ─ Poker on Rokid glasses
 ```
 
 Dealer uses the same SSH, proxy, WebSocket, and app-server protocol stack for all hosts. Connectivity and lifecycle details remain behind adapters.
 
-For Dealer↔Poker, the Android Bluetooth bond is the sole user trust decision. Secure RFCOMM automatically discovers the bonded Poker service, proves possession of the apps' Android-Keystore transport keys, and supplies Poker's current Wi-Fi endpoint. The actual Poker–Dealer data plane remains the Dealer-initiated Wi-Fi/mTLS connection; Bluetooth does not carry cards, photos, ASR PCM, or ordinary semantic actions. Normal production UI has no Poker–Dealer pairing code, manual IP/port form, or second trust prompt.
+Dealer↔Poker trust keeps the original explicit pairing ceremony: the user physically opens **Pair Dealer** or **Replace Dealer** on Poker, Poker shows only a six-digit one-time code, and Dealer accepts only that code. While the five-minute enrollment window is open, Poker temporarily advertises its fixed TCP `39817` enrollment service with Android NSD/mDNS so Dealer resolves the IP/port automatically. NSD is discovery only; the PAKE transcript authenticates and pins the Android-Keystore-backed app identities, and normal product traffic then uses mutually authenticated Wi-Fi TCP. Bluetooth/RFCOMM is not part of this path.
 
 ## Workstation connectivity without Android VPN conflict
 
@@ -171,7 +170,7 @@ Dealer selects Spark, u4090, or Fold6 Termux and accepts only the routes valid f
 
 The LAN provider attempts only its configured LAN route. Shared route selection records unsupported, unavailable, disabled, and attempted-route diagnostics without allowing an unimplemented fallback to hide the actionable LAN error. TCP, SSH, proxy, WebSocket, app-server requests, turn inactivity, and reconnect inspection have separate bounds; there is no whole-turn deadline.
 
-M3 is complete. The next implementation slice is the expanded M4: automatic Dealer↔Poker trust/bootstrap from the existing Android Bluetooth bond, secure Wi-Fi synchronization, horizontal card-pile navigation, canonical controls and HID bindings, reviewed composer/request input, fixed-wheel Photo/Morse/ASR/Send/Steer/Interrupt, and integrated real-hardware acceptance. The former M5 milestone is retired; see `SPEC.md` sections 16–17 for the normative contract and issue order.
+M3 is complete. The next implementation slice is the expanded M4: code-only Dealer↔Poker PAKE enrollment with automatic NSD/mDNS endpoint discovery, secure Wi-Fi synchronization, horizontal card-pile navigation, canonical controls and HID bindings, reviewed composer/request input, fixed-wheel Photo/Morse/ASR/Send/Steer/Interrupt, and integrated real-hardware acceptance. The former M5 milestone is retired; see `SPEC.md` sections 16–17 for the normative contract and issue order.
 
 ## Build and test
 

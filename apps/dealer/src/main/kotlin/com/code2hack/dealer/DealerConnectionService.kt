@@ -5,11 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.bluetooth.BluetoothDevice
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.os.Build
@@ -194,8 +190,8 @@ import com.code2hack.pokerdealer.protocol.FilePokerFontScaleStore
 import com.code2hack.pokerdealer.protocol.PokerFontScaleInstallResult
 import com.code2hack.pokerdealer.protocol.PokerFontScaleProtocol
 import com.code2hack.pokerdealer.protocol.PokerFontScaleState
+import com.code2hack.pokerdealer.protocol.PokerEnrollmentDiscoveryResult
 import com.code2hack.pokerdealer.protocol.PokerPairingController
-import com.code2hack.pokerdealer.protocol.PokerPairingFailure
 import com.code2hack.pokerdealer.protocol.PokerPairingState
 import com.code2hack.pokerdealer.protocol.PokerWakeCapability
 import com.code2hack.pokerdealer.protocol.PokerProtocolJson
@@ -288,8 +284,7 @@ class DealerConnectionService : Service() {
     private lateinit var pokerSnapshotHandler: PokerSnapshotConnectionHandler
     private lateinit var pokerPairingIdentity: AndroidKeystorePairingIdentity
     private lateinit var pokerPairing: PokerPairingController
-    private lateinit var pokerBluetoothBootstrap: DealerPokerBluetoothBootstrap
-    private var pokerBluetoothBondReceiver: BroadcastReceiver? = null
+    private lateinit var pokerEnrollmentDiscovery: PokerEnrollmentDiscovery
     private lateinit var pokerFontStore: FilePokerFontScaleStore
     private val pokerSnapshotReady = CompletableDeferred<Unit>()
     private var pokerNetworkCallback: ConnectivityManager.NetworkCallback? = null
@@ -365,10 +360,9 @@ class DealerConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        pokerPairingIdentity = AndroidKeystorePairingIdentity().also {
-            it.ensureCreatedForBondBootstrap()
-        }
+        pokerPairingIdentity = AndroidKeystorePairingIdentity()
         pokerPairing = pokerPairingIdentity.pairingController(this)
+        pokerEnrollmentDiscovery = PokerEnrollmentDiscovery(this)
         pokerFontStore = FilePokerFontScaleStore(
             noBackupFilesDir.resolve("poker-font-v1.json"),
         )
@@ -419,15 +413,6 @@ class DealerConnectionService : Service() {
             onStateChanged = ::handlePokerConnectionState,
             callbacks = pokerSnapshotHandler,
         )
-        pokerBluetoothBootstrap = DealerPokerBluetoothBootstrap(
-            context = this,
-            identity = pokerPairingIdentity,
-            pairing = pokerPairing,
-            scope = scope,
-            onBusy = ::handlePokerBootstrapBusy,
-            onProvisioned = ::handlePokerBootstrapProvisioned,
-            onFailure = ::handlePokerBootstrapFailure,
-        )
         asrProcess = DealerAsrProcess.shared(this)
         asrSourceSettings = DealerAsrSourceSettings(this)
         asrSourceSession = DealerAsrSourceSession()
@@ -448,9 +433,7 @@ class DealerConnectionService : Service() {
             scope = scope,
         )
         registerPokerNetworkCallback()
-        registerPokerBluetoothBondReceiver()
-        if (pokerPairing.isPaired) pokerConnectionOwner.start()
-        pokerBluetoothBootstrap.refresh()
+        pokerConnectionOwner.start()
         scope.launch {
             val restoreErrors = mutableListOf<String>()
             val (restoredAttachments, restoredActions) = try {
@@ -1090,14 +1073,94 @@ class DealerConnectionService : Service() {
         return true
     }
 
-    /** Refreshes bonded-device bootstrap and requests one immediate fenced Wi-Fi reconnect. */
-    fun retryPokerConnection(): Long? {
-        pokerBluetoothBootstrap.refresh()
-        return if (pokerConnectionOwner.isRunning) {
-            pokerConnectionOwner.retry(PokerReconnectTrigger.MANUAL_RETRY)
-        } else {
-            null
+    /** Requests one immediate, fenced Dealer-to-Poker reconnect attempt. */
+    fun retryPokerConnection(): Long? =
+        pokerConnectionOwner.retry(PokerReconnectTrigger.MANUAL_RETRY)
+
+    fun beginPokerPairing(code: String): Boolean {
+        if (pokerPairingBusy) return false
+        val normalizedCode = code.trim()
+        if (normalizedCode.length != 6 || normalizedCode.any { it !in '0'..'9' }) {
+            mutableState.update { it.copy(error = "Pairing code must be six digits") }
+            return false
         }
+        pokerPairingBusy = true
+        pokerConnectionOwner.stop()
+        mutableState.update {
+            it.copy(
+                pokerPairingBusy = true,
+                error = null,
+                pokerDiagnostics = it.pokerDiagnostics.copy(lastFailure = PokerDiagnosticFailure.NONE),
+            )
+        }
+        scope.launch {
+            try {
+                val endpoint = when (val discovery = pokerEnrollmentDiscovery.discover()) {
+                    is PokerEnrollmentDiscoveryResult.Found -> discovery.endpoint
+                    PokerEnrollmentDiscoveryResult.NotFound -> {
+                        finishPokerPairingDiscoveryFailure(
+                            "Poker not found. Open Pair Dealer on Poker and keep both devices on the same local Wi-Fi network.",
+                        )
+                        return@launch
+                    }
+                    PokerEnrollmentDiscoveryResult.Ambiguous -> {
+                        finishPokerPairingDiscoveryFailure(
+                            "Multiple Poker pairing windows found. Leave only one Pair Dealer window open and retry.",
+                        )
+                        return@launch
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    pokerPairingIdentity.createForExplicitEnrollment()
+                    val peer = PokerPairingEnrollmentClient(pokerPairing).enroll(endpoint, normalizedCode)
+                    pokerPairing.updateEndpoint(peer, endpoint)
+                }
+                pokerPairingBusy = false
+                mutableState.update {
+                    it.copy(
+                        pokerPairingBusy = false,
+                        error = null,
+                        pokerDiagnostics = it.pokerDiagnostics.copy(
+                            pairing = pokerPairing.status.state,
+                            lastFailure = PokerDiagnosticFailure.NONE,
+                        ),
+                    )
+                }
+                pokerConnectionOwner.start()
+            } catch (cancelled: CancellationException) {
+                pokerPairingBusy = false
+                mutableState.update { it.copy(pokerPairingBusy = false) }
+                throw cancelled
+            } catch (_: Throwable) {
+                pokerPairingBusy = false
+                mutableState.update {
+                    it.copy(
+                        pokerPairingBusy = false,
+                        error = "Poker pairing failed: ${pokerPairing.status.failure}",
+                        pokerDiagnostics = it.pokerDiagnostics.copy(
+                            pairing = pokerPairing.status.state,
+                            lastFailure = PokerDiagnosticFailure.PAIRING,
+                        ),
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    private fun finishPokerPairingDiscoveryFailure(message: String) {
+        pokerPairingBusy = false
+        mutableState.update {
+            it.copy(
+                pokerPairingBusy = false,
+                error = message,
+                pokerDiagnostics = it.pokerDiagnostics.copy(
+                    pairing = pokerPairing.status.state,
+                    lastFailure = PokerDiagnosticFailure.PAIRING,
+                ),
+            )
+        }
+        if (pokerPairing.isPaired) pokerConnectionOwner.start()
     }
 
     fun enableHost(
@@ -5922,106 +5985,10 @@ class DealerConnectionService : Service() {
     }
 
     private fun requestPokerNetworkRetry() {
-        pokerBluetoothBootstrap.refresh()
         if (pokerConnectionOwner.isRunning) {
             pokerConnectionOwner.retry(PokerReconnectTrigger.NETWORK_CHANGE)
         }
     }
-
-    private fun handlePokerBootstrapBusy(busy: Boolean) {
-        pokerPairingBusy = busy
-        mutableState.update { it.copy(pokerPairingBusy = busy) }
-    }
-
-    private fun handlePokerBootstrapProvisioned() {
-        mutableState.update {
-            it.copy(
-                pokerPairingBusy = false,
-                error = null,
-                pokerDiagnostics = it.pokerDiagnostics.copy(
-                    pairing = pokerPairing.status.state,
-                    lastFailure = PokerDiagnosticFailure.NONE,
-                ),
-            )
-        }
-        pokerPairingBusy = false
-        pokerConnectionOwner.stop()
-        pokerConnectionOwner.start()
-    }
-
-    private fun handlePokerBootstrapFailure(failure: PokerPairingFailure) {
-        if (failure == PokerPairingFailure.NONE) {
-            mutableState.update {
-                it.copy(
-                    error = null,
-                    pokerDiagnostics = it.pokerDiagnostics.copy(
-                        pairing = pokerPairing.status.state,
-                        lastFailure = PokerDiagnosticFailure.NONE,
-                    ),
-                )
-            }
-            return
-        }
-        val userVisibleError = when (failure) {
-            PokerPairingFailure.BLUETOOTH_PERMISSION_REQUIRED,
-            PokerPairingFailure.BLUETOOTH_NOT_BONDED -> null
-            PokerPairingFailure.BLUETOOTH_AMBIGUOUS ->
-                "Multiple Bluetooth-paired Poker devices are available; remove the unwanted bond"
-            else -> "Poker Bluetooth bootstrap failed: $failure"
-        }
-        mutableState.update {
-            it.copy(
-                error = userVisibleError ?: it.error,
-                pokerDiagnostics = it.pokerDiagnostics.copy(
-                    pairing = pokerPairing.status.state,
-                    lastFailure = PokerDiagnosticFailure.PAIRING,
-                ),
-            )
-        }
-    }
-
-    private fun registerPokerBluetoothBondReceiver() {
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
-                val device = intent.bluetoothDeviceExtra() ?: return
-                val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
-                when (state) {
-                    BluetoothDevice.BOND_NONE -> {
-                        if (pokerPairing.revokeBondTrust(device.address)) {
-                            pokerConnectionOwner.stop()
-                            mutableState.update {
-                                it.copy(
-                                    pokerDiagnostics = it.pokerDiagnostics.copy(
-                                        pairing = pokerPairing.status.state,
-                                        lastFailure = PokerDiagnosticFailure.NONE,
-                                    ),
-                                )
-                            }
-                        }
-                        pokerBluetoothBootstrap.refresh()
-                    }
-                    BluetoothDevice.BOND_BONDED -> pokerBluetoothBootstrap.refresh()
-                }
-            }
-        }
-        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(receiver, filter)
-        }
-        pokerBluetoothBondReceiver = receiver
-    }
-
-    @Suppress("DEPRECATION")
-    private fun Intent.bluetoothDeviceExtra(): BluetoothDevice? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-        } else {
-            getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-        }
 
     @Synchronized
     fun stopEmbeddedTailnet(): Boolean {
@@ -6098,9 +6065,6 @@ class DealerConnectionService : Service() {
             getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }
         pokerNetworkCallback = null
-        if (::pokerBluetoothBootstrap.isInitialized) pokerBluetoothBootstrap.close()
-        pokerBluetoothBondReceiver?.let { receiver -> runCatching { unregisterReceiver(receiver) } }
-        pokerBluetoothBondReceiver = null
         pokerComposerEpoch = null
         pokerComposerBindings.clear()
         pokerComposerResults.clear()

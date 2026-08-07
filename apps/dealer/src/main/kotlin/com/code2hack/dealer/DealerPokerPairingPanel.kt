@@ -2,14 +2,20 @@ package com.code2hack.dealer
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.code2hack.pokerdealer.protocol.PokerPairingState
 
@@ -17,38 +23,43 @@ import com.code2hack.pokerdealer.protocol.PokerPairingState
 internal fun DealerPokerPairingPanel(
     state: DealerUiState,
     serviceReady: Boolean,
-    onOpenBluetoothSettings: () -> Unit,
-    onRetry: () -> Unit,
+    onBegin: (String) -> Unit,
 ) {
-    val trust = state.pokerDiagnostics.pairing
+    var code by remember { mutableStateOf("") }
+    val pairing = state.pokerDiagnostics.pairing
+    val valid = code.length == 6 && code.all { it in '0'..'9' }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("Poker Bluetooth trust", style = MaterialTheme.typography.titleMedium)
+        Text("Poker pairing", style = MaterialTheme.typography.titleMedium)
         Text(
-            when {
-                state.pokerPairingBusy -> "Discovering Bluetooth-paired Poker…"
-                trust == PokerPairingState.PAIRED ->
-                    "Bluetooth bond trusted · Wi-Fi transport credentials provisioned automatically"
-                else ->
-                    "RG glasses are not connected as a Bluetooth-paired Poker device. Pair them in Android Bluetooth settings; no Poker–Dealer code or IP address is required."
-            },
+            "On Poker, tap Pair Dealer or Replace Dealer, then enter only its one-time code here. Dealer discovers Poker automatically on the local Wi-Fi network.",
             style = MaterialTheme.typography.bodySmall,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = onOpenBluetoothSettings,
-                enabled = serviceReady && !state.pokerPairingBusy,
-            ) {
-                Text("Open Bluetooth settings")
-            }
-            OutlinedButton(
-                onClick = onRetry,
-                enabled = serviceReady && !state.pokerPairingBusy,
-            ) {
-                Text("Retry bootstrap")
-            }
+        Text("State: $pairing")
+        OutlinedTextField(
+            value = code,
+            onValueChange = { code = it.filter(Char::isDigit).take(6) },
+            enabled = !state.pokerPairingBusy,
+            label = { Text("Poker one-time code") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { onBegin(code) },
+            enabled = serviceReady && valid && !state.pokerPairingBusy,
+        ) {
+            Text(
+                when {
+                    state.pokerPairingBusy -> "Pairing…"
+                    pairing == PokerPairingState.PAIRED -> "Replace Dealer"
+                    else -> "Pair Dealer"
+                },
+            )
         }
     }
 }

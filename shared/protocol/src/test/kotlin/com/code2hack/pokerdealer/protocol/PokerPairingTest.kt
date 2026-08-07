@@ -142,6 +142,22 @@ class PokerPairingTest {
     }
 
     @Test
+    fun `discovery failure cancels enrollment without consuming a code attempt`() {
+        val poker = controller(
+            PokerPairingRole.POKER,
+            FakeIdentity(byteArrayOf(1)),
+            "123456",
+        )
+        poker.openEnrollment(0, physicalEnrollmentConfirmed = true)
+
+        poker.cancelEnrollment(PokerPairingFailure.ENROLLMENT_DISCOVERY_FAILED)
+
+        assertEquals(PokerPairingState.UNPAIRED, poker.status.state)
+        assertEquals(PokerPairingFailure.ENROLLMENT_DISCOVERY_FAILED, poker.status.failure)
+        assertEquals(0, poker.status.failedAttempts)
+    }
+
+    @Test
     fun `five wrong proofs close the window and do not restore a previous pairing`() {
         val pokerKey = FakeIdentity(byteArrayOf(1))
         val dealerKey = FakeIdentity(byteArrayOf(2))

@@ -1,25 +1,52 @@
 package com.code2hack.poker
 
-import java.net.Inet4Address
+import com.code2hack.pokerdealer.protocol.PokerPairingFailure
 import java.net.InetAddress
+import java.net.Inet4Address
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PokerProductionWiringTest {
     @Test
-    fun `foreground activity starts the private listener and retries it when already enabled`() {
+    fun `activity starts the private listener and resumes it when already enabled`() {
         assertEquals(
             PokerListenerService.ACTION_RETRY,
-            PokerListenerService.activityForegroundAction(enabled = true),
+            PokerListenerService.activityStartAction(enabled = true),
         )
         assertEquals(
             PokerListenerService.ACTION_ENABLE,
-            PokerListenerService.activityForegroundAction(enabled = false),
+            PokerListenerService.activityStartAction(enabled = false),
         )
-        assertEquals(
-            PokerListenerService.ACTION_RETRY,
-            PokerListenerService.launchSpec(PokerListenerService.ACTION_RETRY).action,
+    }
+
+    @Test
+    fun `pair and replacement are explicit listener service actions`() {
+        val pair = PokerListenerService.launchSpec(
+            action = PokerListenerService.ACTION_OPEN_ENROLLMENT,
         )
+        val replacement = PokerListenerService.launchSpec(
+            action = PokerListenerService.ACTION_OPEN_ENROLLMENT,
+            replacement = true,
+        )
+
+        assertEquals(PokerListenerService.ACTION_OPEN_ENROLLMENT, pair.action)
+        assertFalse(pair.replacement)
+        assertTrue(replacement.replacement)
+    }
+
+    @Test
+    fun `pairing display state redacts one-time code across lifecycle diagnostics`() {
+        val enrollment = PokerPairingUiState.EnrollmentOpen(
+            displayCode = "123456",
+            replacement = false,
+            expiresAtMs = 123L,
+            failure = PokerPairingFailure.INVALID_CODE,
+        )
+
+        assertFalse(enrollment.toString().contains("123456"))
+        assertTrue(enrollment.toString().contains("redacted"))
     }
 
     @Test
@@ -66,5 +93,6 @@ class PokerProductionWiringTest {
         assertEquals("10.116.96.154", selected?.hostAddress)
     }
 
-    private fun ipv4(value: String): Inet4Address = InetAddress.getByName(value) as Inet4Address
+    private fun ipv4(value: String): Inet4Address =
+        InetAddress.getByName(value) as Inet4Address
 }
