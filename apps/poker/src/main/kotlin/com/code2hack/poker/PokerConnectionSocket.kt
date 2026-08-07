@@ -13,6 +13,7 @@ import com.code2hack.pokerdealer.protocol.POKER_LISTENER_PORT
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
@@ -51,20 +52,70 @@ class AndroidPokerListenerFactory(
 }
 
 internal fun activeWifiAddress(context: Context): Inet4Address {
+    selectOrdinaryWifiInterfaceAddress(
+        runCatching {
+            NetworkInterface.getNetworkInterfaces()?.asSequence().orEmpty().mapNotNull { networkInterface ->
+                runCatching {
+                    WifiInterfaceSnapshot(
+                        name = networkInterface.name,
+                        isUp = networkInterface.isUp,
+                        isLoopback = networkInterface.isLoopback,
+                        addresses = networkInterface.inetAddresses.asSequence()
+                            .filterIsInstance<Inet4Address>()
+                            .toList(),
+                    )
+                }.getOrNull()
+            }.toList()
+        }.getOrDefault(emptyList()),
+    )?.let { return it }
+
     val connectivity = context.getSystemService(ConnectivityManager::class.java)
-    val network = connectivity.activeNetwork
-        ?: throw PokerListenerUnavailableException("No active Wi-Fi network")
-    val capabilities = connectivity.getNetworkCapabilities(network)
-    if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true) {
-        throw PokerListenerUnavailableException("The active network is not Wi-Fi")
-    }
-    return connectivity.getLinkProperties(network)?.linkAddresses
-        ?.asSequence()
-        ?.map { it.address }
-        ?.filterIsInstance<Inet4Address>()
-        ?.firstOrNull { !it.isLoopbackAddress && !it.isAnyLocalAddress }
-        ?: throw PokerListenerUnavailableException("The active Wi-Fi interface has no IPv4 address")
+    val candidates = connectivity.allNetworks.asSequence().mapNotNull { network ->
+        val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+        val addresses = connectivity.getLinkProperties(network)?.linkAddresses
+            ?.asSequence()
+            ?.map { it.address }
+            ?.filterIsInstance<Inet4Address>()
+            ?.toList()
+            .orEmpty()
+        WifiAddressSnapshot(
+            hasWifiTransport = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI),
+            hasVpnTransport = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+            hasNotVpnCapability = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN),
+            addresses = addresses,
+        )
+    }.toList()
+    return selectOrdinaryWifiAddress(candidates)
+        ?: throw PokerListenerUnavailableException("No ordinary Wi-Fi IPv4 address")
 }
+
+internal data class WifiInterfaceSnapshot(
+    val name: String,
+    val isUp: Boolean,
+    val isLoopback: Boolean,
+    val addresses: List<Inet4Address>,
+)
+
+internal fun selectOrdinaryWifiInterfaceAddress(
+    candidates: Iterable<WifiInterfaceSnapshot>,
+): Inet4Address? = candidates.asSequence()
+    .filter { it.name.startsWith("wlan") && it.isUp && !it.isLoopback }
+    .flatMap { it.addresses.asSequence() }
+    .firstOrNull { !it.isLoopbackAddress && !it.isAnyLocalAddress }
+
+internal data class WifiAddressSnapshot(
+    val hasWifiTransport: Boolean,
+    val hasVpnTransport: Boolean,
+    val hasNotVpnCapability: Boolean,
+    val addresses: List<Inet4Address>,
+)
+
+internal fun selectOrdinaryWifiAddress(
+    candidates: Iterable<WifiAddressSnapshot>,
+): Inet4Address? = candidates.asSequence()
+    .filter { it.hasWifiTransport && !it.hasVpnTransport && it.hasNotVpnCapability }
+    .flatMap { it.addresses.asSequence() }
+    .firstOrNull { !it.isLoopbackAddress && !it.isAnyLocalAddress }
 
 private class AndroidPokerListenerSocket(
     private val server: SSLServerSocket,

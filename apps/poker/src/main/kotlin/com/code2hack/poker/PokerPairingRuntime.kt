@@ -1,6 +1,5 @@
 package com.code2hack.poker
 
-import android.content.Context
 import com.code2hack.pokerdealer.protocol.POKER_LISTENER_PORT
 import com.code2hack.pokerdealer.protocol.PokerPairingConfirmation
 import com.code2hack.pokerdealer.protocol.PokerPairingEnrollment
@@ -9,6 +8,7 @@ import com.code2hack.pokerdealer.protocol.PokerPairingRejected
 import com.code2hack.pokerdealer.protocol.PokerPairingState
 import com.code2hack.pokerdealer.protocol.PokerPairingWire
 import com.code2hack.pokerdealer.protocol.PokerPairingController
+import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -89,24 +89,24 @@ internal object PokerPairingRuntime {
 }
 
 internal class PokerEnrollmentServer(
-    context: Context,
+    private val addressProvider: () -> Inet4Address,
     private val enrollment: PokerPairingEnrollment,
     private val pairing: PokerPairingController,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long,
     private val onFailure: (PokerPairingFailure, Int) -> Unit,
     private val onComplete: (PokerPairingConfirmation) -> Unit,
+    private val port: Int = POKER_LISTENER_PORT,
 ) {
-    private val context = context.applicationContext
     private var server: ServerSocket? = null
     private var job: Job? = null
 
     fun start(): String {
-        val address = activeWifiAddress(context)
+        val address = addressProvider()
         val opened = ServerSocket()
         try {
             opened.reuseAddress = true
-            opened.bind(InetSocketAddress(address, POKER_LISTENER_PORT))
+            opened.bind(InetSocketAddress(address, port))
             server = opened
             job = scope.launch(Dispatchers.IO) { acceptLoop(opened) }
             return checkNotNull(address.hostAddress)
@@ -117,8 +117,12 @@ internal class PokerEnrollmentServer(
     }
 
     fun stop() {
+        closeServer()
         job?.cancel()
         job = null
+    }
+
+    private fun closeServer() {
         runCatching { server?.close() }
         server = null
     }
@@ -130,16 +134,21 @@ internal class PokerEnrollmentServer(
             } catch (_: Exception) {
                 return
             }
-            socket.use(::handle)
+            val confirmation = socket.use(::handle)
+            if (confirmation != null) {
+                closeServer()
+                onComplete(confirmation)
+                return
+            }
         }
     }
 
-    private fun handle(socket: Socket) {
+    private fun handle(socket: Socket): PokerPairingConfirmation? {
         socket.soTimeout = 10_000
         try {
             PokerPairingWire.write(socket.getOutputStream(), PokerPairingWire.challenge(enrollment.challenge))
             val request = PokerPairingWire.read(socket.getInputStream())
-                ?: return
+                ?: return null
             val response = try {
                 PokerPairingWire.decodeResponse(request)
             } catch (_: Exception) {
@@ -147,7 +156,7 @@ internal class PokerEnrollmentServer(
                     socket.getOutputStream(),
                     PokerPairingWire.failure(PokerPairingFailure.INVALID_CHALLENGE, pairing.status.failedAttempts),
                 )
-                return
+                return null
             }
             val confirmation = try {
                 pairing.acceptEnrollment(response, nowMs())
@@ -157,19 +166,18 @@ internal class PokerEnrollmentServer(
                     PokerPairingWire.failure(failure.reason, failure.failedAttempts),
                 )
                 onFailure(failure.reason, failure.failedAttempts)
-                return
+                return null
             }
-            try {
+            runCatching {
                 PokerPairingWire.write(
                     socket.getOutputStream(),
                     PokerPairingWire.confirmation(confirmation),
                 )
-            } finally {
-                // acceptEnrollment commits before the confirmation crosses the socket.
-                onComplete(confirmation)
             }
+            return confirmation
         } catch (_: Exception) {
             // The peer receives no pairing material from a failed transport.
+            return null
         }
     }
 }

@@ -269,7 +269,7 @@ class PokerListenerService : Service() {
     private fun startEnrollmentServer(enrollment: PokerPairingEnrollment) {
         if (pairingServer != null) return
         val server = PokerEnrollmentServer(
-            context = this,
+            addressProvider = { activeWifiAddress(this) },
             enrollment = enrollment,
             pairing = pairing,
             scope = serviceScope,
