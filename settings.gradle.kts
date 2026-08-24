@@ -17,6 +17,7 @@ dependencyResolutionManagement {
 rootProject.name = "Poker-Dealer"
 
 include(
+    ":apps:dealer",
     ":shared:protocol",
     ":shared:domain",
 )
