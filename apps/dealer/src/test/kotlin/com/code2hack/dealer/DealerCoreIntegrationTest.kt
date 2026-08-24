@@ -16,6 +16,7 @@ import com.code2hack.pokerdealer.protocol.appserver.HostSession
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionBackoff
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
+import com.code2hack.pokerdealer.protocol.appserver.HostSessionStatus
 import com.code2hack.pokerdealer.protocol.appserver.JsonRpcPeer
 import com.code2hack.pokerdealer.protocol.appserver.RetainedCardStore
 import com.code2hack.pokerdealer.protocol.host.RouteDiagnostic
@@ -114,7 +115,11 @@ class DealerCoreIntegrationTest {
 
         try {
             core.start()
-            awaitCondition { connector.connectCount.get() >= 1 && core.state.value.threads[locator] != null }
+            awaitCondition {
+                connector.connectCount.get() >= 1 &&
+                    core.state.value.hostSessions["host"]?.status == HostSessionStatus.CONNECTED &&
+                    core.state.value.threads[locator] != null
+            }
             assertTrue(core.takeControl(locator))
             assertTrue(core.editDraft(locator, ComposerDraft.fromText("hello")))
 

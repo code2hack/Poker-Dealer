@@ -49,6 +49,7 @@ internal class DealerCore(
     private val recoveryStore: DealerRecoveryStateStore,
     private val retainedCardStore: RetainedCardStore,
     private val scope: CoroutineScope,
+    private val pokerProjectionPort: PokerProjectionPort = NoOpPokerProjectionPort,
 ) {
     private val mutableState = MutableStateFlow(DealerCoreState())
     val state: StateFlow<DealerCoreState> = mutableState.asStateFlow()
@@ -57,6 +58,7 @@ internal class DealerCore(
     private val requestJobs = mutableMapOf<String, Job>()
     private val notificationJobs = mutableMapOf<String, Job>()
     private var hostStateJob: Job? = null
+    private var pokerProjectionJob: Job? = null
     private var started = false
     private lateinit var requests: DealerRequestCoordinator
 
@@ -110,6 +112,17 @@ internal class DealerCore(
                 mutableState.update { it.copy(hostSessions = sessions) }
             }
         }
+        pokerProjectionJob = scope.launch {
+            var previous: PokerProjectionSnapshot? = null
+            state.collect { current ->
+                val projection = current.toPokerProjectionSnapshot()
+                if (projection != previous) {
+                    previous = projection
+                    runCatching { pokerProjectionPort.publish(projection) }
+                        .onFailure { setError("Poker projection unavailable: ${it.message}") }
+                }
+            }
+        }
         connections.start()
     }
 
@@ -121,6 +134,8 @@ internal class DealerCore(
         connections.close()
         hostStateJob?.cancel()
         hostStateJob = null
+        pokerProjectionJob?.cancel()
+        pokerProjectionJob = null
         started = false
     }
 
