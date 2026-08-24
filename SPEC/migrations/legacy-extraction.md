@@ -1,7 +1,7 @@
 # Legacy Extraction Plan
 
 **Proposed path:** `SPEC/migrations/legacy-extraction.md`  
-**Status:** Draft for SPEC-manager review — **not yet normative and not yet committed**  
+**Status:** Committed draft — pending normative acceptance  
 **Successor repository:** `code2hack/Poker-Dealer`  
 **Donor repository:** `code2hack/Poker-Dealer-Legacy`  
 **Pinned donor commit:** `0a12901f58abf7cf7324bd92e876f4423f1cbeaa`  
