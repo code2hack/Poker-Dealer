@@ -35,14 +35,14 @@ internal data class RestoredDealerState(
 
 internal class DealerStateRecoveryStore(
     private val root: File,
-) {
+) : DealerRecoveryStateStore {
     private val json = Json {
         allowStructuredMapKeys = true
         encodeDefaults = true
         ignoreUnknownKeys = true
     }
 
-    suspend fun read(): RestoredDealerState = withContext(Dispatchers.IO) {
+    override suspend fun read(): RestoredDealerState = withContext(Dispatchers.IO) {
         val errors = mutableListOf<String>()
         val projection = runCatching {
             read(projectionFile, DealerProjectionSnapshot.serializer())
@@ -69,11 +69,11 @@ internal class DealerStateRecoveryStore(
         )
     }
 
-    suspend fun writeProjection(snapshot: DealerProjectionSnapshot) = withContext(Dispatchers.IO) {
+    override suspend fun writeProjection(snapshot: DealerProjectionSnapshot) = withContext(Dispatchers.IO) {
         write(projectionFile, DealerProjectionSnapshot.serializer(), snapshot)
     }
 
-    suspend fun writePendingRequests(snapshot: DealerPendingRequestSnapshot) =
+    override suspend fun writePendingRequests(snapshot: DealerPendingRequestSnapshot) =
         withContext(Dispatchers.IO) {
             write(pendingRequestsFile, DealerPendingRequestSnapshot.serializer(), snapshot)
         }

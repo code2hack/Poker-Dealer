@@ -13,7 +13,7 @@ import com.code2hack.pokerdealer.domain.ThreadActionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-class DealerThreadAttachmentStore(context: Context) {
+class DealerThreadAttachmentStore(context: Context) : DealerThreadStateStore {
     private val database = Room.databaseBuilder(
         context.applicationContext,
         DealerDatabase::class.java,
@@ -23,19 +23,19 @@ class DealerThreadAttachmentStore(context: Context) {
     private val drafts = database.threadDrafts()
     private val actions = database.pendingThreadActions()
 
-    suspend fun read(): Set<CodexThreadLocator> = withContext(Dispatchers.IO) {
+    override suspend fun read(): Set<CodexThreadLocator> = withContext(Dispatchers.IO) {
         dao.readAll().mapTo(mutableSetOf()) { CodexThreadLocator(it.hostId, it.threadId) }
     }
 
-    suspend fun attach(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
+    override suspend fun attach(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
         dao.insert(DealerDatabase.AttachedThread(locator.hostId, locator.threadId))
     }
 
-    suspend fun detach(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
+    override suspend fun detach(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
         dao.delete(locator.hostId, locator.threadId)
     }
 
-    suspend fun purge(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
+    override suspend fun purge(locator: CodexThreadLocator) = withContext(Dispatchers.IO) {
         database.runInTransaction {
             dao.delete(locator.hostId, locator.threadId)
             drafts.delete(locator.hostId, locator.threadId)
@@ -60,14 +60,14 @@ class DealerThreadAttachmentStore(context: Context) {
     suspend fun writeDraft(locator: CodexThreadLocator, text: String) =
         writeDraft(locator, ComposerDraft.fromText(text))
 
-    suspend fun writeDraft(locator: CodexThreadLocator, draft: ComposerDraft) = withContext(Dispatchers.IO) {
+    override suspend fun writeDraft(locator: CodexThreadLocator, draft: ComposerDraft) = withContext(Dispatchers.IO) {
         database.runInTransaction {
             val current = drafts.read(locator.hostId, locator.threadId)
             upsertDraft(locator, draft, current?.reasoningEffort)
         }
     }
 
-    suspend fun writeReasoningEffort(locator: CodexThreadLocator, effort: String?) =
+    override suspend fun writeReasoningEffort(locator: CodexThreadLocator, effort: String?) =
         withContext(Dispatchers.IO) {
             migrateLegacyDraftStorage()
             database.runInTransaction {
@@ -80,7 +80,7 @@ class DealerThreadAttachmentStore(context: Context) {
             }
         }
 
-    suspend fun readActions(): ThreadActionState = withContext(Dispatchers.IO) {
+    override suspend fun readActions(): ThreadActionState = withContext(Dispatchers.IO) {
         migrateLegacyDraftStorage()
         val pendingInputs = mutableMapOf<CodexThreadLocator, PendingThreadInput>()
         val pendingInterrupts = mutableMapOf<CodexThreadLocator, String>()
@@ -125,7 +125,7 @@ class DealerThreadAttachmentStore(context: Context) {
         )
     }
 
-    suspend fun writePendingInput(locator: CodexThreadLocator, pending: PendingThreadInput?) =
+    override suspend fun writePendingInput(locator: CodexThreadLocator, pending: PendingThreadInput?) =
         withContext(Dispatchers.IO) {
             if (pending == null) {
                 actions.delete(locator.hostId, locator.threadId)
@@ -148,7 +148,7 @@ class DealerThreadAttachmentStore(context: Context) {
             }
         }
 
-    suspend fun writePendingInterrupt(locator: CodexThreadLocator, turnId: String?) =
+    override suspend fun writePendingInterrupt(locator: CodexThreadLocator, turnId: String?) =
         withContext(Dispatchers.IO) {
             if (turnId == null) {
                 actions.delete(locator.hostId, locator.threadId)
