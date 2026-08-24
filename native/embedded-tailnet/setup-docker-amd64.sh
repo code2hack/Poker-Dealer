@@ -17,7 +17,7 @@ if docker run --rm --platform linux/amd64 "${NATIVE_BUILDER_BASE_IMAGE}" true >/
     exit 0
 fi
 
-printf 'Configuring Docker amd64 emulation for the Spark build host...\n'
+printf 'Configuring Docker amd64 emulation for the ARM64 Linux build host...\n'
 docker run --privileged --rm "${NATIVE_BUILDER_BINFMT_IMAGE}" --uninstall amd64
 docker run --privileged --rm "${NATIVE_BUILDER_BINFMT_IMAGE}" --install amd64
 docker run --rm --platform linux/amd64 "${NATIVE_BUILDER_BASE_IMAGE}" true >/dev/null

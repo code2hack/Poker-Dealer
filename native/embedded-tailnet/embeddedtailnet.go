@@ -56,7 +56,7 @@ func (e *Engine) Start(stateDir string) (string, error) {
 	envknob.Setenv("TS_LOGS_DIR", stateDir)
 	server := &tsnet.Server{
 		Dir:      stateDir,
-		Hostname: "dealer-fold6",
+		Hostname: "dealer-android",
 		UserLogf: func(string, ...any) {},
 	}
 	if err := server.Start(); err != nil {

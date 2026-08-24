@@ -61,6 +61,11 @@ class DealerHostConnectionProfileStore(
         writeCredentials(config.hostId, privateKey, knownHosts)
         val profile = buildJsonObject {
             put("hostId", config.hostId)
+            put("displayName", config.displayName)
+            put("kind", config.kind.name)
+            put("architecture", config.architecture.name)
+            put("distribution", config.distribution.name)
+            put("availabilityClass", config.availabilityClass.name)
             put("lanHost", config.lanHost)
             put("tailnetHost", config.tailnetHost)
             put("sshUser", config.sshUser)
@@ -68,8 +73,14 @@ class DealerHostConnectionProfileStore(
         }.toString()
         context.hostConnectionIntentDataStore.edit {
             it[profileKey(config.hostId)] = profile
+            it[ConfiguredHosts] = it[ConfiguredHosts].orEmpty() + config.hostId
         }
     }
+
+    suspend fun readConfiguredHostIds(): Set<String> =
+        context.hostConnectionIntentDataStore.data
+            .map { it[ConfiguredHosts].orEmpty() }
+            .first()
 
     suspend fun hasConfiguredTailnetRoute(hostId: String): Boolean =
         context.hostConnectionIntentDataStore.data
@@ -90,13 +101,28 @@ class DealerHostConnectionProfileStore(
         val profile = Json.parseToJsonElement(raw).jsonObject
         require(profile.getValue("hostId").jsonPrimitive.content == hostId)
         val (privateKey, knownHosts) = readCredentials(hostId)
+        val base = DealerHostConnectionConfig(
+            hostId = hostId,
+            lanHost = profile.getValue("lanHost").jsonPrimitive.content,
+            tailnetHost = profile.getValue("tailnetHost").jsonPrimitive.content,
+            sshUser = profile.getValue("sshUser").jsonPrimitive.content,
+            loopbackSshPort = profile.getValue("loopbackSshPort").jsonPrimitive.content.toInt(),
+        )
         return StoredHostConnection(
-            config = DealerHostConnectionConfig(
-                hostId = hostId,
-                lanHost = profile.getValue("lanHost").jsonPrimitive.content,
-                tailnetHost = profile.getValue("tailnetHost").jsonPrimitive.content,
-                sshUser = profile.getValue("sshUser").jsonPrimitive.content,
-                loopbackSshPort = profile.getValue("loopbackSshPort").jsonPrimitive.content.toInt(),
+            config = base.copy(
+                displayName = profile["displayName"]?.jsonPrimitive?.content ?: base.displayName,
+                kind = profile["kind"]?.jsonPrimitive?.content
+                    ?.let { runCatching { com.code2hack.pokerdealer.domain.CodexHostKind.valueOf(it) }.getOrNull() }
+                    ?: base.kind,
+                architecture = profile["architecture"]?.jsonPrimitive?.content
+                    ?.let { runCatching { com.code2hack.pokerdealer.domain.HostArchitecture.valueOf(it) }.getOrNull() }
+                    ?: base.architecture,
+                distribution = profile["distribution"]?.jsonPrimitive?.content
+                    ?.let { runCatching { com.code2hack.pokerdealer.domain.CodexDistribution.valueOf(it) }.getOrNull() }
+                    ?: base.distribution,
+                availabilityClass = profile["availabilityClass"]?.jsonPrimitive?.content
+                    ?.let { runCatching { com.code2hack.pokerdealer.domain.HostAvailabilityClass.valueOf(it) }.getOrNull() }
+                    ?: base.availabilityClass,
             ),
             privateKey = privateKey,
             knownHosts = knownHosts,
@@ -182,6 +208,7 @@ class DealerHostConnectionProfileStore(
     }
 
     private companion object {
+        val ConfiguredHosts = stringSetPreferencesKey("configured_host_ids")
         const val CipherTransformation = "AES/GCM/NoPadding"
         const val KeyAlias = "poker-dealer-host-connections"
         val KeyLock = Any()

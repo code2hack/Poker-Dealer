@@ -1,11 +1,16 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
 import com.code2hack.pokerdealer.domain.CardRole
+import com.code2hack.pokerdealer.domain.CodexDistribution
+import com.code2hack.pokerdealer.domain.CodexHost
+import com.code2hack.pokerdealer.domain.CodexHostKind
 import com.code2hack.pokerdealer.domain.ComposerDraft
 import com.code2hack.pokerdealer.domain.ComposerElement
 import com.code2hack.pokerdealer.domain.DeliveryState
+import com.code2hack.pokerdealer.domain.HostArchitecture
+import com.code2hack.pokerdealer.domain.HostAvailabilityClass
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
-import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.HostConnectionState
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.ConnectionPhaseTimeoutException
@@ -32,6 +37,32 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+
+private val LegacyWorkstationTestHost = CodexHost(
+    id = "u4090",
+    displayName = "Legacy workstation fixture",
+    kind = CodexHostKind.LINUX_WORKSTATION,
+    architecture = HostArchitecture.LINUX_X86_64,
+    distribution = CodexDistribution.OPENAI_UPSTREAM,
+    connectionRoutes = listOf(
+        HostConnectionRoute.SSH_LAN,
+        HostConnectionRoute.SSH_EMBEDDED_TSNET,
+        HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+    ),
+    availabilityClass = HostAvailabilityClass.PERSISTENT,
+    connectionState = HostConnectionState.DISCONNECTED,
+)
+
+private val LegacyAndroidTestHost = CodexHost(
+    id = "fold6-termux",
+    displayName = "Legacy Android fixture",
+    kind = CodexHostKind.TERMUX_ANDROID,
+    architecture = HostArchitecture.ANDROID_ARM64,
+    distribution = CodexDistribution.TERMUX_COMMUNITY,
+    connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
+    availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
+    connectionState = HostConnectionState.DISCONNECTED,
+)
 
 class CodexAppServerM1Test {
     @Test
@@ -195,6 +226,7 @@ class CodexAppServerM1Test {
         val phases = mutableListOf<M1ConnectionPhase>()
         val activeRoutes = mutableListOf<HostConnectionRoute>()
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = sshClient,
             daemon = daemon,
@@ -211,7 +243,7 @@ class CodexAppServerM1Test {
             onRoute = { route, _ -> activeRoutes += route },
         )
 
-        assertEquals(InitialCodexHosts.u4090.id, result.host.id)
+        assertEquals(LegacyWorkstationTestHost.id, result.host.id)
         assertEquals(HostConnectionRoute.SSH_LAN, result.route)
         assertEquals(HostConnectionRoute.SSH_LAN, result.reconnectRoute)
         assertEquals(listOf(22, 22), dialer.ports)
@@ -285,6 +317,7 @@ class CodexAppServerM1Test {
         )
         val peers = ArrayDeque(listOf(firstPeer, secondPeer))
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = RecordingDialer(),
             sshClient = RecordingSshClient(),
             appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
@@ -327,7 +360,7 @@ class CodexAppServerM1Test {
         )
         val recovery = mutableListOf<M1RecoveryUpdate>()
         val slice = M1OneHostDealerSlice(
-            host = InitialCodexHosts.fold6Termux,
+            host = LegacyAndroidTestHost,
             dialer = dialer,
             sshClient = RecordingSshClient(
                 daemonStatus = loadFixtureText("termux-daemon-running.json"),
@@ -366,6 +399,7 @@ class CodexAppServerM1Test {
         val dialer = RecordingDialer(failuresByCall = mapOf(2 to IllegalStateException("host stopped")))
         val recovery = mutableListOf<M1RecoveryUpdate>()
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = RecordingSshClient(),
             reconnectPolicy = M1ReconnectPolicy(initialBackoffMs = 60_000, maxBackoffMs = 60_000),
@@ -408,6 +442,7 @@ class CodexAppServerM1Test {
         val peers = ArrayDeque(listOf(firstPeer, secondPeer))
         val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = RecordingDialer(),
             sshClient = RecordingSshClient(),
             appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
@@ -447,6 +482,7 @@ class CodexAppServerM1Test {
         val dialer = RecordingDialer()
         val sshClient = RecordingSshClient()
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = sshClient,
             appServerFactory = { CodexAppServerSession(peer) },
@@ -482,6 +518,7 @@ class CodexAppServerM1Test {
             waitOnRequestMethod = "turn/start",
         )
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = RecordingDialer(),
             sshClient = RecordingSshClient(),
             appServerFactory = { CodexAppServerSession(peer) },
@@ -601,7 +638,7 @@ class CodexAppServerM1Test {
         val sshClient = RecordingSshClient(loadFixtureText("termux-daemon-running.json"))
         val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
         val slice = M1OneHostDealerSlice(
-            host = InitialCodexHosts.fold6Termux,
+            host = LegacyAndroidTestHost,
             dialer = dialer,
             sshClient = sshClient,
             daemon = TermuxCommunityCodexDaemon(),
@@ -616,7 +653,7 @@ class CodexAppServerM1Test {
             onCard = renderedCards::add,
         )
 
-        assertEquals("${InitialCodexHosts.fold6Termux.id}/${result.threadId}", result.conversationId)
+        assertEquals("${LegacyAndroidTestHost.id}/${result.threadId}", result.conversationId)
         assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.route)
         assertEquals(HostConnectionRoute.SSH_LOOPBACK, result.reconnectRoute)
         assertEquals(listOf(HostConnectionRoute.SSH_LOOPBACK, HostConnectionRoute.SSH_LOOPBACK), dialer.routes)
@@ -635,7 +672,11 @@ class CodexAppServerM1Test {
     fun `LAN-only provider skips unsupported routes and preserves the LAN failure`() = runTest {
         val lanFailure = IllegalStateException("LAN connection refused")
         val dialer = RecordingDialer(failures = mapOf(HostConnectionRoute.SSH_LAN to lanFailure))
-        val slice = M1OneHostDealerSlice(dialer = dialer, sshClient = RecordingSshClient())
+        val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
+            dialer = dialer,
+            sshClient = RecordingSshClient(),
+        )
 
         val failure = runCatching {
             slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
@@ -660,6 +701,7 @@ class CodexAppServerM1Test {
             failures = mapOf(HostConnectionRoute.SSH_LAN to IllegalStateException("LAN unavailable")),
         )
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = RecordingSshClient(),
             appServerFactory = { CodexAppServerSession(peers.removeFirst()) },
@@ -696,7 +738,11 @@ class CodexAppServerM1Test {
                 tcpStream: DuplexByteStream,
             ): HostSshSession = throw identityFailure
         }
-        val slice = M1OneHostDealerSlice(dialer = dialer, sshClient = sshClient)
+        val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
+            dialer = dialer,
+            sshClient = sshClient,
+        )
 
         val failure = runCatching {
             slice.run(M1TurnInput("test", clientUserMessageId = "client-1"))
@@ -730,6 +776,7 @@ class CodexAppServerM1Test {
             ): DuplexByteStream = awaitCancellation()
         }
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = RecordingSshClient(),
             timeouts = M1Timeouts(tcpConnectMs = 100),
@@ -754,6 +801,7 @@ class CodexAppServerM1Test {
             ): HostSshSession = awaitCancellation()
         }
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = sshClient,
             timeouts = M1Timeouts(sshConnectMs = 100),
@@ -786,6 +834,7 @@ class CodexAppServerM1Test {
             ): HostSshSession = session
         }
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = dialer,
             sshClient = sshClient,
             timeouts = M1Timeouts(daemonCommandMs = 100),
@@ -820,6 +869,7 @@ class CodexAppServerM1Test {
         val peers = ArrayDeque<JsonRpcPeer>(listOf(firstPeer, secondPeer))
         val renderedCards = mutableListOf<com.code2hack.pokerdealer.domain.Card>()
         val slice = M1OneHostDealerSlice(
+            host = LegacyWorkstationTestHost,
             dialer = RecordingDialer(),
             sshClient = RecordingSshClient(),
             timeouts = M1Timeouts(reconnectInspectionMs = 100),

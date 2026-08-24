@@ -1,7 +1,6 @@
 package com.code2hack.dealer
 
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
-import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionConnectionConfig
 import com.code2hack.pokerdealer.protocol.appserver.TermuxCommunityCodexDaemon
 import com.code2hack.pokerdealer.protocol.appserver.UpstreamCodexDaemon
@@ -21,12 +20,12 @@ import com.code2hack.pokerdealer.protocol.host.SshHostAuthentication
  */
 internal class DealerHostSessionFactory(
     private val profiles: DealerHostConnectionProfileStore,
+    private val embeddedTailnet: EmbeddedTailnetController,
 ) {
     suspend fun create(hostId: String): HostSessionConnectionConfig {
         val stored = profiles.load(hostId)
         val config = stored.config
-        val host = InitialCodexHosts.all.singleOrNull { it.id == hostId }
-            ?: error("$hostId: host metadata is not configured in the extraction baseline")
+        val host = config.codexHost()
 
         val endpoints = buildMap {
             if (config.lanHost.isNotBlank()) {
@@ -42,15 +41,18 @@ internal class DealerHostSessionFactory(
                 )
             }
         }
-        val capabilities = buildMap {
-            endpoints.keys.forEach { put(it, RouteCapability.SUPPORTED_CONFIGURED) }
-            if (HostConnectionRoute.SSH_EMBEDDED_TSNET in host.connectionRoutes) {
-                put(hostId to HostConnectionRoute.SSH_EMBEDDED_TSNET, RouteCapability.SUPPORTED_UNAVAILABLE)
-            }
-        }
+        val direct = SocketHostTcpDialer(
+            endpoints = endpoints,
+            capabilities = endpoints.keys.associateWith { RouteCapability.SUPPORTED_CONFIGURED },
+        )
+        val tailnet = EmbeddedTailnetHostTcpDialer(
+            engine = embeddedTailnet.engine,
+            destinations = config.tailnetHost.takeIf(String::isNotBlank)?.let { mapOf(hostId to it) }.orEmpty(),
+            state = embeddedTailnet::connectionState,
+        )
         return HostSessionConnectionConfig(
             host = host,
-            dialer = SocketHostTcpDialer(endpoints = endpoints, capabilities = capabilities),
+            dialer = DealerHostRouteDialer(direct, tailnet),
             sshClient = JschHostSshClient(
                 mapOf(
                     hostId to SshHostAuthentication(

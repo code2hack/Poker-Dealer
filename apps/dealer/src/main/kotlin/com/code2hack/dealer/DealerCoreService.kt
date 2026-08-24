@@ -8,10 +8,8 @@ import android.app.Service
 import android.content.Intent
 import android.os.Binder
 import android.os.IBinder
-import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.CodexThreadLocator
 import com.code2hack.pokerdealer.domain.ComposerDraft
-import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.protocol.appserver.HostSessionManager
 import com.code2hack.pokerdealer.protocol.appserver.InitializedHostSessionConnector
 import com.code2hack.pokerdealer.protocol.appserver.RetainedCardStore
@@ -31,12 +29,16 @@ internal class DealerCoreService : Service() {
     private val scope = CoroutineScope(serviceJob + Dispatchers.Default)
     private val binder = LocalBinder()
     private lateinit var threadStore: DealerThreadAttachmentStore
+    private lateinit var profiles: DealerHostConnectionProfileStore
+    private lateinit var embeddedTailnet: EmbeddedTailnetController
     private lateinit var core: DealerCore
     private val mutableOperation = MutableStateFlow("Starting Dealer core")
     val operation: StateFlow<String> = mutableOperation.asStateFlow()
 
     val state: StateFlow<DealerCoreState>
         get() = core.state
+    val tailnetStatus: StateFlow<EmbeddedTailnetStatus>
+        get() = embeddedTailnet.status
 
     inner class LocalBinder : Binder() {
         val service: DealerCoreService
@@ -46,11 +48,16 @@ internal class DealerCoreService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureForeground()
-        val profiles = DealerHostConnectionProfileStore(this)
-        val factory = DealerHostSessionFactory(profiles)
+        profiles = DealerHostConnectionProfileStore(this)
+        embeddedTailnet = EmbeddedTailnetController(this, scope)
+        val factory = DealerHostSessionFactory(profiles, embeddedTailnet)
+        val intentStore = HostConnectionIntentDataStore(this)
+        val configuredHostIds = runBlocking {
+            profiles.readConfiguredHostIds() + intentStore.readEnabledHostIds()
+        }
         val hostSessions = HostSessionManager(
-            hostIds = InitialCodexHosts.all.map(CodexHost::id).toSet(),
-            intentStore = HostConnectionIntentDataStore(this),
+            hostIds = configuredHostIds,
+            intentStore = intentStore,
             connector = InitializedHostSessionConnector(factory::create),
             scope = scope,
         )
@@ -63,7 +70,11 @@ internal class DealerCoreService : Service() {
             scope = scope,
         )
         scope.launch {
-            runCatching { core.start() }
+            runCatching {
+                val enabled = intentStore.readEnabledHostIds()
+                if (enabled.any { profiles.hasConfiguredTailnetRoute(it) }) embeddedTailnet.start()
+                core.start()
+            }
                 .onSuccess { mutableOperation.value = "Dealer core ready" }
                 .onFailure { mutableOperation.value = "Dealer core failed: ${it.message}" }
         }
@@ -79,6 +90,7 @@ internal class DealerCoreService : Service() {
     override fun onDestroy() {
         runBlocking {
             runCatching { core.close() }
+            runCatching { embeddedTailnet.stop() }
             runCatching { threadStore.close() }
         }
         scope.cancel()
@@ -87,12 +99,22 @@ internal class DealerCoreService : Service() {
 
     fun setHostEnabled(hostId: String, enabled: Boolean) {
         launchOperation(if (enabled) "Enable $hostId" else "Disable $hostId") {
+            if (enabled && profiles.hasConfiguredTailnetRoute(hostId)) embeddedTailnet.start()
             core.setHostEnabled(hostId, enabled)
         }
     }
 
     fun refreshHost(hostId: String) {
         launchOperation("Refresh $hostId") { core.refreshThreads(hostId) }
+    }
+
+    fun startEmbeddedTailnet() {
+        embeddedTailnet.start()
+        mutableOperation.value = "Embedded tailnet starting"
+    }
+
+    fun stopEmbeddedTailnet() {
+        launchOperation("Stop embedded tailnet") { embeddedTailnet.stop() }
     }
 
     fun attachAndTakeControl(hostId: String, threadId: String) {

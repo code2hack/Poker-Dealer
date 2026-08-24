@@ -1,8 +1,12 @@
 package com.code2hack.pokerdealer.protocol.appserver
 
+import com.code2hack.pokerdealer.domain.CodexDistribution
 import com.code2hack.pokerdealer.domain.CodexHost
+import com.code2hack.pokerdealer.domain.CodexHostKind
+import com.code2hack.pokerdealer.domain.HostArchitecture
+import com.code2hack.pokerdealer.domain.HostAvailabilityClass
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
-import com.code2hack.pokerdealer.domain.InitialCodexHosts
+import com.code2hack.pokerdealer.domain.HostConnectionState
 import com.code2hack.pokerdealer.protocol.host.CommandResult
 import com.code2hack.pokerdealer.protocol.host.DuplexByteStream
 import com.code2hack.pokerdealer.protocol.host.HostSshClient
@@ -23,6 +27,21 @@ import kotlinx.serialization.json.jsonObject
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+
+private val LegacyHostSessionTestHost = CodexHost(
+    id = "u4090",
+    displayName = "Legacy workstation fixture",
+    kind = CodexHostKind.LINUX_WORKSTATION,
+    architecture = HostArchitecture.LINUX_X86_64,
+    distribution = CodexDistribution.OPENAI_UPSTREAM,
+    connectionRoutes = listOf(
+        HostConnectionRoute.SSH_LAN,
+        HostConnectionRoute.SSH_EMBEDDED_TSNET,
+        HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
+    ),
+    availabilityClass = HostAvailabilityClass.PERSISTENT,
+    connectionState = HostConnectionState.DISCONNECTED,
+)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class HostSessionManagerTest {
@@ -159,7 +178,7 @@ class HostSessionManagerTest {
         val ssh = BlockingProxySshSession()
         val connector = InitializedHostSessionConnector {
             HostSessionConnectionConfig(
-                host = InitialCodexHosts.u4090,
+                host = LegacyHostSessionTestHost,
                 dialer = SingleStreamDialer(tcp),
                 sshClient = SingleSshClient(ssh),
                 daemon = ImmediateDaemon,
@@ -179,7 +198,7 @@ class HostSessionManagerTest {
         val tcp = RecordingByteStream()
         val connector = InitializedHostSessionConnector {
             HostSessionConnectionConfig(
-                host = InitialCodexHosts.u4090,
+                host = LegacyHostSessionTestHost,
                 dialer = SingleStreamDialer(tcp),
                 sshClient = FailingSshClient,
                 daemon = ImmediateDaemon,

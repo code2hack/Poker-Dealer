@@ -97,6 +97,8 @@ internal class DealerDiagnosticsActivity : Activity() {
         content.addView(button("Enable host") { service?.setHostEnabled(host(), true) })
         content.addView(button("Disable host") { service?.setHostEnabled(host(), false) })
         content.addView(button("Refresh threads") { service?.refreshHost(host()) })
+        content.addView(button("Start embedded tailnet") { service?.startEmbeddedTailnet() })
+        content.addView(button("Stop embedded tailnet") { service?.stopEmbeddedTailnet() })
         content.addView(button("Attach + take control") {
             service?.attachAndTakeControl(host(), thread())
         })
@@ -126,6 +128,14 @@ internal class DealerDiagnosticsActivity : Activity() {
             appendLine(connected.operation.value)
             state.error?.let { appendLine("Error: $it") }
             appendLine()
+            val tailnet = connected.tailnetStatus.value
+            append("Embedded tailnet: ").append(tailnet.state)
+            tailnet.path?.let { append(" / ").append(it) }
+            tailnet.relay?.let { append(" / DERP ").append(it) }
+            appendLine()
+            tailnet.loginUrl?.let { appendLine("  Login: $it") }
+            tailnet.error?.let { appendLine("  Error: $it") }
+            tailnet.health.forEach { appendLine("  Health: $it") }
             appendLine("Hosts:")
             if (state.hostSessions.isEmpty()) appendLine("  (none active)")
             state.hostSessions.toSortedMap().forEach { (id, session) ->

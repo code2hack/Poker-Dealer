@@ -105,52 +105,6 @@ data class DiscoveredThread(
     val intendedControlSurface: ControlSurface = ControlSurface.NONE,
 )
 
-object InitialCodexHosts {
-    val spark = CodexHost(
-        id = "spark",
-        displayName = "DGX Spark",
-        kind = CodexHostKind.LINUX_WORKSTATION,
-        architecture = HostArchitecture.LINUX_ARM64,
-        distribution = CodexDistribution.OPENAI_UPSTREAM,
-        connectionRoutes = listOf(
-            HostConnectionRoute.SSH_LAN,
-            HostConnectionRoute.SSH_EMBEDDED_TSNET,
-            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
-        ),
-        availabilityClass = HostAvailabilityClass.PERSISTENT,
-        connectionState = HostConnectionState.DISCONNECTED,
-    )
-
-    val u4090 = CodexHost(
-        id = "u4090",
-        displayName = "u4090",
-        kind = CodexHostKind.LINUX_WORKSTATION,
-        architecture = HostArchitecture.LINUX_X86_64,
-        distribution = CodexDistribution.OPENAI_UPSTREAM,
-        connectionRoutes = listOf(
-            HostConnectionRoute.SSH_LAN,
-            HostConnectionRoute.SSH_EMBEDDED_TSNET,
-            HostConnectionRoute.SSH_EXTERNAL_TAILSCALE,
-        ),
-        availabilityClass = HostAvailabilityClass.PERSISTENT,
-        connectionState = HostConnectionState.DISCONNECTED,
-    )
-
-    val fold6Termux = CodexHost(
-        id = "fold6-termux",
-        displayName = "Fold6 Termux",
-        kind = CodexHostKind.TERMUX_ANDROID,
-        architecture = HostArchitecture.ANDROID_ARM64,
-        distribution = CodexDistribution.TERMUX_COMMUNITY,
-        connectionRoutes = listOf(HostConnectionRoute.SSH_LOOPBACK),
-        availabilityClass = HostAvailabilityClass.OPPORTUNISTIC,
-        connectionState = HostConnectionState.DISCONNECTED,
-    )
-
-    val workstations = listOf(spark, u4090)
-    val all = workstations + fold6Termux
-}
-
 @Serializable
 data class Conversation(
     val id: String,

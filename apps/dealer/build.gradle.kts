@@ -1,6 +1,21 @@
+import java.util.zip.ZipFile
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.serialization)
+}
+
+val embeddedTailnetAar = rootProject.layout.projectDirectory.file(
+    "native/embedded-tailnet/build/embeddedtailnet.aar",
+)
+val buildEmbeddedTailnet by tasks.registering(Exec::class) {
+    inputs.files(
+        rootProject.fileTree("native/embedded-tailnet") {
+            exclude("build/**", ".toolchains/**")
+        },
+    )
+    outputs.file(embeddedTailnetAar)
+    commandLine(rootProject.file("native/embedded-tailnet/build.sh"))
 }
 
 android {
@@ -28,6 +43,7 @@ android {
 }
 
 dependencies {
+    implementation(files(embeddedTailnetAar).builtBy(buildEmbeddedTailnet))
     implementation(project(":shared:domain"))
     implementation(project(":shared:protocol"))
     implementation(libs.datastore.preferences)
@@ -40,4 +56,20 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.androidx.test.runner)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(buildEmbeddedTailnet)
+}
+
+tasks.register("verifyEmbeddedTailnetPackaging") {
+    dependsOn("assembleDebug")
+    doLast {
+        val apk = layout.buildDirectory.file("outputs/apk/debug/dealer-debug.apk").get().asFile
+        check(
+            ZipFile(apk).use { zip ->
+                zip.getEntry("lib/arm64-v8a/libgojni.so") != null
+            },
+        ) { "Dealer debug APK is missing lib/arm64-v8a/libgojni.so" }
+    }
 }

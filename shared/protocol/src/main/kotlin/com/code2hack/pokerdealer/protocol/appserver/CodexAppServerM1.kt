@@ -7,7 +7,6 @@ import com.code2hack.pokerdealer.domain.CardState
 import com.code2hack.pokerdealer.domain.CodexHost
 import com.code2hack.pokerdealer.domain.DeliveryState
 import com.code2hack.pokerdealer.domain.HostConnectionRoute
-import com.code2hack.pokerdealer.domain.InitialCodexHosts
 import com.code2hack.pokerdealer.domain.ThreadStartSelection
 import com.code2hack.pokerdealer.domain.ThreadWorkState
 import com.code2hack.pokerdealer.domain.TurnOutcome
@@ -838,7 +837,7 @@ data class M1RunResult(
 )
 
 class M1OneHostDealerSlice(
-    private val host: CodexHost = InitialCodexHosts.u4090,
+    private val host: CodexHost,
     private val dialer: HostTcpDialer,
     private val sshClient: HostSshClient,
     private val daemon: CodexDaemonLifecycle = UpstreamCodexDaemon(),
