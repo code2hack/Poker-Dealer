@@ -1,0 +1,18 @@
+{
+  "id": 3,
+  "result": {
+    "data": [
+      {
+        "id": "thr_shared",
+        "name": "Named thread",
+        "preview": "First page",
+        "cwd": "/workspace/one",
+        "source": "cli",
+        "status": {"type": "active", "unknownStatusField": 1},
+        "updatedAt": 1784600300,
+        "unknownThreadField": {"future": true}
+      }
+    ],
+    "nextCursor": "opaque-cursor-1"
+  }
+}

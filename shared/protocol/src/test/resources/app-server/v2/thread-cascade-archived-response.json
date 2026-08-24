@@ -1,0 +1,15 @@
+{
+  "id": 4,
+  "result": {
+    "data": [
+      {
+        "id": "thr_archived_child",
+        "parentThreadId": "thr_root",
+        "source": "subAgent",
+        "status": {"type": "notLoaded"},
+        "ephemeral": false
+      }
+    ],
+    "nextCursor": null
+  }
+}

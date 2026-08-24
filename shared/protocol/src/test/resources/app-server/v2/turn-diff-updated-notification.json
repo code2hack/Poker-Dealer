@@ -1,0 +1,8 @@
+{
+  "method": "turn/diff/updated",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "diff": "diff --git a/shared/domain/Card.kt b/shared/domain/Card.kt\n@@ -1 +1 @@\n-old\n+newer\n"
+  }
+}

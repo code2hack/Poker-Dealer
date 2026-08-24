@@ -1,0 +1,13 @@
+{
+  "id": "approval-b",
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "shared-item",
+    "approvalId": "callback-b",
+    "command": "printf b",
+    "cwd": "/work/repo",
+    "startedAtMs": 1003
+  }
+}

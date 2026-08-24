@@ -1,0 +1,26 @@
+{
+  "id": 3,
+  "result": {
+    "approvalPolicy": "never",
+    "approvalsReviewer": "user",
+    "cwd": "/home/code2hack/Projects/rokid/Poker-Dealer",
+    "sandbox": { "type": "dangerFullAccess" },
+    "model": "gpt-5",
+    "modelProvider": "openai",
+    "serviceTier": null,
+    "thread": {
+      "id": "thr_u4090_m1",
+      "cliVersion": "0.145.0",
+      "createdAt": 1784600000,
+      "cwd": "/home/code2hack/Projects/rokid/Poker-Dealer",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "Existing prompt",
+      "sessionId": "session_u4090",
+      "source": "cli",
+      "status": { "type": "idle" },
+      "turns": [],
+      "updatedAt": 1784600300
+    }
+  }
+}

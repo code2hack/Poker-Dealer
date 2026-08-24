@@ -1,0 +1,7 @@
+{
+  "id": 7,
+  "method": "thread/delete",
+  "params": {
+    "threadId": "thr_root"
+  }
+}

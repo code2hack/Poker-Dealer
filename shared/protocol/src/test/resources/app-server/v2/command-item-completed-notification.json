@@ -1,0 +1,20 @@
+{
+  "method": "item/completed",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "completedAtMs": 1785283201000,
+    "item": {
+      "id": "cmd_1",
+      "type": "commandExecution",
+      "command": "printf 'one\\ntwo\\n'",
+      "cwd": "/work/poker-dealer",
+      "status": "completed",
+      "commandActions": [],
+      "aggregatedOutput": "one\ntwo\n",
+      "exitCode": 0,
+      "durationMs": 12,
+      "futureOptionalField": "ignored"
+    }
+  }
+}

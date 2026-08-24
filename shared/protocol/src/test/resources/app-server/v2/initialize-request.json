@@ -1,0 +1,13 @@
+{
+  "method": "initialize",
+  "params": {
+    "clientInfo": {
+      "name": "poker-dealer",
+      "title": "Poker-Dealer",
+      "version": "0.1.0-m1"
+    },
+    "capabilities": {
+      "experimentalApi": false
+    }
+  }
+}

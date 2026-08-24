@@ -1,0 +1,7 @@
+{
+  "method": "thread/name/set",
+  "params": {
+    "threadId": "thr_source",
+    "name": "Shared name"
+  }
+}

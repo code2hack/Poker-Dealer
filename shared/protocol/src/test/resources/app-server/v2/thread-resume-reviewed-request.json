@@ -1,0 +1,12 @@
+{
+  "method": "thread/resume",
+  "params": {
+    "threadId": "thr_loaded",
+    "cwd": "/work/repo",
+    "modelProvider": "custom-id",
+    "model": "exact-wire-model",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user"
+  }
+}

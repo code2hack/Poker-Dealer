@@ -1,0 +1,18 @@
+{
+  "id": 42,
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thr-2",
+    "turnId": "turn-2",
+    "itemId": "item-2",
+    "questions": [
+      {
+        "id": "name",
+        "header": "Name",
+        "question": "What name should be used?",
+        "options": null
+      }
+    ],
+    "autoResolutionMs": null
+  }
+}

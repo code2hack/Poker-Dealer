@@ -1,0 +1,14 @@
+{
+  "method": "turn/start",
+  "params": {
+    "threadId": "thr_photo",
+    "clientUserMessageId": "client-photo-start",
+    "input": [
+      { "type": "text", "text": "before" },
+      { "type": "image", "image_url": "data:image/jpeg;base64,AQID", "detail": "original" },
+      { "type": "text", "text": "between" },
+      { "type": "image", "image_url": "data:image/png;base64,BAUG", "detail": "original" },
+      { "type": "text", "text": "after" }
+    ]
+  }
+}

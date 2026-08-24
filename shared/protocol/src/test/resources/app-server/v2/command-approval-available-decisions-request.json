@@ -1,0 +1,15 @@
+{
+  "id": "approval-1",
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "item-1",
+    "approvalId": null,
+    "command": "git status --short",
+    "cwd": "/work/repo",
+    "startedAtMs": 1000,
+    "availableDecisions": ["accept", "decline"],
+    "proposedExecpolicyAmendment": ["git", "status"]
+  }
+}

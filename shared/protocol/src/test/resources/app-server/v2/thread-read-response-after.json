@@ -1,0 +1,62 @@
+{
+  "id": 6,
+  "result": {
+    "thread": {
+      "id": "thr_u4090_m1",
+      "cliVersion": "0.145.0",
+      "createdAt": 1784600000,
+      "cwd": "/home/code2hack/Projects/rokid/Poker-Dealer",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "Existing prompt",
+      "sessionId": "session_u4090",
+      "source": "cli",
+      "status": { "type": "idle" },
+      "turns": [
+        {
+          "id": "turn_existing",
+          "startedAt": 1784600001,
+          "completedAt": 1784600020,
+          "status": "completed",
+          "items": [
+            {
+              "id": "item_user_existing",
+              "type": "userMessage",
+              "clientId": "existing-client",
+              "content": [
+                { "type": "text", "text": "Existing prompt" }
+              ]
+            },
+            {
+              "id": "item_agent_existing",
+              "type": "agentMessage",
+              "text": "Existing answer"
+            }
+          ]
+        },
+        {
+          "id": "turn_new",
+          "startedAt": 1784600400,
+          "completedAt": 1784600420,
+          "status": "completed",
+          "items": [
+            {
+              "id": "item_user_new",
+              "type": "userMessage",
+              "clientId": "dealer-client-u4090-m1",
+              "content": [
+                { "type": "text", "text": "Dealer M1 proof from u4090" }
+              ]
+            },
+            {
+              "id": "item_agent_stream",
+              "type": "agentMessage",
+              "text": "streamed answer"
+            }
+          ]
+        }
+      ],
+      "updatedAt": 1784600420
+    }
+  }
+}

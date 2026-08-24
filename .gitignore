@@ -1,0 +1,13 @@
+.gradle/
+**/build/
+.idea/
+*.iml
+local.properties
+rokid.properties
+.local/rokid/
+*.jks
+*.keystore
+bridge/target/
+.DS_Store
+.toolchains/
+native/embedded-tailnet/build/

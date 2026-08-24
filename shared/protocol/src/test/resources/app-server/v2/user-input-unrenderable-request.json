@@ -1,0 +1,21 @@
+{
+  "id": "unrenderable-question",
+  "method": "item/tool/requestUserInput",
+  "params": {
+    "threadId": "thr-4",
+    "turnId": "turn-4",
+    "itemId": "item-4",
+    "questions": [
+      {
+        "id": "choice",
+        "header": "Choice",
+        "question": "Choose one.",
+        "options": [
+          {
+            "description": "This option has no label."
+          }
+        ]
+      }
+    ]
+  }
+}

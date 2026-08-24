@@ -1,0 +1,7 @@
+{
+  "method": "turn/interrupt",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "turnId": "turn_active"
+  }
+}

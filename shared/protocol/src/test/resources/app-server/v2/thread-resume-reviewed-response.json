@@ -1,0 +1,19 @@
+{
+  "result": {
+    "thread": {
+      "id": "thr_loaded",
+      "preview": "Existing prompt",
+      "cwd": "/work/repo",
+      "status": { "type": "idle" },
+      "source": "cli",
+      "turns": []
+    },
+    "model": "exact-wire-model",
+    "modelProvider": "custom-id",
+    "cwd": "/work/repo",
+    "approvalPolicy": "on-request",
+    "approvalsReviewer": "user",
+    "sandbox": { "type": "workspaceWrite" },
+    "reasoningEffort": "medium"
+  }
+}

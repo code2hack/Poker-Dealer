@@ -1,0 +1,11 @@
+{
+  "id": 6,
+  "result": {
+    "thread": {
+      "id": "thr_root",
+      "cwd": "/workspace/root",
+      "status": {"type": "notLoaded"},
+      "ephemeral": false
+    }
+  }
+}

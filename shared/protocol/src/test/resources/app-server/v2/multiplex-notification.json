@@ -1,0 +1,8 @@
+{
+  "method": "item/agentMessage/delta",
+  "params": {
+    "threadId": "thread-1",
+    "delta": "hello"
+  },
+  "futureField": true
+}

@@ -1,0 +1,13 @@
+{
+  "method": "turn/start",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "clientUserMessageId": "dealer-client-u4090-m1",
+    "input": [
+      {
+        "type": "text",
+        "text": "Dealer M1 proof from u4090"
+      }
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "method": "thread/list",
+  "params": {
+    "limit": 100,
+    "archived": false,
+    "sourceKinds": ["cli", "vscode", "appServer"]
+  }
+}

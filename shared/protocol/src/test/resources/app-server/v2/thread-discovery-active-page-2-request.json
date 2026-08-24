@@ -1,0 +1,9 @@
+{
+  "method": "thread/list",
+  "params": {
+    "limit": 100,
+    "archived": false,
+    "cursor": "opaque-cursor-1",
+    "sourceKinds": ["cli", "vscode", "appServer"]
+  }
+}

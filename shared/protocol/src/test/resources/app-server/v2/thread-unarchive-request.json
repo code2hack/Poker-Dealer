@@ -1,0 +1,7 @@
+{
+  "id": 6,
+  "method": "thread/unarchive",
+  "params": {
+    "threadId": "thr_root"
+  }
+}

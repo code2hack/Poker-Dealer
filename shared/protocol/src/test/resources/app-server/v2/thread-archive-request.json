@@ -1,0 +1,7 @@
+{
+  "id": 5,
+  "method": "thread/archive",
+  "params": {
+    "threadId": "thr_root"
+  }
+}

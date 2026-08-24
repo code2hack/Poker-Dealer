@@ -1,0 +1,14 @@
+{
+  "method": "turn/steer",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "expectedTurnId": "turn_active",
+    "clientUserMessageId": "dealer-steer-1",
+    "input": [
+      {
+        "type": "text",
+        "text": "Use the smaller fix"
+      }
+    ]
+  }
+}

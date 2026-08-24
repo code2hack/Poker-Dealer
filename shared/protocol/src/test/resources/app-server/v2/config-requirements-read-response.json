@@ -1,0 +1,14 @@
+{
+  "result": {
+    "requirements": {
+      "allowedSandboxModes": [
+        "workspace-write",
+        "read-only"
+      ],
+      "allowedApprovalPolicies": [
+        "on-request",
+        "never"
+      ]
+    }
+  }
+}

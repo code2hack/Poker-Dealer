@@ -1,0 +1,7 @@
+{
+  "method": "thread/list",
+  "params": {
+    "limit": 20,
+    "archived": false
+  }
+}

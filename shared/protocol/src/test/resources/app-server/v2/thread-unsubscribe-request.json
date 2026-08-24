@@ -1,0 +1,6 @@
+{
+  "method": "thread/unsubscribe",
+  "params": {
+    "threadId": "thr_u4090_m1"
+  }
+}

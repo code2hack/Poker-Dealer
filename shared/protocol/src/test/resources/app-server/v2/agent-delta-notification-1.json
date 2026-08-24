@@ -1,0 +1,9 @@
+{
+  "method": "item/agentMessage/delta",
+  "params": {
+    "threadId": "thr_u4090_m1",
+    "turnId": "turn_new",
+    "itemId": "item_agent_stream",
+    "delta": "streamed "
+  }
+}

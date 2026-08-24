@@ -1,0 +1,15 @@
+{
+  "id": 3,
+  "result": {
+    "data": [
+      {
+        "id": "thr_grandchild",
+        "parentThreadId": "thr_child",
+        "source": "subAgent",
+        "status": {"type": "idle"},
+        "ephemeral": false
+      }
+    ],
+    "nextCursor": null
+  }
+}

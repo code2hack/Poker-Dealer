@@ -1,0 +1,18 @@
+{
+  "method": "item/started",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "startedAtMs": 1785283200000,
+    "item": {
+      "id": "cmd_1",
+      "type": "commandExecution",
+      "command": "printf 'one\\ntwo\\n'",
+      "cwd": "/work/poker-dealer",
+      "status": "inProgress",
+      "commandActions": [],
+      "aggregatedOutput": null,
+      "futureOptionalField": {"keptByWireAdapter": true}
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "method": "item/fileChange/outputDelta",
+  "params": {
+    "threadId": "thr_cards",
+    "turnId": "turn_cards",
+    "itemId": "file_1",
+    "delta": "streamed patch fragment\n"
+  }
+}

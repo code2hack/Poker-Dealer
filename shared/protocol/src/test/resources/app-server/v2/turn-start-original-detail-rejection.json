@@ -1,0 +1,7 @@
+{
+  "id": 5,
+  "error": {
+    "code": -32602,
+    "message": "detail original is not supported by this host"
+  }
+}

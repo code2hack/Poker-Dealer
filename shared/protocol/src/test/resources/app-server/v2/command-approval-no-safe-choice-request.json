@@ -1,0 +1,22 @@
+{
+  "id": "approval-no-safe-choice",
+  "method": "item/commandExecution/requestApproval",
+  "params": {
+    "threadId": "thr-1",
+    "turnId": "turn-1",
+    "itemId": "item-no-safe-choice",
+    "command": "curl example.test",
+    "cwd": "/work/repo",
+    "startedAtMs": 1006,
+    "availableDecisions": [
+      {
+        "applyNetworkPolicyAmendment": {
+          "network_policy_amendment": {
+            "host": "example.test",
+            "action": "allow"
+          }
+        }
+      }
+    ]
+  }
+}

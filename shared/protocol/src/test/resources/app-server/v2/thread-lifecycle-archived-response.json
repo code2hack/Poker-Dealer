@@ -1,0 +1,14 @@
+{
+  "id": 2,
+  "result": {
+    "data": [
+      {
+        "id": "thr_subagent",
+        "source": "subAgent",
+        "status": {"type": "notLoaded"},
+        "ephemeral": false
+      }
+    ],
+    "nextCursor": null
+  }
+}

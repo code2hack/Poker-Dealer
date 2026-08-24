@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "result": {
+    "thread": {
+      "id": "thr_root",
+      "name": "Root thread",
+      "preview": "Root preview",
+      "cwd": "/workspace/root",
+      "status": {"type": "notLoaded"},
+      "ephemeral": false
+    }
+  }
+}

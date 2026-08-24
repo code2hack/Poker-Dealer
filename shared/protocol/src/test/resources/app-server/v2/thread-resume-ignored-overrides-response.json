@@ -1,0 +1,19 @@
+{
+  "result": {
+    "thread": {
+      "id": "thr_loaded",
+      "preview": "Existing prompt",
+      "cwd": "/work/repo",
+      "status": { "type": "idle" },
+      "source": "cli",
+      "turns": []
+    },
+    "model": "host-model",
+    "modelProvider": "host-default",
+    "cwd": "/work/repo",
+    "approvalPolicy": "never",
+    "approvalsReviewer": "auto_review",
+    "sandbox": { "type": "dangerFullAccess" },
+    "reasoningEffort": "medium"
+  }
+}
