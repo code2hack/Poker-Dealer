@@ -1,56 +1,121 @@
 # Dealer ↔ Codex Retained Contract
 
-**Status:** Derived retained contract in progress during Legacy extraction
+**Status:** Accepted retained baseline after Legacy extraction
+**Baseline date:** 2026-08-25
+**Donor:** `code2hack/Poker-Dealer-Legacy@0a12901f58abf7cf7324bd92e876f4423f1cbeaa`
 
-This document is intentionally narrower than the final Dealer product specification. It records the retained Dealer ↔ Codex contract that the successor is extracting from the pinned Legacy implementation and executable tests.
+This document is intentionally narrower than the final Dealer product specification. It records the Dealer ↔ Codex contract retained and tested by the successor extraction. Dealer integrates directly with Codex app-server; there is no generic backend/runtime adapter.
 
-## Scope
+## 1. Scope
 
-Dealer integrates directly with Codex app-server. There is no generic backend adapter.
-
-Retained responsibilities include:
+Retained responsibilities are:
 
 - route-neutral Codex-host connectivity;
 - SSH and `codex app-server proxy` lifecycle;
 - one initialized app-server session per enabled host;
-- thread discovery, read, start, resume, fork and lifecycle actions supported by the retained implementation;
-- Send, Steer and Interrupt;
+- generic configured Codex-host metadata rather than hard-coded personal machines;
+- thread discovery, read, start, resume, fork and supported lifecycle actions;
+- Send (`turn/start`), Steer (`turn/steer`) and Interrupt;
 - structured command approval, file approval, and structured user-input requests;
 - structured card/projection state;
-- thread attachments and work-state projection;
+- thread attachments and the `BUSY | ATTENTION_REQUIRED | READY` work-state projection;
 - durable drafts and retained local projection;
-- exact request/operation fencing;
-- authoritative reconciliation and no blind replay.
+- exact request/operation/generation fencing;
+- authoritative reconciliation and no blind replay;
+- optional embedded userspace-tailnet routing as Dealer ↔ Codex connectivity.
 
-Dealer ↔ Poker transport, Poker interaction/UI, CXR implementation, and Dealer UI/UX are outside this retained contract.
+Dealer ↔ Poker transport, Poker interaction/UI, concrete CXR implementation, final Dealer UI/UX, ASR, Morse and final Photo behavior are outside this retained contract.
 
-## Retained correctness invariants
+## 2. Authority
 
-1. Durable thread identity is `(hostId, threadId)`.
-2. App-server connection identity is disposable and must not replace durable identity.
-3. A connection is initialized exactly once before normal app-server operations.
-4. Unknown optional protocol fields and unknown notifications are tolerated where safe.
-5. Unknown or unrenderable server-initiated blocking requests fail closed rather than hanging Codex indefinitely.
-6. Structured requests remain structured through parsing, projection, and resolution.
-7. `BUSY | ATTENTION_REQUIRED | READY` remains the work-state projection; host availability is separate.
-8. Send, Steer, Interrupt, approval responses, and structured answers are target-fenced.
-9. Request resolution advances monotonically to `RESOLVED` or `UNKNOWN`.
-10. Any action whose acceptance is unknown is reconciled from authoritative app-server state and is not blindly replayed.
-11. Reconnect/replacement initializes a new connection and reconciles attachments, thread state, requests, and retained projections.
-12. A matching authoritative user-message identity updates the pending local projection rather than creating a duplicate.
-13. Durable drafts survive disconnect/restart and clear only when the exact outbound action is accepted.
-14. Dealer ↔ Codex must work with no Poker transport connected.
+Codex app-server is authoritative for thread identity/lifecycle, turns/items, accepted input, retained/live history, command/file state, and server-request resolution when reported.
 
-## Evidence source
+Dealer is authoritative for configured host connection intent, local attachments/control claims, durable drafts, retained projection/cache, local uncertainty state, and the semantic state projected toward Poker.
 
-Initial behavior is derived from:
+A durable thread locator is `(hostId, threadId)`. SSH/WebSocket/app-server connections are disposable and never replace that identity.
 
-- donor repository `code2hack/Poker-Dealer-Legacy`;
-- donor commit `0a12901f58abf7cf7324bd92e876f4423f1cbeaa`;
-- retained `shared/domain` tests;
-- retained `shared/protocol/appserver` and `shared/protocol/host` tests;
-- retained app-server JSON fixtures;
-- retained Dealer persistence/recovery tests;
-- narrow successor smoke evidence recorded by the extraction closeout.
+## 3. Retained correctness invariants
 
-The extraction closeout should replace this “in progress” status with a precise tested baseline and note any deliberate deviations.
+1. A replacement app-server connection is initialized before normal requests.
+2. Unknown optional fields and unknown notifications are tolerated where safe.
+3. Unknown or unrenderable blocking server requests fail closed rather than leaving Codex waiting indefinitely.
+4. Structured command/file/user-input requests remain structured through parsing, Dealer state, review and response.
+5. `BUSY | ATTENTION_REQUIRED | READY` is the only known work-state projection; unavailable/unknown authoritative evidence stays unknown rather than inventing another work state.
+6. Host availability is orthogonal to thread work state.
+7. Send, Steer, Interrupt and server-request responses are fenced to exact targets and current authority.
+8. Steer remains `turn/steer`; it is not emulated as Interrupt + Send.
+9. Interrupt is bound to the exact currently confirmed active turn.
+10. Request resolution is monotonic: `PENDING → RESPONDING → RESOLVED`, or `UNKNOWN` when acceptance cannot be established.
+11. Any mutation whose acceptance is unknown is reconciled from authoritative app-server state and is never blindly replayed.
+12. Reconnect/replacement increments the local app-server generation, invalidates generation-bound wire requests, rereads/rejoins authoritative thread state, and reconciles retained local state.
+13. A matching authoritative `clientUserMessageId` updates/clears the existing pending local operation instead of fabricating duplicate user input.
+14. Durable drafts survive disconnect/restart and clear only after acceptance of the exact outbound action is known.
+15. Pending Send/Steer/Interrupt locks survive process/storage recreation and remain uncertain until reconciliation.
+16. Dealer ↔ Codex functions with no Poker connection, no CXR session and no Legacy Poker transport.
+
+## 4. Host connectivity contract
+
+A configured host supplies project-owned `CodexHost` metadata and route endpoints. Route order remains a property of the host; route providers report configured/unavailable/unsupported/disabled capability and failures remain route-labelled.
+
+The retained route set may include:
+
+- trusted/direct LAN SSH;
+- Dealer's embedded userspace tailnet SSH route;
+- external tailnet-address SSH fallback;
+- Android-local loopback SSH for a compatible local distribution.
+
+SSH host-key verification remains mandatory. Private SSH key material and `known_hosts` data are encrypted at rest by the Android profile store.
+
+Embedded tailnet is an optional Dealer-owned route. It does not use Android `VpnService`, does not become a Dealer ↔ Poker transport, and remains behind `HostTcpDialer`.
+
+## 5. Persistence/recovery contract
+
+Dealer persists:
+
+- attached host-qualified threads;
+- ordered composer drafts and next-turn reasoning selection;
+- uncertain pending Send/Steer/Interrupt operations;
+- cached retained thread projection;
+- structured command/file/user-input request uncertainty;
+- configured host connection intent/profile credentials.
+
+Legacy Poker binding-map persistence is intentionally not part of successor recovery.
+
+Derived cached projection may be discarded when corrupt. Stored uncertainty must be preserved/fail closed rather than silently discarded.
+
+## 6. Poker independence boundary
+
+Dealer core publishes only project-owned semantic state through `PokerProjectionPort`. The optional `PokerTransport` boundary sits below it. The default port is a no-op, and the Dealer core must remain fully operable with that default.
+
+No retained Dealer ↔ Codex package imports:
+
+- CXR-L types;
+- CXR-M types;
+- CXR-S types;
+- Rokid SDK concrete classes;
+- Legacy Poker NSD/TCP/PAKE/pinned-mTLS transport.
+
+Concrete CXR remains deferred to `SPEC/cxr.md` and `SPEC/decisions/cxr-mobile-path.md`; CXR-L `CUSTOMAPP` is the first future qualification candidate.
+
+## 7. Extraction evidence
+
+The tested successor baseline includes:
+
+- all retained shared domain tests;
+- retained app-server and host tests;
+- exactly 113/113 byte-identical app-server JSON fixtures;
+- Dealer mutation tests for accepted/rejected/unknown behavior;
+- a replacement-session integration test proving a connection loss after `turn/start` does not replay the send and authoritative reread reconciles the exact `clientUserMessageId`;
+- structured command-approval and structured user-input integration tests through the successor Dealer coordinator;
+- transport-neutral Poker projection tests;
+- native embedded-tailnet Go tests/build and debug-APK packaging verification;
+- debug APK and Android-test APK compilation;
+- Android lint.
+
+The full verification ledger and per-path provenance are in `docs/provenance/legacy-extraction.md`.
+
+## 8. Live-evidence limitation
+
+No new real-device smoke is claimed by this closeout. At verification time Spark had no attached ADB device and no installed Android emulator/AVD. The successor debug and Android-test APKs build successfully, but fresh hardware service launch / live Dealer ↔ Codex smoke was not re-executed in this environment.
+
+Historical Legacy hardware evidence remains evidence only and is not relabelled as a successor run.

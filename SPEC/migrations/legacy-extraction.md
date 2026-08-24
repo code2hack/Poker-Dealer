@@ -1,7 +1,7 @@
 # Legacy Extraction Plan
 
 **Proposed path:** `SPEC/migrations/legacy-extraction.md`  
-**Status:** Normative — accepted for execution on 2026-08-24  
+**Status:** Repository extraction completed on 2026-08-25; no new real-device smoke claimed
 **Successor repository:** `code2hack/Poker-Dealer`  
 **Donor repository:** `code2hack/Poker-Dealer-Legacy`  
 **Pinned donor commit:** `0a12901f58abf7cf7324bd92e876f4423f1cbeaa`  
@@ -20,7 +20,7 @@ The intended successor architecture is:
 - **Codex app-server** remains the only backend.
 - **Dealer** remains the Android client and authority for Codex connectivity, projections, durable drafts/assets, recovery, and Poker-facing synchronization.
 - **Poker** becomes the Rokid client.
-- **Dealer ↔ Poker** is redesigned around **CXR-M ↔ CXR-S**.
+- **Dealer ↔ Poker** is redesigned around a qualified Rokid CXR path: **CXR-L `CUSTOMAPP` qualifies first**, with **CXR-M/CXR-S** as fallback/alternative.
 - Poker interaction/UI is substantially redesigned.
 - Dealer UI/UX is substantially redesigned after the CXR/Poker contracts stabilize.
 - No generalized agent-runtime adapter layer is required.
@@ -73,8 +73,8 @@ Preferred terms:
 | Rokid client | generic “glasses client” where CXR/Rokid specificity matters |
 | Codex app-server | Spark/u4090 as product concepts |
 | Codex host | a named current workstation unless evidence requires it |
-| CXR-M | phone-device nickname |
-| CXR-S | glasses-device nickname |
+| CXR-L | first Dealer-side Rokid transport candidate |
+| CXR-M/CXR-S | fallback/alternative Rokid transport candidate |
 
 Specific hardware names may remain in:
 
@@ -402,7 +402,7 @@ Do not redesign Codex orchestration and CXR integration simultaneously.
 
 First make the retained Dealer core compile and pass tests with a fake/no-op/loopback Poker-facing port.
 
-Only then begin CXR-M integration.
+Only then begin CXR qualification/integration, with CXR-L `CUSTOMAPP` as the first candidate.
 
 ---
 
@@ -455,7 +455,7 @@ CXR replaces communication/bootstrap machinery, not state correctness.
 
 Do not transplant `apps/poker` wholesale.
 
-The successor Poker is a **Rokid client using CXR-S** and a redesigned interaction model.
+The successor Poker is a **Rokid client using the later selected qualified Rokid CXR integration** and a redesigned interaction model.
 
 Legacy Poker production code should therefore be classified mostly as:
 
@@ -484,7 +484,7 @@ During extraction:
 Dealer UI/UX receives a dedicated Open Design phase after:
 
 1. retained Dealer ↔ Codex core is extracted;
-2. CXR-M/S transport contract is known;
+2. the selected CXR transport contract is known after CXR-L-first qualification;
 3. Poker interaction and projection contracts are stable enough to expose the right Dealer controls.
 
 ---
@@ -561,7 +561,7 @@ Create just enough normative authority to execute extraction safely.
    - Codex-only backend decision;
    - Dealer = Android client;
    - Poker = Rokid client;
-   - CXR-M/S redesign direction;
+   - Rokid CXR redesign direction with CXR-L-first qualification;
    - authority hierarchy;
    - distributed-state invariants;
    - SPEC hierarchy/index;
@@ -820,8 +820,8 @@ Allowed:
 
 Not yet required:
 
-- real CXR-M;
-- real CXR-S;
+- real CXR-L;
+- real CXR-M/CXR-S fallback;
 - pairing/security decision;
 - reconnect qualification;
 - binary transfer qualification.
@@ -1130,49 +1130,49 @@ Legacy extraction is complete only when all of the following are true:
 
 ### Repository / provenance
 
-- [ ] Legacy donor commit is pinned.
-- [ ] Every imported slice has provenance.
-- [ ] Import and semantic-refactor commits are distinguishable.
-- [ ] The successor builds independently of the Legacy repository.
+- [x] Legacy donor commit is pinned.
+- [x] Every imported slice has provenance.
+- [x] Import and semantic-refactor commits are distinguishable.
+- [x] The successor builds independently of the Legacy repository.
 
 ### Backend
 
-- [ ] Codex app-server remains the only backend.
-- [ ] No general agent adapter exists.
-- [ ] Core app-server tests and fixtures are imported and green.
-- [ ] Thread discovery/history/resume operate.
-- [ ] Send operates.
-- [ ] Steer operates where app-server permits it.
-- [ ] Interrupt operates.
-- [ ] Supported approvals/questions retain structured semantics.
-- [ ] Unknown outcomes remain reconciled without blind replay.
+- [x] Codex app-server remains the only backend.
+- [x] No general agent adapter exists.
+- [x] Core app-server tests and fixtures are imported and green.
+- [x] Thread discovery/history/resume operate.
+- [x] Send operates.
+- [x] Steer operates where app-server permits it.
+- [x] Interrupt operates.
+- [x] Supported approvals/questions retain structured semantics.
+- [x] Unknown outcomes remain reconciled without blind replay.
 
 ### Dealer
 
-- [ ] Dealer runs as an Android client with Poker disconnected.
-- [ ] Dealer owns durable attachments/drafts/projection as specified.
-- [ ] Codex connectivity/recovery survives the extraction.
-- [ ] Old Poker transport is not required for Dealer startup or Codex use.
+- [x] Dealer builds as an Android client whose retained core runs with the no-op Poker boundary; no Poker/CXR dependency is required. A fresh physical-device launch was not re-executed because no ADB target/emulator was available at closeout.
+- [x] Dealer owns durable attachments/drafts/projection as specified.
+- [x] Codex connectivity/recovery survives the extraction.
+- [x] Old Poker transport is not required for Dealer startup or Codex use.
 
 ### Dealer ↔ Poker boundary
 
-- [ ] A project-owned transport seam exists.
-- [ ] Dealer core is independent of CXR concrete SDK types.
-- [ ] Old NSD/TCP/PAKE/mTLS is absent from the active successor production path.
-- [ ] CXR implementation is still free to be qualified/designed independently.
+- [x] A project-owned transport seam exists.
+- [x] Dealer core is independent of CXR concrete SDK types.
+- [x] Old NSD/TCP/PAKE/mTLS is absent from the active successor production path.
+- [x] CXR implementation is still free to be qualified/designed independently.
 
 ### Poker/UI
 
-- [ ] Legacy Poker production UI is not treated as successor authority.
-- [ ] Dealer UI redesign remains unblocked by Legacy screen structure.
-- [ ] Specific hardware names appear only where evidence/qualification requires them.
+- [x] Legacy Poker production UI is not treated as successor authority.
+- [x] Dealer UI redesign remains unblocked by Legacy screen structure.
+- [x] Specific hardware names appear only where evidence/qualification requires them.
 
 ### Documentation
 
-- [ ] Root `SPEC.md` describes the successor constitution.
-- [ ] `SPEC/migrations/legacy-extraction.md` is accepted.
-- [ ] `SPEC/dealer-codex.md` can now be completed from retained implementation/evidence.
-- [ ] Deferred CXR/Poker/Dealer-UI specs are clearly identified.
+- [x] Root `SPEC.md` describes the successor constitution.
+- [x] `SPEC/migrations/legacy-extraction.md` is accepted and closed for repository extraction.
+- [x] `SPEC/dealer-codex.md` is completed from retained implementation/evidence.
+- [x] Deferred CXR/Poker/Dealer-UI specs are clearly identified.
 
 ---
 
@@ -1188,8 +1188,8 @@ Write `SPEC/dealer-codex.md` from the extracted implementation, tests, fixtures,
 
 Write/resolve `SPEC/cxr.md`:
 
-- CXR-M lifecycle;
-- CXR-S lifecycle;
+- CXR-L `CUSTOMAPP` lifecycle and data plane first;
+- CXR-M/CXR-S lifecycle only if the fallback is required;
 - connection model;
 - payload model;
 - ordering/loss/duplicate behavior;
@@ -1233,4 +1233,4 @@ Only after each spec slice is accepted should `to-tickets` convert it into imple
 
 The extraction is successful when the successor reaches this state:
 
-> **The validated Dealer ↔ Codex app-server engine has been transferred with its tests, fixtures, state/recovery guarantees, and Android-client ownership intact; the Legacy Poker transport and Legacy UI architecture have not been allowed to define the successor; and the codebase now exposes a clean boundary on which CXR-M/CXR-S, the new Poker Rokid client, and the redesigned Dealer UI/UX can be built independently.**
+> **The validated Dealer ↔ Codex app-server engine has been transferred with its tests, fixtures, state/recovery guarantees, and Android-client ownership intact; the Legacy Poker transport and Legacy UI architecture have not been allowed to define the successor; and the codebase now exposes a transport-neutral boundary on which CXR-L can be qualified first, CXR-M/CXR-S can be evaluated only if needed, and the new Poker Rokid client plus redesigned Dealer UI/UX can be built independently.**
