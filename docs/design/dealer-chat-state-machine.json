@@ -1,0 +1,32 @@
+{
+  "status": "pre-spec-design-input",
+  "visualBaseline": "user-supplied ChatGPT Remote Android screenshots, 2026-08-25",
+  "states": {
+    "view": "timeline with collapsed composer",
+    "compose": "focused expanded composer with system IME",
+    "plus": "upload, plan mode, plugins popover",
+    "permissions": "permission/reviewer UI; exact protocol mapping deferred to SPEC",
+    "intelligence": "reasoning effort with nested model and speed selectors",
+    "voice": "voice capture/finalize composer",
+    "status": "remote-session status panel",
+    "more": "thread overflow menu",
+    "resuming": "protocol-driven notLoaded -> loaded/resumed state",
+    "reconciling": "Dealer lacks fresh authoritative state; unsafe mutations disabled",
+    "systemError": "protocol-driven systemError presentation"
+  },
+  "semanticSubmission": {
+    "knownIdle": "turn/start",
+    "knownActive": "turn/steer using exact active-turn fencing where applicable",
+    "stopActive": "turn/interrupt bound to exact confirmed turn",
+    "unknownOrReconciling": "disable unsafe mutation and preserve draft"
+  },
+  "mvpConfig": {
+    "namedConfigProfilesExposed": false,
+    "dealerThreadPresets": false,
+    "inheritCodexDefaultConfig": true,
+    "personalityOrdinaryControl": false,
+    "developerInstructionsOrdinaryControl": false
+  },
+  "workspaceIdentity": "Codex Project",
+  "missingStateDesignAuthority": "current Codex app-server protocol/docs plus accepted Poker-Dealer invariants"
+}

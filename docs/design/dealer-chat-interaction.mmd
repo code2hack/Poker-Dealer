@@ -1,0 +1,38 @@
+stateDiagram-v2
+    [*] --> ChatList
+    ChatList --> Viewing: Tap thread
+    Viewing --> ChatList: Back
+    Viewing --> Focused: Tap composer
+    Viewing --> Status: Tap remote status
+    Viewing --> ThreadMenu: Tap overflow
+
+    Focused --> AddMenu: Tap add
+    Focused --> Permissions: Tap permissions
+    Focused --> Intelligence: Tap model/intelligence
+    Focused --> Voice: Tap microphone
+    Focused --> Viewing: Dismiss keyboard
+    Focused --> StartingTurn: Submit while authoritative idle
+    Focused --> SteeringTurn: Steer while authoritative active
+
+    AddMenu --> Focused: Select or dismiss
+    Permissions --> Focused: Select or dismiss
+    Intelligence --> Focused: Select or dismiss
+    Status --> Viewing: Dismiss
+    ThreadMenu --> Viewing: Select or dismiss
+
+    Voice --> Focused: Stop/finalize or cancel
+    Voice --> StartingTurn: Send while authoritative idle
+    Voice --> SteeringTurn: Steer while authoritative active
+
+    StartingTurn --> Active: turn/start accepted
+    SteeringTurn --> Active: turn/steer accepted + expected turn identity
+    Active --> Focused: turn completed
+    Active --> Interrupting: Stop
+    Interrupting --> Focused: turn/interrupt accepted
+
+    Viewing --> Resuming: status notLoaded / open thread
+    Resuming --> Viewing: authoritative loaded state restored
+    Viewing --> Reconciling: authority lost
+    Focused --> Reconciling: authority lost
+    Reconciling --> Viewing: authoritative state restored
+    Reconciling --> SystemError: authoritative systemError
