@@ -63,10 +63,21 @@ class JschHostSshClient(
                 authentication.passphrase,
             )
         }
+        val pinnedHostKeys = jsch.hostKeyRepository.getHostKey(host.id, null).orEmpty()
+        require(pinnedHostKeys.isNotEmpty()) {
+            "Pinned SSH known_hosts data has no entry for ${host.id}"
+        }
+        val pinnedAlgorithms = pinnedHostKeys
+            .flatMap { pinnedServerHostKeyAlgorithms(it.type, it.marker) }
+            .distinct()
+        require(pinnedAlgorithms.isNotEmpty()) {
+            "Pinned SSH known_hosts data has no supported host-key algorithm for ${host.id}"
+        }
         val session = jsch.getSession(authentication.username, host.id, 22).apply {
             setProxy(DuplexStreamProxy(tcpStream))
             setConfig("StrictHostKeyChecking", "yes")
             setConfig("PreferredAuthentications", "publickey")
+            setConfig("server_host_key", pinnedAlgorithms.joinToString(","))
         }
         try {
             cancellableBlocking(
@@ -80,17 +91,39 @@ class JschHostSshClient(
             JschHostSshSession(session, channelTimeoutMs, commandTimeoutMs, maxCommandOutputBytes)
         } catch (failure: JSchChangedHostKeyException) {
             session.disconnect()
-            throw HostIdentityException("SSH host key changed for ${host.id}", failure)
+            throw HostIdentityException("SSH host key changed for ${host.id}: ${failure.message}", failure)
         } catch (failure: JSchUnknownHostKeyException) {
             session.disconnect()
-            throw HostIdentityException("SSH host key is not pinned for ${host.id}", failure)
+            throw HostIdentityException("SSH host key is not pinned for ${host.id}: ${failure.message}", failure)
         } catch (failure: JSchRevokedHostKeyException) {
             session.disconnect()
-            throw HostIdentityException("SSH host key is revoked for ${host.id}", failure)
+            throw HostIdentityException("SSH host key is revoked for ${host.id}: ${failure.message}", failure)
         } catch (failure: Throwable) {
             session.disconnect()
             throw failure
         }
+    }
+}
+
+internal fun pinnedServerHostKeyAlgorithms(type: String, marker: String?): List<String> {
+    val certificate = marker == "@cert-authority"
+    return when (type) {
+        "ssh-ed25519" -> listOf(
+            if (certificate) "ssh-ed25519-cert-v01@openssh.com" else "ssh-ed25519",
+        )
+        "ssh-ed448" -> listOf(
+            if (certificate) "ssh-ed448-cert-v01@openssh.com" else "ssh-ed448",
+        )
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        -> listOf(if (certificate) "$type-cert-v01@openssh.com" else type)
+        "ssh-rsa" -> if (certificate) {
+            listOf("rsa-sha2-512-cert-v01@openssh.com", "rsa-sha2-256-cert-v01@openssh.com")
+        } else {
+            listOf("rsa-sha2-512", "rsa-sha2-256")
+        }
+        else -> emptyList()
     }
 }
 
