@@ -1,32 +1,190 @@
 {
-  "status": "pre-spec-design-input",
-  "visualBaseline": "user-supplied ChatGPT Remote Android screenshots, 2026-08-25",
-  "states": {
-    "view": "timeline with collapsed composer",
-    "compose": "focused expanded composer with system IME",
-    "plus": "upload, plan mode, plugins popover",
-    "permissions": "permission/reviewer UI; exact protocol mapping deferred to SPEC",
-    "intelligence": "reasoning effort with nested model and speed selectors",
-    "voice": "voice capture/finalize composer",
-    "status": "remote-session status panel",
-    "more": "thread overflow menu",
-    "resuming": "protocol-driven notLoaded -> loaded/resumed state",
-    "reconciling": "Dealer lacks fresh authoritative state; unsafe mutations disabled",
-    "systemError": "protocol-driven systemError presentation"
+  "status": "derived-from-normative-spec",
+  "normativeSource": "SPEC/dealer-ui.md",
+  "protocolEvidence": {
+    "repository": "openai/codex",
+    "commit": "6525b95dae2082ac9fee672b14c2cffdef172bb8"
   },
-  "semanticSubmission": {
-    "knownIdle": "turn/start",
-    "knownActive": "turn/steer using exact active-turn fencing where applicable",
-    "stopActive": "turn/interrupt bound to exact confirmed turn",
-    "unknownOrReconciling": "disable unsafe mutation and preserve draft"
+  "axes": {
+    "threadRuntime": {
+      "authority": "Codex app-server ThreadStatus",
+      "states": {
+        "notLoaded": {
+          "icon": null
+        },
+        "idle": {
+          "icon": null
+        },
+        "active": {
+          "noFlagsIcon": {
+            "symbol": "⏳",
+            "color": "blue"
+          },
+          "flags": {
+            "waitingOnApproval": {
+              "symbol": "?",
+              "color": "yellow"
+            },
+            "waitingOnUserInput": {
+              "symbol": "●",
+              "color": "green"
+            }
+          },
+          "bothFlagsOrder": [
+            "waitingOnApproval",
+            "waitingOnUserInput"
+          ]
+        },
+        "systemError": {
+          "icon": {
+            "symbol": "!",
+            "color": "red"
+          }
+        }
+      },
+      "prohibitedDerivedStates": [
+        "READY",
+        "WORKING",
+        "BUSY",
+        "RUNNING",
+        "ATTENTION_REQUIRED",
+        "UNKNOWN"
+      ],
+      "staleRule": "Hide the runtime icon while Dealer lacks fresh authority; connection state is rendered separately."
+    },
+    "connectionAuthority": {
+      "states": [
+        "fresh",
+        "reconnecting",
+        "reconciling",
+        "hostUnavailable"
+      ],
+      "notThreadStatus": true,
+      "unsafeMutationsEnabledOnlyIn": [
+        "fresh"
+      ]
+    },
+    "activeTurn": {
+      "fields": [
+        "threadId",
+        "turnId",
+        "turnStatus",
+        "turnKind",
+        "canSteer"
+      ],
+      "requiredFor": [
+        "turn/steer",
+        "turn/interrupt"
+      ]
+    },
+    "outboundOperation": {
+      "states": [
+        "none",
+        "startingTurn",
+        "steeringTurn",
+        "interrupting",
+        "unknownAcceptance"
+      ],
+      "rules": {
+        "send": "turn/start",
+        "steer": "turn/steer with exact expectedTurnId",
+        "stop": "turn/interrupt with exact turnId; remain interrupting until authoritative turn/completed",
+        "unknown": "preserve exact draft/action and reconcile; never blindly replay"
+      }
+    },
+    "blockingRequests": {
+      "categories": [
+        "commandApproval",
+        "fileChangeApproval",
+        "permissionEscalation",
+        "mcpElicitation",
+        "toolUserInput"
+      ],
+      "draftEditable": true,
+      "steerEnabled": false,
+      "stopEnabledWhenExactActiveTurnKnown": true,
+      "responseSurface": "structured request card only"
+    },
+    "uiSurface": {
+      "states": [
+        "viewing",
+        "composerFocused",
+        "addPlugins",
+        "permissions",
+        "intelligence",
+        "remoteStatus",
+        "threadOverflow",
+        "voiceCapture"
+      ],
+      "planModeMvp": false,
+      "uploadsMvp": [
+        "image"
+      ],
+      "arbitraryFilesMvp": false,
+      "rawAudioUploadMvp": false
+    },
+    "asrSession": {
+      "owner": "Dealer",
+      "runtime": "local ONNX",
+      "sources": [
+        "Dealer microphone",
+        "Poker audio via future qualified CXR"
+      ],
+      "states": [
+        "idle",
+        "capturingOrReceiving",
+        "finalizing",
+        "recognizing",
+        "reviewableText",
+        "canceled",
+        "error"
+      ],
+      "output": "editable text draft",
+      "autoSend": false,
+      "codexAudioInput": false
+    },
+    "localOrganization": {
+      "chatsMembershipKey": [
+        "hostId",
+        "threadId"
+      ],
+      "independentFrom": [
+        "projectId",
+        "subscription",
+        "loadedState",
+        "archiveState",
+        "PokerAttachment"
+      ]
+    },
+    "pokerAttachment": {
+      "orthogonalToThreadRuntime": true,
+      "cxrUxDeferred": true
+    }
   },
-  "mvpConfig": {
-    "namedConfigProfilesExposed": false,
+  "workspaces": {
+    "identity": "official Codex Project",
+    "fileNavigator": false,
+    "cwdFallbackProject": false,
+    "unsupportedProjectApiBehavior": "show Projects unavailable while Chats and Chat remain usable",
+    "roots": "read-only/selectable Project metadata only",
+    "newThreadCwd": {
+      "oneRoot": "automatic",
+      "multipleRoots": "select from official roots",
+      "zeroRoots": "omit cwd override"
+    }
+  },
+  "mvpSettings": {
+    "modelPersistence": "thread/settings/update",
+    "reasoningPersistence": "thread/settings/update",
+    "speedPersistence": "thread/settings/update serviceTier",
+    "permissionGroups": [
+      "accessProfile",
+      "approvalPolicy",
+      "approvalReviewer"
+    ],
+    "namedProfiles": false,
     "dealerThreadPresets": false,
-    "inheritCodexDefaultConfig": true,
     "personalityOrdinaryControl": false,
     "developerInstructionsOrdinaryControl": false
-  },
-  "workspaceIdentity": "Codex Project",
-  "missingStateDesignAuthority": "current Codex app-server protocol/docs plus accepted Poker-Dealer invariants"
+  }
 }

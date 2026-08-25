@@ -1,38 +1,118 @@
-stateDiagram-v2
-    [*] --> ChatList
-    ChatList --> Viewing: Tap thread
-    Viewing --> ChatList: Back
-    Viewing --> Focused: Tap composer
-    Viewing --> Status: Tap remote status
-    Viewing --> ThreadMenu: Tap overflow
+flowchart TB
+    subgraph UI["Transient UI surface"]
+        U0["Viewing"]
+        U1["Composer focused"]
+        U2["Add / plugins"]
+        U3["Permissions"]
+        U4["Intelligence / model / speed"]
+        U5["Remote status"]
+        U6["Thread overflow"]
+        U7["Voice capture"]
+        U0 -->|tap composer| U1
+        U1 -->|add| U2
+        U1 -->|permissions| U3
+        U1 -->|intelligence| U4
+        U0 -->|status| U5
+        U0 -->|overflow| U6
+        U1 -->|microphone| U7
+        U2 -->|dismiss/select| U1
+        U3 -->|dismiss/accepted update| U1
+        U4 -->|dismiss/accepted update| U1
+        U5 -->|dismiss| U0
+        U6 -->|dismiss/action| U0
+        U7 -->|final transcript| U1
+    end
 
-    Focused --> AddMenu: Tap add
-    Focused --> Permissions: Tap permissions
-    Focused --> Intelligence: Tap model/intelligence
-    Focused --> Voice: Tap microphone
-    Focused --> Viewing: Dismiss keyboard
-    Focused --> StartingTurn: Submit while authoritative idle
-    Focused --> SteeringTurn: Steer while authoritative active
+    subgraph RUNTIME["Official Codex thread runtime"]
+        R0["notLoaded"]
+        R1["idle"]
+        R2["active: no waiting flags"]
+        R3["active + waitingOnApproval"]
+        R4["active + waitingOnUserInput"]
+        R5["active + both waiting flags"]
+        R6["systemError"]
+        R0 -->|thread/resume succeeds| R1
+        R1 -->|turn/started or status changed| R2
+        R2 -->|approval request| R3
+        R2 -->|user-input request| R4
+        R3 -->|user-input also pending| R5
+        R4 -->|approval also pending| R5
+        R3 -->|all blocking requests resolved| R2
+        R4 -->|all blocking requests resolved| R2
+        R5 -->|approval resolved only| R4
+        R5 -->|user input resolved only| R3
+        R2 -->|turn/completed| R1
+        R3 -->|turn/completed| R1
+        R4 -->|turn/completed| R1
+        R5 -->|turn/completed| R1
+        R1 -->|unloaded| R0
+        R2 -->|system error| R6
+        R3 -->|system error| R6
+        R4 -->|system error| R6
+        R5 -->|system error| R6
+    end
 
-    AddMenu --> Focused: Select or dismiss
-    Permissions --> Focused: Select or dismiss
-    Intelligence --> Focused: Select or dismiss
-    Status --> Viewing: Dismiss
-    ThreadMenu --> Viewing: Select or dismiss
+    subgraph AUTH["Dealer connection / authority"]
+        A0["Fresh authority"]
+        A1["Reconnecting"]
+        A2["Reconciling"]
+        A3["Host unavailable"]
+        A0 -->|connection lost| A1
+        A1 -->|replacement initialized| A2
+        A1 -->|route failure| A3
+        A3 -->|retry succeeds| A2
+        A2 -->|Projects/threads/turns reconciled| A0
+    end
 
-    Voice --> Focused: Stop/finalize or cancel
-    Voice --> StartingTurn: Send while authoritative idle
-    Voice --> SteeringTurn: Steer while authoritative active
+    subgraph OP["Outbound operation"]
+        O0["No pending mutation"]
+        O1["Starting turn"]
+        O2["Steering turn"]
+        O3["Interrupting"]
+        O4["Unknown acceptance"]
+        O0 -->|turn/start| O1
+        O0 -->|turn/steer + exact expectedTurnId| O2
+        O0 -->|turn/interrupt + exact turnId| O3
+        O1 -->|accepted/rejected| O0
+        O2 -->|accepted/rejected| O0
+        O3 -->|authoritative turn/completed| O0
+        O1 -->|connection ambiguity| O4
+        O2 -->|connection ambiguity| O4
+        O3 -->|connection ambiguity| O4
+        O4 -->|authoritative reconciliation| O0
+    end
 
-    StartingTurn --> Active: turn/start accepted
-    SteeringTurn --> Active: turn/steer accepted + expected turn identity
-    Active --> Focused: turn completed
-    Active --> Interrupting: Stop
-    Interrupting --> Focused: turn/interrupt accepted
+    subgraph REQUESTS["Blocking structured requests"]
+        Q0["None"]
+        Q1["Command/file/permission/MCP approval"]
+        Q2["Tool user input"]
+        Q3["Multiple blocking requests"]
+        Q0 -->|request arrives| Q1
+        Q0 -->|input request arrives| Q2
+        Q1 -->|input also arrives| Q3
+        Q2 -->|approval also arrives| Q3
+        Q1 -->|resolved| Q0
+        Q2 -->|resolved| Q0
+        Q3 -->|all resolved| Q0
+    end
 
-    Viewing --> Resuming: status notLoaded / open thread
-    Resuming --> Viewing: authoritative loaded state restored
-    Viewing --> Reconciling: authority lost
-    Focused --> Reconciling: authority lost
-    Reconciling --> Viewing: authoritative state restored
-    Reconciling --> SystemError: authoritative systemError
+    subgraph ASR["Dealer-local ASR"]
+        S0["Idle"]
+        S1["Capturing / receiving audio"]
+        S2["Recognizing locally"]
+        S3["Reviewable transcript"]
+        S0 -->|voice start| S1
+        S1 -->|finalize| S2
+        S2 -->|success| S3
+        S3 -->|insert editable text| S0
+        S1 -->|cancel/error| S0
+        S2 -->|cancel/error| S0
+    end
+
+    A0 -. enables safe mutation with exact prerequisites .-> O0
+    A1 -. disables unsafe mutation; draft remains editable .-> U1
+    A2 -. disables unsafe mutation; reconciles .-> O4
+    Q1 -. draft editable; Steer disabled .-> U1
+    Q2 -. draft editable; Steer disabled .-> U1
+    Q3 -. draft editable; Steer disabled .-> U1
+    S3 -. text only, never raw audio .-> U1

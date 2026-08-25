@@ -1,219 +1,157 @@
 # Dealer UI Design Record
 
-**Status:** Accepted pre-SPEC design input; non-normative until reconciled into `SPEC.md` / focused SPEC files  
-**Date:** 2026-08-25  
-**Scope:** Dealer Android client UI/UX discovered with the user before normative SPEC refinement
+**Status:** Accepted design source; normative behavior reconciled into `SPEC/dealer-ui.md`  
+**Date:** 2026-08-26  
+**Scope:** Dealer Android client product/UI decisions
 
-This document freezes the product/UI decisions reached during the Dealer design exploration. It intentionally does **not** modify the specification hierarchy. The next SPEC refinement should reconcile these decisions against current Codex app-server behavior and existing Poker-Dealer architecture.
+This document preserves the accepted design intent. It is non-normative. `SPEC/dealer-ui.md` governs behavior, protocol mapping, recovery, and MVP boundaries.
 
 ## 1. Product mental model
 
-Dealer should feel like a normal mobile messaging application rather than an engineering diagnostics console.
+Dealer feels like a normal mobile messaging application rather than an engineering diagnostics console.
 
-Primary navigation uses three bottom destinations:
+Primary navigation:
 
-1. **Chats** — the human-attention/inbox surface for a curated subset of Codex threads.
-2. **Workspaces** — Codex Project browsing/management plus all threads belonging to the selected Project.
+1. **Chats** — Dealer-curated human-attention subset.
+2. **Workspaces** — official Codex Projects and their threads.
 3. **Settings** — Tailscale, Codex host, Poker, ASR, and general configuration.
 
-Opening a thread from Chats or Workspaces pushes the **Chat** screen above the bottom navigation.
+Opening a thread pushes Chat above the bottom navigation.
 
-## 2. First-run / setup flow
+## 2. Setup
 
-The accepted conceptual flow has four pages:
+Conceptual first run:
 
-1. **Welcome / Tailscale**
-   - Welcome to Dealer.
-   - User signs Dealer into Tailscale.
-   - The primary action opens the Tailscale login flow.
+1. Tailscale
+2. Codex host
+3. Poker
+4. Complete
 
-2. **Choose Codex host**
-   - Shown after Tailscale login succeeds.
-   - Dealer lists reachable/known Tailscale nodes with basic node/address/reachability information.
-   - Selecting a candidate begins host authentication/trust establishment.
-   - Host authentication may request username/password when required and should hide TOFU/key-management mechanics from ordinary user copy.
-   - User may go back/change Tailscale account.
-
-3. **Connect Poker**
-   - Connect the Rokid client to Dealer.
-   - Exact CXR connection/pairing UX is **deferred to CXR qualification**; do not invent it from the legacy transport.
-   - User may skip Poker connection and still use Dealer.
-
-4. **Complete**
-   - Shows successful setup summary and enters the main app.
-
-Settings should reuse the relevant setup components without forcing the full four-step wizard:
-
-- Change Tailscale account -> Tailscale setup, then required host revalidation.
-- Change Codex host -> host setup.
-- Reconnect/re-pair Poker -> Poker setup.
+Poker is optional. Exact Poker/CXR authorization and recovery remain deferred. Settings reuses individual setup components.
 
 ## 3. Chats
 
-Chats is a curated inbox, not the complete Codex thread store.
+- Chats is not the complete thread store.
+- Membership is Dealer-local.
+- Add/Remove from Chats is not `thread/unsubscribe`.
+- Threads group under official Codex Projects.
+- Unassigned threads use a distinct Unassigned group.
+- Poker attachment remains independent from runtime state.
 
-### 3.1 Grouping
+### Runtime visuals
 
-- Threads are grouped under **Codex Projects**.
-- Project groups are collapsible/expandable.
-- A thread may exist in Codex and Workspaces without appearing in Chats.
-- `Add to Chats` / `Remove from Chats` are Dealer-local organization operations and must **not** be confused with Codex `thread/unsubscribe`.
+Normal rows use official Codex state only:
 
-### 3.2 Thread row
+| Official state | Visual |
+|---|---|
+| `notLoaded` | none |
+| `idle` | none |
+| `active`, no waiting flags | blue hourglass |
+| `active + waitingOnApproval` | yellow `?` |
+| `active + waitingOnUserInput` | green `●` |
+| `systemError` | red `!` |
 
-A row should communicate at least:
-
-- Thread name/title.
-- User-facing runtime/work status derived from authoritative Codex app-server state.
-- Poker attachment indicator, independently from runtime status.
-
-Use official Codex app-server thread status semantics as the behavioral source of truth. Current conceptual presentation mapping:
-
-- `idle` -> **Ready**
-- `active` with no waiting flags -> **Working**
-- `active + waitingOnApproval` -> **Approval required**
-- `active + waitingOnUserInput` -> **Waiting for you**
-- `systemError` -> **Error**
-- `notLoaded` -> lifecycle state; normally not promoted as a high-attention label unless operationally relevant
-- Dealer may additionally represent **Unknown** when authoritative status cannot currently be established; Unknown is Dealer-local and not a Codex status.
-
-Poker attachment is orthogonal: a Ready, Working, waiting, or error thread may independently be attached or not attached to Poker.
-
-### 3.3 Thread actions
-
-Long-press / context actions may include:
-
-- Attach / detach to Poker.
-- Remove from Chats.
-
-Protocol-level subscription management must not be exposed under misleading inbox terminology.
+No Ready/Working/Attention text labels are part of the row design.
 
 ## 4. Workspaces
 
-**Accepted decision: Dealer's user-facing Workspace maps to an official Codex Project.**
+Workspace means official Codex Project exactly.
 
-The Workspace screen is the management/browsing surface for the selected Codex Project.
+Workspaces contains:
 
-### 4.1 Project context
+- Project list and selection;
+- official Project metadata and roots;
+- Project management where supported;
+- all Project-assigned threads;
+- an Unassigned threads section that is not a Workspace;
+- thread actions and new-thread creation.
 
-The screen should show the current Project identity and its root/path context. If Codex Projects expose multiple roots, the UI must follow the official Project/root model rather than pretending a Project is always one cwd.
+Workspaces intentionally contains **no folder tree or file-manager navigator**. Roots are read-only/selectable metadata only.
 
-### 4.2 Project contents
+When Project APIs are unsupported, show Projects unavailable; do not substitute cwd-based Workspaces.
 
-The design intent includes a project-root/folder browser with folder creation/rename affordances. Exact filesystem behavior and safety requirements must be grounded in supported Codex app-server filesystem/project APIs during SPEC refinement.
+## 5. New thread
 
-### 4.3 Threads section
+- New thread belongs to the selected official Project.
+- One root is automatic.
+- Multiple roots use a simple root selector.
+- Zero roots inherit app-server cwd defaults.
+- No arbitrary path browser.
+- No named profile chooser.
+- No Dealer Thread Presets.
+- No ordinary Personality or Developer Instructions control.
+- Dealer-created and Dealer-forked threads are added to Chats.
 
-Workspaces shows all relevant Codex threads belonging to the selected Project, not only Dealer-curated Chats.
+## 6. Settings
 
-Context actions:
+Sections:
 
-- Add to Chats (Dealer-local)
-- Rename (`thread/name/set` candidate)
-- Archive (`thread/archive` candidate)
-- Fork (`thread/fork` candidate)
+- Tailscale
+- Codex host
+- Poker
+- ASR
+- General
 
-### 4.4 New thread
+ASR is Dealer-local ONNX recognition for both Dealer and Poker audio sources.
 
-The Workspace screen owns new-thread creation for that Project.
+## 7. Chat MVP
 
-**MVP configuration decision:**
+The supplied ChatGPT Remote Android screenshots remain the visual/interaction baseline for:
 
-- Dealer exposes **no named Codex profile chooser**.
-- Dealer exposes **no Thread Preset concept**.
-- New threads inherit the host's default Codex configuration as resolved by Codex/app-server.
-- Dealer does not implement its own competing config/profile precedence system.
-- The normal creation dialog should therefore remain minimal (for example optional thread name/title plus create action); Project/workspace context already determines the target Project.
+- floating header;
+- timeline;
+- user bubbles;
+- code blocks;
+- composer;
+- add/plugins menu;
+- permissions menu;
+- intelligence/model/speed menu;
+- voice composer;
+- remote-status panel;
+- overflow menu.
 
-## 5. Settings
+Do not copy OpenAI/ChatGPT branding.
 
-Primary sections:
+Intentional departures from the screenshots:
 
-- **Tailscale account** — basic account/network information, logout/change account.
-- **Host** — basic active Codex host information, change host.
-- **Poker** — connection information, reconnect/re-pair entry.
-- **ASR** — speech-input settings; detailed design deferred.
-- **General** — ordinary app preferences.
+- Plan mode omitted from MVP.
+- Voice produces locally recognized editable text; it is not audio upload.
+- Add menu supports image attachment only, not arbitrary documents/audio.
+- Missing request/error/reconnect states follow current Codex protocol, not screenshot extrapolation.
 
-Explicit MVP exclusions:
+## 8. Protocol-driven behavior
 
-- No Thread Presets section.
-- No named Codex config-profile management UI.
-- No ordinary Personality control.
-- No ordinary Developer Instructions editor.
+Normative protocol-driven areas include:
 
-Personality/developer-instruction behavior should be inherited from Codex configuration/instructions unless a future requirement justifies advanced controls.
+- official `ThreadStatus`;
+- `notLoaded` resume lifecycle;
+- Send/Steer/Stop;
+- structured approvals and input;
+- reconnecting/host unavailable;
+- `systemError`;
+- image staging;
+- model/reasoning/service-tier selection;
+- permission profile/policy/reviewer separation;
+- command/file/diff cards;
+- usage freshness.
 
-## 6. Chat MVP
+See `SPEC/dealer-ui.md`.
 
-The MVP Chat screen deliberately uses the supplied **ChatGPT Remote mobile Android UI as the visual/interaction baseline** for the states visible in the reference screenshots.
+## 9. Document mapping
 
-The goal is to reproduce the layout and interaction grammar closely while retaining Poker-Dealer's own architecture and Codex app-server authority model. Do not copy ChatGPT/OpenAI logos, product naming, or trademarked branding.
-
-Observed baseline states:
-
-1. Viewing / collapsed composer
-2. Focused composer + system IME
-3. Add/plugins popover
-4. Permissions popover
-5. Intelligence/model/speed popover
-6. Voice-capture composer
-7. Remote-session status panel
-8. Thread overflow actions
-
-Dealer-local additions to the main Chat surface are deferred from MVP. The overflow menu is the designated place for any future Dealer-specific thread actions, but the MVP should begin from the supplied Remote-menu baseline unless the normative SPEC explicitly requires otherwise.
-
-See `docs/design/dealer-chat-mvp.md` for geometry/state details.
-
-## 7. Protocol-driven states, not screenshot invention
-
-**Accepted decision:** states not fully evidenced by the ChatGPT Remote screenshots must be designed from current Codex app-server protocol/docs and Poker-Dealer invariants, not guessed from screenshots.
-
-This specifically includes:
-
-- Approval cards
-- User-input request cards
-- Reconnecting / host unavailable
-- `notLoaded` -> resume/loading
-- `systemError`
-- Upload progress/failure
-- Nested Model selector
-- Nested Speed/service-tier selector
-- Active-turn Stop behavior
-- Send versus Steer semantics
-- Settings-update rejection/forbidden values
-- Context/usage unavailable or stale
-- File-change/diff cards
-- Command/terminal cards
-
-Where the protocol is insufficient, the SPEC must mark the UI behavior as an explicit product decision or deferred item.
-
-## 8. Codex runtime/config principles established during design
-
-- Official app-server `ThreadStatus` / active flags should replace the Legacy `READY / RUNNING / ATTENTION_REQUIRED` trio as the underlying authoritative runtime model. Legacy-style words may still be presentation labels.
-- `waitingOnApproval` is an active flag under `active`, not a peer of `idle`.
-- `thread/resume` loads/rejoins a stored thread; `thread/read` does not resume it.
-- `thread/unsubscribe` stops a client subscription but does not mean "Remove from Chats" and does not force immediate unload.
-- Permission profile answers **what Codex may access/do**; approval policy answers **when authorization is requested**. They must remain separate semantics even if a compact UI groups them visually.
-- MVP uses only the default Codex configuration surface; Dealer does not expose named profile selection or Dealer Thread Presets.
-
-## 9. Design principles to carry into SPEC
-
-1. **IM mental model:** ordinary messaging UX on top; precise Codex semantics underneath.
-2. **Authoritative protocol state:** never invent runtime state that conflicts with app-server.
-3. **Chats vs Workspaces:** Chats is the human-attention subset; Workspaces is the complete Project management surface.
-4. **Project identity:** Workspace means Codex Project.
-5. **Orthogonal Poker state:** Poker attachment does not redefine Codex runtime state.
-6. **Minimal configuration:** default Codex config in MVP; no profile/preset layer in Dealer.
-7. **Hardware independence:** exact CXR connection UX remains deferred until qualified with real-device evidence.
-8. **Design-before-implementation:** current diagnostics activity is not UI authority.
-
-## 10. Items deliberately left for SPEC refinement
-
-- Exact Project root/folder browser semantics and allowed filesystem mutations.
-- Exact CXR connect/pair/recovery flow.
-- ASR behavior and persistence.
-- Exact Chat approval/input/error/reconnect card designs derived from app-server protocol.
-- Exact Model / reasoning effort / service-tier menus supported by the connected host.
-- Exact overflow-menu MVP contents if Poker-Dealer needs an action beyond the Remote baseline.
-- Durable semantics for Dealer-local Chats membership.
+| Design topic | Normative destination |
+|---|---|
+| Product/navigation | `SPEC/dealer-ui.md` Sections 1–2 |
+| State axes/icons | Sections 3–4 |
+| Setup | Section 5 |
+| Chats | Section 6 |
+| Workspaces | Section 7 |
+| New thread | Section 8 |
+| Settings | Section 9 |
+| Chat/timeline/composer | Sections 10–14 |
+| Requests | Section 15 |
+| Model/Speed/permissions | Sections 16–17 |
+| Upload/voice | Sections 18–20 |
+| Recovery/status | Sections 21–22 |
+| Poker | Sections 23–24 |
+| ASR architecture | `SPEC/asr.md` |

@@ -1,39 +1,40 @@
 # Dealer Chat MVP — ChatGPT Remote Mobile Baseline
 
-**Status:** Accepted pre-SPEC visual/interaction reference; non-normative  
+**Status:** Accepted visual/interaction evidence; behavior is normative in `SPEC/dealer-ui.md`  
 **Visual source:** Eight user-supplied ChatGPT Remote Android screenshots captured 2026-08-25  
 **Reference canvas:** 390 × 956, preserving the supplied 626 × 1536 aspect ratio
 
 ## 1. Source hierarchy
 
-1. Supplied screenshots are the visual source of truth only for states they visibly show.
-2. Current Codex app-server protocol/docs are the behavioral source of truth.
-3. Poker-Dealer invariants govern host-qualified identity, recovery, uncertain mutation handling, and Poker attachment.
-4. Missing states must not be extrapolated as if the screenshots specified them.
+1. `SPEC.md` and `SPEC/dealer-ui.md` are normative.
+2. Supplied screenshots are the visual source of truth only for states they visibly show.
+3. Pinned Codex app-server protocol evidence is the behavioral source for protocol-driven states.
+4. Poker-Dealer correctness invariants govern identity, recovery, uncertain mutation handling, and Poker attachment.
+5. Missing states must not be extrapolated as if the screenshots specified them.
 
-No public pixel-level ChatGPT Remote Figma/component specification was identified during the design exploration; screenshot geometry is therefore a reference rather than an upstream API contract.
+No public pixel-level ChatGPT Remote Figma/component specification was identified. Screenshot geometry is a reference, not an upstream API contract.
 
-## 2. MVP boundary
+## 2. MVP visual boundary
 
-Dealer should closely reproduce the supplied Remote Chat layout and interaction grammar:
+Dealer should closely reproduce:
 
-- Floating thread/context header
-- Conversation timeline
-- Assistant text layout
-- User bubble treatment
-- Code block/copy treatment
-- Collapsed and focused composer
-- Add/plugin menu
-- Permission menu
-- Intelligence/model/speed menu
-- Voice composer
-- Remote-session status panel
-- Thread overflow menu
-- Android keyboard/system chrome integration
+- floating thread/context header;
+- conversation timeline;
+- assistant text layout;
+- user bubble treatment;
+- code block/copy treatment;
+- collapsed and focused composer;
+- add/plugin menu;
+- permission menu;
+- intelligence/model/speed menu;
+- voice composer;
+- remote-session status panel;
+- thread overflow menu;
+- Android keyboard/system chrome integration.
 
 Do not recreate the Android status bar, keyboard, or gesture bar as Dealer UI.
 
-Do not copy ChatGPT/OpenAI logos, product naming, or trademarked branding.
+Do not copy ChatGPT/OpenAI logos, names, or trademark branding.
 
 ## 3. Geometry reference
 
@@ -69,167 +70,148 @@ Approximate dark tokens sampled from screenshots:
 
 Android system sans / Roboto-like typography is the implementation reference; monospace content uses platform monospace/Roboto Mono equivalent.
 
-## 4. Screenshot-supported states
+## 4. Screenshot-supported states and accepted departures
 
 ### S0 — Viewing
 
 - Keyboard hidden.
 - One-row pill composer.
 - Add button, prompt placeholder, microphone.
-- Floating header and timeline remain visible.
+- Floating header and timeline visible.
 
 ### S1 — Focused composer
 
 - Android IME visible.
 - Composer expands.
-- Lower row exposes add, permission indicator, model/intelligence selector, microphone/send affordance.
+- Lower row exposes add, permission, intelligence/model/speed, microphone, and submission affordance.
 
 ### S2 — Add/plugins
 
-Visible:
+The reference screenshot visibly contains Upload photo, Plan mode, and plugins.
 
-- Upload photo
-- Plan mode
-- Plugins section
-- Plugin rows with title + description
-- Scrollable menu
+Dealer MVP intentionally changes this:
+
+- Upload photo remains.
+- Supported plugins/apps may appear.
+- Plan mode is omitted.
+- Arbitrary file/document upload is omitted.
+- Audio upload is omitted.
 
 ### S3 — Permissions
 
-Visible labels:
+The visual sheet is retained, but normative content is grouped as:
 
-- Default permissions
-- Auto-review
-- Read only
-- Full access
-- Custom (`config.toml`)
+- Access Profile;
+- Approval Policy;
+- Approval Reviewer.
 
-Important: these rows do **not** all correspond to one protocol enum. Permission profile, approval policy, and approval reviewer remain separate Codex semantics. Exact mapping must be grounded in the current app-server version during SPEC refinement.
+These are separate protocol concepts, not one enum.
 
 ### S4 — Intelligence/model/speed
 
-Visible:
+The visual hierarchy is retained.
 
-- Low
-- Medium
-- High
-- Extra High
-- Max
-- Ultra
-- Nested Model row
-- Nested Speed row
+Actual options are host-driven:
 
-Nested Model/Speed screens were not supplied. Their contents must come from current host/app-server capabilities rather than screenshot inference.
+- supported reasoning effort;
+- nested Model;
+- nested Speed/service tier.
+
+No screenshot-derived hard-coded option list is normative.
 
 ### S5 — Voice capture
 
-Visible:
+The waveform composer is retained as a visual baseline.
 
-- Waveform composer
-- Stop/finalize control
-- Send control
-- IME still visible in the supplied capture
+Dealer behavior is:
 
-The screenshots do not fully define ASR/recording lifecycle.
+```text
+local recording
+→ Dealer ONNX ASR
+→ editable transcript
+→ text Send or Steer
+```
+
+No raw audio is uploaded to Codex.
 
 ### S6 — Remote-session status
 
-Visible:
+The panel may show:
 
-- Status heading
-- Active remote session
-- Thread ID + copy affordance
-- Directory
-- Context usage
-- Seven-day usage/reset information
+- thread ID;
+- Project;
+- cwd;
+- context/token usage;
+- account rate-limit windows;
+- freshness.
 
-Dealer must mark stale/unknown values when authority is unavailable rather than presenting cached data as live.
+Unavailable/stale is not shown as current or zero.
 
 ### S7 — Thread overflow
 
-Visible:
+Visual baseline:
 
-- Pin
-- Copy session ID
-- Rename
-- Archive
+- pin/add-to-Chats equivalent where appropriate;
+- copy thread ID;
+- rename;
+- archive.
 
-Rename/archive confirmation details are not shown.
+Dealer-specific actions belong here when required, especially Poker attachment.
 
-## 5. Core interaction flow
+## 5. Official runtime icon evidence override
 
-```mermaid
-stateDiagram-v2
-    [*] --> ChatList
-    ChatList --> Viewing: tap thread
-    Viewing --> ChatList: back
-    Viewing --> Focused: tap composer
-    Viewing --> Status: tap remote-status control
-    Viewing --> ThreadMenu: tap overflow
+Normal row status follows `SPEC/dealer-ui.md`:
 
-    Focused --> AddMenu: tap +
-    Focused --> Permissions: tap permission control
-    Focused --> Intelligence: tap model/intelligence
-    Focused --> Voice: tap microphone
-    Focused --> Viewing: dismiss IME
+- idle: no icon;
+- notLoaded: no icon;
+- active/no waiting: blue hourglass;
+- waitingOnApproval: yellow `?`;
+- waitingOnUserInput: green `●`;
+- systemError: red `!`.
 
-    AddMenu --> Focused: select/dismiss
-    Permissions --> Focused: select/dismiss
-    Intelligence --> Focused: select/dismiss
-    Status --> Viewing: dismiss
-    ThreadMenu --> Viewing: select/dismiss
-    Voice --> Focused: finalize/cancel
-```
+The UI does not use Ready/Working/Attention status labels.
 
-Android Back should dismiss the topmost transient surface before leaving the thread.
+## 6. Interaction model
 
-## 6. Codex semantic mapping
+The derived multi-axis diagram is:
 
-The visual composer does not redefine protocol semantics.
+`docs/design/dealer-chat-interaction.mmd`
 
-- `notLoaded` thread: resume/rejoin authoritative runtime before enabling unsafe mutation.
-- Known `idle`: new user submission maps to `turn/start`.
-- Known `active`: any steering behavior must use the official `turn/steer` contract with exact active-turn fencing.
-- Stop/interrupt maps to `turn/interrupt` bound to the exact confirmed turn.
-- Unknown/reconciling state: disable unsafe mutation and preserve the draft until authority is re-established.
+The machine-readable derived summary is:
 
-Settings/model/permission changes must use fields supported by the connected app-server version; Dealer must not maintain lookalike enums that drift from Codex.
+`docs/design/dealer-chat-state-machine.json`
 
-## 7. States explicitly delegated to protocol-driven SPEC work
+They are subordinate to `SPEC/dealer-ui.md`.
 
-The following are required product states but are **not specified by the screenshots**:
+## 7. Missing states
 
-- Approval request cards
-- User-input request cards
-- Reconnecting / host unavailable
-- `notLoaded` resume/loading
-- `systemError`
-- Attachment upload progress/failure
-- Nested Model selector
-- Nested Speed/service-tier selector
-- Active-turn stop state
-- Send versus steer presentation
-- File-change/diff cards
-- Command/terminal cards
-- Settings-update rejection/forbidden values
-- Usage/context unavailable
+Screenshots do not specify:
 
-Design these from current Codex app-server protocol/docs and accepted Poker-Dealer invariants. If the protocol does not answer a UX question, make it an explicit SPEC decision instead of guessing the Remote UI.
+- approval cards;
+- user-input cards;
+- permission-escalation cards;
+- MCP elicitation;
+- reconnecting/host unavailable;
+- `notLoaded` resume/loading;
+- `systemError`;
+- image staging/failure;
+- nested Model;
+- nested Speed;
+- active-turn interrupting;
+- Send versus Steer;
+- settings rejection;
+- stale/unavailable usage;
+- command/terminal cards;
+- file-change/diff cards.
 
-## 8. MVP configuration decision
+These states follow the pinned current app-server protocol plus Poker-Dealer invariants.
 
-Dealer Chat MVP does not introduce a separate Thread Preset/profile system.
+## 8. Responsive implementation direction
 
-- No named Codex profile chooser in Dealer MVP.
-- No Dealer Thread Presets.
-- Threads inherit the host/default Codex configuration as resolved by Codex.
-- Personality and Developer Instructions are not ordinary Dealer controls in MVP.
-
-## 9. Acceptance direction for later implementation
-
-- Preserve the supplied Remote visual hierarchy closely on Fold6 cover and inner displays.
+- Preserve the visual hierarchy across supported Android screen sizes and orientations.
 - Use real Android system IME/chrome.
-- Keep authoritative host-qualified thread/turn identity beneath the IM-style UI.
-- Preserve drafts through reconnect/unknown-acceptance states.
-- Keep Dealer-local Poker/Chats management out of the main Chat surface for MVP unless the normative SPEC explicitly adds an overflow-menu exception.
-- Version-pin this visual baseline; future ChatGPT UI changes do not silently redefine Dealer.
+- Do not encode one specific phone model into layout semantics.
+- Keep host-qualified thread/turn identity underneath the IM-style surface.
+- Preserve drafts through reconnect and unknown acceptance.
+- Keep Poker/Chats management out of the main message surface unless placed in an accepted overflow/context action.
+- This 2026-08-25 visual baseline is version-pinned; future ChatGPT UI changes do not silently redefine Dealer.
