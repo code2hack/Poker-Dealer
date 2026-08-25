@@ -114,8 +114,25 @@ The tested successor baseline includes:
 
 The full verification ledger and per-path provenance are in `docs/provenance/legacy-extraction.md`.
 
-## 8. Live-evidence limitation
+## 8. Fresh real-device evidence
 
-No new real-device smoke is claimed by this closeout. At verification time Spark had no attached ADB device and no installed Android emulator/AVD. The successor debug and Android-test APKs build successfully, but fresh hardware service launch / live Dealer ↔ Codex smoke was not re-executed in this environment.
+Fresh successor validation was executed on 2026-08-25 on a real Android phone against a live Codex app-server `0.149.1` host, with Poker/CXR absent.
 
-Historical Legacy hardware evidence remains evidence only and is not relabelled as a successor run.
+The accepted live evidence proves:
+
+- the diagnostics Activity and foreground Dealer service start on Android and recover after process recreation;
+- the encrypted generic Codex-host profile and strict SSH host-key verification operate on-device;
+- embedded-tailnet host routing can establish the retained Dealer ↔ Codex path without Android `VpnService` ownership;
+- app-server initialize succeeds and the live host session reaches `CONNECTED`;
+- disposable thread creation, attach/control, authoritative read, and `READY` projection operate;
+- reviewed Send is accepted, streams agent output, and clears only the exact accepted draft/action;
+- deliberately replacing the accepted Send's app-server session leads to normal replacement initialization and authoritative reread;
+- the submitted `clientUserMessageId` appears exactly once after reconnect, the existing local user card reconciles to `DELIVERED`, and `turn/start` is not blindly replayed;
+- stale Steer and Interrupt targets are rejected while the exact active-turn targets are accepted;
+- persisted attachments/drafts/reasoning effort and uncertain mutation locks survive Android store recreation without recreating Dealer control claims.
+
+Validation also exposed and fixed an Android ED25519 interoperability defect in the retained JSch path: JSch `2.28.5` now has its matching optional Bouncy Castle `1.85` provider available, and host-key negotiation is restricted to already-pinned key families while `StrictHostKeyChecking=yes` remains mandatory.
+
+Fresh structured-request coverage remains deliberately bounded: a safe `pwd` prompt did not elicit a command approval on app-server `0.149.1`; structured user-input remains qualified only for `0.146.0`; and no artificial file mutation was introduced merely to provoke file approval. The retained automated structured-request suites remain the executable acceptance evidence for those cases.
+
+The complete commands, device fingerprints, live mutation evidence and limitations are recorded in `docs/provenance/legacy-extraction.md`.

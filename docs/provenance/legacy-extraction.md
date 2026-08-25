@@ -1,6 +1,6 @@
 # Legacy Extraction Provenance
 
-**Status:** Repository extraction closeout
+**Status:** Repository extraction + fresh real-device acceptance closeout
 **Successor:** `code2hack/Poker-Dealer`  
 **Migration branch:** `migration/legacy-extraction`  
 **Architecture base / merge base:** `80303aaf568570dad74f244b3ee48ba01efc5fba`
@@ -223,15 +223,107 @@ Production source was searched for:
 
 The audit returned no active obsolete Poker transport, no concrete CXR SDK dependency, no generalized backend adapter, no `apps:poker` dependency, and no personal hardware nickname in active production source. Test/evidence fixtures may retain historical labels.
 
-## 5. Live-environment limitation
+## 5. Fresh real-device acceptance — 2026-08-25
 
-No new real-device claim is made by this extraction closeout.
+Fresh successor acceptance was executed on u4090 after the repository extraction closeout.
 
-At closeout, Spark reported no attached ADB devices and no installed Android emulator/AVD. Therefore the successor debug APK and Android-test APK were built, but a fresh real-device Dealer service launch and Dealer ↔ live Codex host smoke could not be executed in this environment.
+### Devices and live host
 
-This does **not** get rewritten as a pass. Historical Legacy hardware evidence remains historical evidence only. The repository-level successor integration instead uses a scripted real `CodexAppServerSession`/JSON-RPC peer to prove connection replacement, authoritative reread, exact client-message reconciliation, and no blind replay without any Poker/CXR dependency.
+- Dealer device: Samsung `SM-F956N`, Android 16 / API 36, fingerprint `samsung/q6qksx/q6q:16/BP4A.251205.006/F956NKSS4DZG1:user/release-keys`.
+- Attached Rokid evidence target: `RG-glasses`, Android 12 / API 32, fingerprint `Rokid/glasses/glasses:12/SKQ1.240613.001/1.23.009-20260725-150201:user/release-keys`. Dealer was not installed on this device.
+- Codex-host evidence label: u4090. The live daemon reported Codex CLI/app-server `0.149.1`.
+- Dealer used the generic configured Codex-host profile and the embedded-tailnet route. The phone had no usable LAN route to the host during the run.
 
-A real Android-device smoke remains the only environment-dependent acceptance item not newly re-executed here.
+### Repository and install gate
+
+The pre-device gate passed with:
+
+```text
+ANDROID_HOME=/home/code2hack/Android/Sdk
+ANDROID_NDK_HOME=/opt/android-sdk/ndk/23.1.7779620
+./gradlew \
+  :shared:domain:test \
+  :shared:protocol:test \
+  :apps:dealer:testDebugUnitTest \
+  :apps:dealer:assembleDebug \
+  :apps:dealer:assembleDebugAndroidTest \
+  :apps:dealer:verifyEmbeddedTailnetPackaging \
+  :apps:dealer:lintDebug
+BUILD SUCCESSFUL
+```
+
+The explicit NDK path is an environment workaround: `/home/code2hack/Android/Sdk/ndk/23.1.7779620` was an incomplete local SDK installation, while `/opt/android-sdk/ndk/23.1.7779620` was a complete installation of the same NDK version. No product/toolchain upgrade was made for that issue.
+
+The debug APK installed on the phone, `DealerDiagnosticsActivity` cold-launched successfully, and `DealerCoreService` ran as an Android foreground `dataSync` service (`isForeground=true`, notification ID 1701) with no Poker/CXR dependency.
+
+### Validation-driven SSH fix
+
+The first real host connection exposed an Android-specific retained-SSH defect. The stored `known_hosts` pin was an `ssh-ed25519` key whose SHA-256 fingerprint exactly matched the current host ED25519 key, but JSch could not retain ED25519 in its Android host-key proposal because its Java-15 ED25519 verifier is unavailable from the base multi-release-JAR classes on this runtime.
+
+The fix is deliberately narrow and fail-closed:
+
+- keep JSch at the retained `2.28.5` version;
+- add its matching optional `bcprov-jdk18on:1.85` provider so ED25519 verification is available on Android;
+- derive JSch `server_host_key` negotiation from the key families actually present in the pinned `known_hosts` entry;
+- keep `StrictHostKeyChecking=yes`;
+- for RSA pins, permit SHA-2 host signatures only, never legacy SHA-1 `ssh-rsa`;
+- unsupported pinned key types fail before negotiation;
+- retain the underlying JSch host-key failure text in diagnostics.
+
+Unit regression coverage was added for raw ED25519/ECDSA pins, RSA SHA-2-only negotiation, certificate-authority pins, and unsupported-key fail-closed behavior.
+
+### Live Dealer ↔ Codex acceptance
+
+The opt-in Android instrumentation harness `DealerRealDeviceAcceptanceTest` uses the actual Android embedded-tailnet, encrypted host profile, SSH implementation, daemon/proxy, WebSocket/app-server connection, and successor `DealerCore`. It never embeds credential material.
+
+The final live run passed:
+
+```text
+DealerRealDeviceAcceptanceTest
+OK (1 test)
+Time: 52.351s
+```
+
+Observed/verified behavior:
+
+- encrypted host-profile credential round-trip succeeded through the production Android Keystore store;
+- embedded tailnet reached `CONNECTED` as `dealer-android`;
+- strict pinned SSH connected over `SSH_EMBEDDED_TSNET`;
+- Codex app-server initialized and reported `0.149.1`;
+- a disposable thread was created as `READY`, attached, and Dealer control was held;
+- a reviewed Send invoked the retained `turn/start` path and became `ACCEPTED`; the exact accepted draft was cleared;
+- streaming produced a non-empty agent card;
+- the live app-server session was deliberately closed after acceptance;
+- a replacement initialized session connected;
+- authoritative reread found exactly one user message with the submitted `clientUserMessageId`;
+- the existing local user card reconciled to `DELIVERED` with one state-card identity and no duplicate input/replayed `turn/start`;
+- stale Steer targeting was `REJECTED`, while Steer against the exact active turn was `ACCEPTED`;
+- stale Interrupt targeting was `REJECTED`, while Interrupt against the exact active turn was `ACCEPTED` and the thread returned to `READY`.
+
+Safe live limitations are explicit rather than weakened into artificial passes:
+
+- a benign `pwd` prompt did not elicit a command-approval request on the live 0.149.1 host, so command approval retains automated executable evidence but no fresh live approval response;
+- structured user-input live handling remains version-qualified to app-server `0.146.0`; the connected app-server was `0.149.1`, so this request type was not treated as qualified live coverage;
+- file approval was not deliberately manufactured because doing so would require an unnecessary live source/workspace mutation. Automated structured file-approval coverage remains green.
+
+### Android lifecycle and persistence
+
+On the same phone:
+
+- `HostConnectionProfileStoreTest` passed 1/1 using the real Android Keystore;
+- `ThreadAttachmentStoreTest` passed 6/6, including durable drafts, host-qualified attachments, reasoning effort, uncertain Send/Interrupt locks surviving recreation without replay, and exact purge behavior;
+- backgrounding the Activity preserved the same Dealer process and foreground service;
+- returning to the Activity was a HOT launch with the service still running;
+- a deliberate force-stop removed the Dealer process, and a subsequent COLD launch created a new process and restarted the foreground service;
+- the embedded tailnet re-established after process recreation; u4090 observed the node active after both direct and relayed recovery paths.
+
+### Poker/CXR negative evidence
+
+- Dealer was not installed on the attached Rokid device;
+- no phone TCP listener existed on port `39817`;
+- active production source contains no Legacy Poker NSD/socket/pairing/PAKE/pinned-mTLS implementation;
+- active production source contains no concrete CXR/Rokid SDK imports and no `:apps:poker` dependency;
+- all Dealer ↔ Codex live acceptance above succeeded without Poker or a CXR session.
 
 ## 6. Deviations from the pinned donor
 
@@ -242,6 +334,7 @@ A real Android-device smoke remains the only environment-dependent acceptance it
 5. **Dealer service carved:** the mixed Legacy `DealerConnectionService.kt` is replaced by smaller successor-owned Codex coordinators plus a minimal Android host.
 6. **Poker transport replaced by seam:** no Legacy transport and no concrete CXR implementation is imported; only a transport-neutral project seam exists.
 7. **Native labels generalized:** embedded-tailnet source was first imported byte-identically, then the device hostname/build log label were generalized without changing route/tunnel behavior.
+8. **Android ED25519 provider:** fresh device validation showed JSch 2.28.5 could not verify a pinned ED25519 host key on the Android runtime without its optional provider. `bcprov-jdk18on:1.85` was added at the same JSch-matched version, and host-key negotiation is now constrained to already-pinned key families while strict verification remains enabled.
 
 ## 7. Commit lineage
 
@@ -280,4 +373,4 @@ Repository extraction is complete:
 - Dealer UI remains free for later Open Design redesign;
 - imported/adapted/deferred/dropped slices and deviations are recorded above.
 
-The only unexecuted environment-dependent evidence is a fresh real Android-device smoke because no ADB target or emulator was available at closeout.
+Fresh real Android-device acceptance is now complete for the retained Dealer ↔ Codex path, including a controlled replacement-session/no-blind-replay exercise, exact-turn Steer and Interrupt, Android lifecycle recovery, and strict pinned-SSH connectivity. The structured-request live limitations above remain intentionally bounded and retain green automated executable evidence.

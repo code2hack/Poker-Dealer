@@ -1,7 +1,7 @@
 # Legacy Extraction Plan
 
 **Proposed path:** `SPEC/migrations/legacy-extraction.md`  
-**Status:** Repository extraction completed on 2026-08-25; no new real-device smoke claimed
+**Status:** Repository extraction and fresh real-device Dealer ↔ Codex acceptance completed on 2026-08-25
 **Successor repository:** `code2hack/Poker-Dealer`  
 **Donor repository:** `code2hack/Poker-Dealer-Legacy`  
 **Pinned donor commit:** `0a12901f58abf7cf7324bd92e876f4423f1cbeaa`  
@@ -1149,7 +1149,7 @@ Legacy extraction is complete only when all of the following are true:
 
 ### Dealer
 
-- [x] Dealer builds as an Android client whose retained core runs with the no-op Poker boundary; no Poker/CXR dependency is required. A fresh physical-device launch was not re-executed because no ADB target/emulator was available at closeout.
+- [x] Dealer builds and runs as an Android client whose retained core operates with the no-op Poker boundary; fresh physical-device validation proved Activity/service startup, strict SSH + embedded-tailnet Codex connectivity, thread creation/read/control, reviewed Send + streaming, replacement-session reconciliation with exactly one authoritative `clientUserMessageId`, stale/exact Steer and Interrupt fencing, and Android lifecycle recovery with no Poker/CXR dependency.
 - [x] Dealer owns durable attachments/drafts/projection as specified.
 - [x] Codex connectivity/recovery survives the extraction.
 - [x] Old Poker transport is not required for Dealer startup or Codex use.
