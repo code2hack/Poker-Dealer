@@ -290,6 +290,7 @@ Observed/verified behavior:
 - embedded tailnet reached `CONNECTED` as `dealer-android`;
 - strict pinned SSH connected over `SSH_EMBEDDED_TSNET`;
 - Codex app-server initialized and reported `0.149.1`;
+- each successful live host connection executed the production `onHostConnected() → refreshThreads(hostId)` discovery/list path; the run did not emit a separate discovery row count, while the retained `HostThreadDiscovery` fixture suite remained green;
 - a disposable thread was created as `READY`, attached, and Dealer control was held;
 - a reviewed Send invoked the retained `turn/start` path and became `ACCEPTED`; the exact accepted draft was cleared;
 - streaming produced a non-empty agent card;

@@ -124,6 +124,7 @@ The accepted live evidence proves:
 - the encrypted generic Codex-host profile and strict SSH host-key verification operate on-device;
 - embedded-tailnet host routing can establish the retained Dealer ↔ Codex path without Android `VpnService` ownership;
 - app-server initialize succeeds and the live host session reaches `CONNECTED`;
+- each successful live host connection executes the production `onHostConnected() → refreshThreads(hostId)` discovery/list path; the run did not record a separate discovery row count, and the retained `HostThreadDiscovery` executable fixture suite remains green;
 - disposable thread creation, attach/control, authoritative read, and `READY` projection operate;
 - reviewed Send is accepted, streams agent output, and clears only the exact accepted draft/action;
 - deliberately replacing the accepted Send's app-server session leads to normal replacement initialization and authoritative reread;
